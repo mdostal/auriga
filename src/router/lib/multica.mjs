@@ -43,6 +43,17 @@ export function listAllIssues(projectIds) {
   return all;
 }
 
+// Workspace label id -> name map (labels are workspace entities; an issue may
+// reference them by id). Used by the planning lane to match seed/planned labels
+// by NAME regardless of how the issue JSON encodes its labels.
+export function listLabels() {
+  const res = run(['label', 'list', '--output', 'json']);
+  const arr = Array.isArray(res) ? res : (res && res.labels) || [];
+  const map = {};
+  for (const l of arr) if (l && l.id) map[l.id] = l.name;
+  return map;
+}
+
 export function issueRuns(identifier) {
   try {
     const res = run(['issue', 'runs', identifier, '--output', 'json']);

@@ -115,11 +115,15 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
 
   // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set.
+  // opts.buildEligible (optional) lets the caller exclude tickets that must NOT
+  // build here — SEED tickets (they go to the planning lane) and EPIC containers
+  // (only their story sub-issues build). Default keeps every candidate (back-compat).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
     .filter((i) => !i.assignee_id)
     .filter((i) => !isSmokeScratch(i.title))
-    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
+    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
+    .filter((i) => (opts.buildEligible ? opts.buildEligible(i) : true));
 
   // Stable ordering: by project scan order, then by issue number ascending
   // (older/foundational tickets first).

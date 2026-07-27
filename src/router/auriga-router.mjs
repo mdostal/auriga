@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import * as mca from './lib/multica.mjs';
+import * as planning from './lib/planning.mjs';
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -78,14 +79,45 @@ async function cycle() {
   const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
+
+  // Planning context: label id->name map + which issues are parents (have
+  // sub-issues). Used to tell un-planned SEED tickets from planned STORY tickets.
+  let labelMap = {};
+  try { labelMap = mca.listLabels(); } catch (e) { log('label_list_error', { error: e.message }); }
+  const planCtx = planning.buildPlanningContext(issues, cfg, labelMap);
+  const seedTodos = todo.filter((i) => planning.classifyPlanningRole(i, planCtx) === 'seed');
+
   log('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
+    seedTodos: seedTodos.length,
     inflight,
     runtimeInflight,
   });
 
   const blockedRuntimes = new Set();
+
+  // ---- PLANNING LANE: route un-planned SEED tickets to Minerva ----
+  // A raw ticket is a SEED (labeled idea/needs-plan, or an unmarked top-level
+  // ticket when PLANNING.seedFallback is on). Route it to the planning agent
+  // (minerva-dev), which runs plugin-hive kickoff+plan and files PLANNED stories
+  // back as sub-issues. minerva-plan exit 2 (parked on a real strategic gate) is
+  // escalated AGENT-SIDE: minerva-dev comments the open questions and sets the
+  // seed to `blocked`, which drops it from the todo pool so it is never silently
+  // re-routed — it waits for a human / Consus to resolve the gate.
+  const seedPicks = planning.selectPlanningAssignments(issues, cfg, inflight, planCtx, {});
+  for (const s of seedPicks) {
+    if (assignedThisProcess >= MAX_ASSIGN) break;
+    log('plan_route', { identifier: s.identifier, agent: s.agent, lane: s.lane, role: s.role, applied: !DRY });
+    if (DRY) continue;
+    try {
+      mca.assignIssue(s.identifier, s.agent);
+      assignedThisProcess++;
+      inflight[s.agent] = (inflight[s.agent] || 0) + 1;
+    } catch (e) {
+      log('plan_assign_error', { identifier: s.identifier, agent: s.agent, error: e.message });
+    }
+  }
 
   // ---- zombie recovery ----
   if (!NO_ZOMBIE) {
@@ -119,6 +151,9 @@ async function cycle() {
   const picks = core.selectAssignments(issues, cfg, inflight, {
     blockedRuntimes,
     maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
+    // Build lane only takes PLANNED stories / unmarked tickets — never SEEDs
+    // (routed above to planning) or EPIC containers (only their stories build).
+    buildEligible: (i) => planning.isBuildEligible(i, planCtx),
   });
 
   for (const p of picks) {

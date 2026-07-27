@@ -27,6 +27,17 @@ export const AGENTS = {
     maxInflight: 3,
     repo: 'mdostal/heimdall',
   },
+  // PLANNING lane agent. Runs plugin-hive kickoff+plan headlessly (via
+  // `minerva-plan`) on an assigned SEED ticket and files dependency-ordered
+  // PLANNED stories back as sub-issues. Plans only — it never builds. Claude
+  // runtime, so drained sparingly (maxInflight 1) like consus-dev.
+  'minerva-dev': {
+    id: '07208ea2-3d2f-455d-a07c-60ab56c26e5c',
+    runtime: 'claude', // claude-sonnet-5 — spare the Claude weekly ceiling
+    maxInflight: 1, // sparing: at most one planning run in flight
+    repo: 'mdostal/minerva',
+    role: 'planning',
+  },
 };
 
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
@@ -89,4 +100,25 @@ export const CAPS = {
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
   verifyDelayMs: 6000, // wait after assign before checking a run started
+};
+
+// PLANNING LANE config. A raw/un-planned ticket is a SEED; the router routes it
+// to `agent` (minerva-dev), which runs plugin-hive kickoff+plan and files the
+// PLANNED stories back as sub-issues. Only those stories then reach a dev BUILD
+// lane (where the dev agent runs plugin-hive /hive:execute + /hive:review +
+// /hive:test). See lib/planning.mjs for the full convention + heuristics.
+//
+//   seedLabels    a top-level ticket carrying one of these names is a SEED.
+//   plannedLabels a ticket carrying one of these is a planned epic/story marker.
+//   seedFallback  when true, an UNMARKED childless top-level ticket is also
+//                 treated as a seed. Default FALSE so the running dev board is
+//                 never hijacked — only explicitly-marked seeds get planned.
+//   maxPerCycle   at most this many seeds routed to planning per cycle (Claude
+//                 runtime is sparing).
+export const PLANNING = {
+  agent: 'minerva-dev',
+  seedLabels: ['idea', 'needs-plan', 'consus-idea'],
+  plannedLabels: ['planned', 'epic', 'story'],
+  seedFallback: false,
+  maxPerCycle: 1,
 };
