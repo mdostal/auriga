@@ -38,12 +38,28 @@ export const AGENTS = {
     repo: 'mdostal/minerva',
     role: 'planning',
   },
+  // ALIGNED build lane for Mnemosyne (memory god). Claude runtime; clones
+  // mdostal/mnemosyne from the Mnemosyne project resource. Runs plugin-hive
+  // /hive:execute + review + test on PLANNED stories, pushes feat/* branches.
+  'mnemosyne-dev': {
+    id: '4dca0020-27c8-4695-b7c7-a56fc2df2f08',
+    runtime: 'claude', // claude-sonnet-5 — aligned repo
+    maxInflight: 2,
+    repo: 'mdostal/mnemosyne',
+  },
+  // ALIGNED build lane for Votum (decision-approval / quorum god).
+  'votum-dev': {
+    id: '94e096ea-d2c1-4084-898c-4174e3285d0d',
+    runtime: 'claude', // claude-sonnet-5 — aligned repo
+    maxInflight: 2,
+    repo: 'mdostal/votum',
+  },
 };
 
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
 // so cap the whole runtime to avoid single-runtime contention collapse.
 export const RUNTIME_CAP = {
-  claude: 2,
+  claude: 3, // was 2; +1 headroom so an aligned Mnemosyne/Votum build can run alongside consus+minerva
   opencode: 3,
   codex: 4,
 };
@@ -70,10 +86,12 @@ export const PROJECT_NAMES = {
   '7dcbb8d1-e53e-4ac4-bfa5-2016c223bd32': 'House Hunting',
   '1001f225-9c42-4b00-b50a-d16cd06fe181': 'Gig Radar',
   '282343e2-b741-4438-bc80-b93c34819a96': 'Consus',        // -> consus-dev (Claude) LAST, sparing
+  '915ec7de-f13c-4bf3-b666-1f2d7d25ce16': 'Mnemosyne',     // -> mnemosyne-dev (Claude, aligned repo)
+  '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf': 'Votum',         // -> votum-dev (Claude, aligned repo)
 };
 
 // All project IDs the router scans.
-export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96']; // ALIGNED-ONLY overnight (Auriga/Heimdall/Consus); the 14 unaligned projects need agents+repos (Mathew AM decision) before their tickets do real work
+export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', '915ec7de-f13c-4bf3-b666-1f2d7d25ce16', '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf']; // ALIGNED-ONLY overnight (Auriga/Heimdall/Consus); the 14 unaligned projects need agents+repos (Mathew AM decision) before their tickets do real work
 
 // Project -> ordered candidate agent lanes.
 // Aligned lanes (agent repo matches the project) are preferred and listed first.
@@ -82,12 +100,16 @@ const CONSUS = '282343e2-b741-4438-bc80-b93c34819a96';
 const HEIMDALL = '8cb0298a-8a45-45c2-8d09-bc219e2d8a82';
 const AURIGA = 'd78a9f5d-8792-45e8-89e0-bd7b916564ca';
 const MINERVA = '6327fdaf-789e-4290-ab41-1421957b55c6';
+const MNEMOSYNE = '915ec7de-f13c-4bf3-b666-1f2d7d25ce16';
+const VOTUM = '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf';
 
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
   [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
   [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
   [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
+  [MNEMOSYNE]: ['mnemosyne-dev'], // aligned repo mdostal/mnemosyne (Claude)
+  [VOTUM]: ['votum-dev'], // aligned repo mdostal/votum (Claude)
 };
 
 // Fallback lane for every other project: spread across the two Codex agents.
@@ -98,7 +120,12 @@ export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip
   perCycleTotal: 5,
   cycleMs: 75000,
-  zombieStaleMs: 20 * 60 * 1000, // 20 min
+  zombieStaleMs: 45 * 60 * 1000, // 45 min. RAISED from 20 min (2026-07-27): a real plugin-hive
+  // kickoff+plan on the PLANNING lane (minerva-dev) legitimately runs ~20-30 min, so the old 20-min
+  // threshold classified a still-running plan as "run-stale" and reran it right as it completed —
+  // killing the task before minerva-plan could file its stories, an infinite rerun loop that never
+  // reached filing. 45 min clears a real plan with headroom. (Build lanes recover more slowly as a
+  // side effect; acceptable. A cleaner follow-up is a planning-lane-specific threshold.)
   verifyDelayMs: 6000, // wait after assign before checking a run started
 };
 
