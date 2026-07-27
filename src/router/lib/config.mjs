@@ -78,6 +78,7 @@ export const PROJECT_NAMES = {
   '1759cd74-1723-4dfb-82cf-8b2696bf080b': 'Argus',
   '4fcccf2f-cf19-46e1-a5f0-8303984e423a': 'Vesta',
   '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf': 'Votum',
+  'aeb1033d-4ab9-4da6-b798-8dc569e75cc9': 'Tools',         // seeds only -> planning lane (minerva-dev); planned stories build once aligned agents exist
   'fcdf7fdf-9b87-4c4a-9a4c-e86471a0b2d9': 'Hellsing',
   '66963847-df7e-46e8-b51a-82eebdf82208': 'Stimula',
   'a0b04ced-5ad6-4249-bb1a-115b88c532d7': 'CADEX',
@@ -91,7 +92,7 @@ export const PROJECT_NAMES = {
 };
 
 // All project IDs the router scans.
-export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', '915ec7de-f13c-4bf3-b666-1f2d7d25ce16', '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf']; // ALIGNED-ONLY overnight (Auriga/Heimdall/Consus); the 14 unaligned projects need agents+repos (Mathew AM decision) before their tickets do real work
+export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', '915ec7de-f13c-4bf3-b666-1f2d7d25ce16', '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf', 'aeb1033d-4ab9-4da6-b798-8dc569e75cc9']; // ALIGNED-ONLY overnight (Auriga/Heimdall/Consus); the 14 unaligned projects need agents+repos (Mathew AM decision) before their tickets do real work
 
 // Project -> ordered candidate agent lanes.
 // Aligned lanes (agent repo matches the project) are preferred and listed first.
