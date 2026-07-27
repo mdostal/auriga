@@ -29,12 +29,18 @@ export const AGENTS = {
   },
   // PLANNING lane agent. Runs plugin-hive kickoff+plan headlessly (via
   // `minerva-plan`) on an assigned SEED ticket and files dependency-ordered
-  // PLANNED stories back as sub-issues. Plans only — it never builds. Claude
-  // runtime, so drained sparingly (maxInflight 1) like consus-dev.
+  // PLANNED stories back as sub-issues. Plans only — it never builds.
+  // PARALLEL PLANNING (2026-07-27): maxInflight raised 1->3 so multiple queued
+  // seeds plan CONCURRENTLY instead of serially behind one plan. This is safe on
+  // the single claude runtime because the daemon runs each task in its OWN git
+  // worktree + workdir (branch agent/minerva-dev/<task-id>) and minerva-dev's
+  // daemon-side max_concurrent_tasks is already 4 (global daemon cap 10). Bounded
+  // by RUNTIME_CAP.claude below and PLANNING.maxPerCycle — account usage is the
+  // real ceiling, so 3 concurrent plans is the deliberate cap (not more).
   'minerva-dev': {
     id: '07208ea2-3d2f-455d-a07c-60ab56c26e5c',
     runtime: 'claude', // claude-sonnet-5 — spare the Claude weekly ceiling
-    maxInflight: 1, // sparing: at most one planning run in flight
+    maxInflight: 3, // parallel planning: up to 3 concurrent plans (see block comment)
     repo: 'mdostal/minerva',
     role: 'planning',
   },
@@ -59,7 +65,7 @@ export const AGENTS = {
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
 // so cap the whole runtime to avoid single-runtime contention collapse.
 export const RUNTIME_CAP = {
-  claude: 3, // was 2; +1 headroom so an aligned Mnemosyne/Votum build can run alongside consus+minerva
+  claude: 4, // was 3; +1 for the PARALLEL PLANNING lane: up to 3 concurrent minerva-dev plans + 1 headroom slot for an aligned build (consus/mnemosyne/votum). Global daemon cap is 10 so there is daemon room to spare; kept deliberately modest (only +1) because account usage — not CPU — is the real ceiling. Planning runs FIRST each cycle so it wins slots when seeds are queued; when the planning queue is idle the whole cap flows to builds. If Mathew wants guaranteed 3-wide planning ALONGSIDE builds, raise to 5. Back off if real ERR-level 429/quota/overloaded appears in the daemon log.
   opencode: 3,
   codex: 4,
 };
@@ -141,12 +147,14 @@ export const CAPS = {
 //   seedFallback  when true, an UNMARKED childless top-level ticket is also
 //                 treated as a seed. Default FALSE so the running dev board is
 //                 never hijacked — only explicitly-marked seeds get planned.
-//   maxPerCycle   at most this many seeds routed to planning per cycle (Claude
-//                 runtime is sparing).
+//   maxPerCycle   at most this many seeds routed to planning per cycle. Raised
+//                 1->3 (2026-07-27) for PARALLEL PLANNING: queued seeds now plan
+//                 CONCURRENTLY (up to 3) instead of serially behind one plan.
+//                 Bounded by minerva-dev.maxInflight (3) and RUNTIME_CAP.claude (4).
 export const PLANNING = {
   agent: 'minerva-dev',
   seedLabels: ['idea', 'needs-plan', 'consus-idea'],
   plannedLabels: ['planned', 'epic', 'story'],
   seedFallback: false,
-  maxPerCycle: 1,
+  maxPerCycle: 3,
 };
