@@ -43,8 +43,19 @@ export function latestRun(runs = []) {
   })[0];
 }
 
-// In-flight count per agent id. An issue is "in flight" for an agent when it is
-// assigned to that agent AND either actively running or an assigned todo (queued).
+// In-flight count per agent id. An issue is "in flight" for an agent ONLY when it
+// is assigned to that agent AND actively running (in_progress / running).
+//
+// FIX 2026-07-28 (audit P0 "master switch"): previously this also counted assigned
+// `todo`s as in-flight ("|| st === 'todo'"). That deadlocked the whole router:
+// because assignee-mutation does not reliably enqueue a run (the dispatch dead-zone),
+// assigned-todos accumulate on the board forever and never transition to running.
+// Their phantom count then exceeds every RUNTIME_CAP (e.g. codex 12 > 4, claude 5 > 4)
+// while real in_progress is 0 — so selectAssignments finds no agent with capacity and
+// the router dispatches NOTHING, for hours, silently. Counting only truly-running
+// issues makes real inflight ~0, freeing every lane. The per-cycle batch caps
+// (CAPS.perCycleTotal / perCyclePerAgent) prevent over-assignment during the brief
+// assign->run gap, and each assign is immediately re-run (enqueued) by the cycle loop.
 export function computeInflight(issues, agents) {
   const idToName = {};
   for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
@@ -55,7 +66,25 @@ export function computeInflight(issues, agents) {
     const name = idToName[i.assignee_id];
     if (!name) continue;
     const st = (i.status || '').toLowerCase();
-    if (ACTIVE_ISSUE_STATUSES.has(st) || st === 'todo') counts[name] += 1;
+    if (ACTIVE_ISSUE_STATUSES.has(st)) counts[name] += 1;
+  }
+  return counts;
+}
+
+// Count assigned-but-not-running issues per agent (the old "inflight" definition).
+// Not used for capacity — kept for observability so the divergence between real
+// in-flight and the assigned-todo backlog stays visible in the scan log.
+export function computeAssignedQueued(issues, agents) {
+  const idToName = {};
+  for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
+  const counts = {};
+  for (const name of Object.keys(agents)) counts[name] = 0;
+  for (const i of issues) {
+    if (!i.assignee_id) continue;
+    const name = idToName[i.assignee_id];
+    if (!name) continue;
+    const st = (i.status || '').toLowerCase();
+    if (st === 'todo') counts[name] += 1;
   }
   return counts;
 }

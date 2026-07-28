@@ -76,6 +76,10 @@ async function cycle() {
   const issues = mca.listAllIssues(cfg.PROJECT_IDS);
   const inflight = core.computeInflight(issues, cfg.AGENTS);
   const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
+  // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
+  // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
+  // signal that used to hide inside the old inflight number and deadlock the router.
+  const assignedQueued = core.computeAssignedQueued(issues, cfg.AGENTS);
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
   log('scan', {
@@ -83,6 +87,7 @@ async function cycle() {
     todoUnassigned: todo.length,
     inflight,
     runtimeInflight,
+    assignedQueued,
   });
 
   const blockedRuntimes = new Set();
