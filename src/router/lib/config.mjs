@@ -40,7 +40,7 @@ export const AGENTS = {
   'minerva-dev': {
     id: '07208ea2-3d2f-455d-a07c-60ab56c26e5c',
     runtime: 'claude', // claude-sonnet-5 — spare the Claude weekly ceiling
-    maxInflight: 6, // parallel planning: up to 6 concurrent plans (see block comment)
+    maxInflight: 3, // parallel planning: up to 3 concurrent plans (hive-only, single claude runtime; see block comment)
     repo: 'mdostal/minerva',
     role: 'planning',
   },
@@ -65,7 +65,7 @@ export const AGENTS = {
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
 // so cap the whole runtime to avoid single-runtime contention collapse.
 export const RUNTIME_CAP = {
-  claude: 8, // was 4; raised for ~6-wide PARALLEL PLANNING (minerva-dev.maxInflight=6) + ~2 aligned-build headroom slots. NOTE: this is a router-level per-PROVIDER in-flight ceiling shared ACROSS devices (hive + clients-laptop). With 2 claude runtimes online the router spreads these <=8 tasks over both daemons. For true 6-per-device (=12 total) raise to 12 AND ensure per-device distinct Claude ACCOUNTS (account usage — not CPU — is the real ceiling; laptop and hive use DIFFERENT CLAUDE_CODE_OAUTH_TOKENs). Kept modest at 8. Back off if real ERR-level 429/quota/overloaded appears in a daemon log.
+  claude: 4, // HIVE-ONLY (2026-07-27): laptop retired, single claude runtime on hive. 3 concurrent plans (minerva-dev.maxInflight=3) + 1 aligned-build headroom slot. Router-level per-PROVIDER in-flight ceiling; account usage — not CPU — is the real ceiling, so kept usage-aware at 4. Back off if real ERR-level 429/quota/overloaded appears in a daemon log.
   opencode: 3,
   codex: 4,
 };
@@ -156,5 +156,5 @@ export const PLANNING = {
   seedLabels: ['idea', 'needs-plan', 'consus-idea'],
   plannedLabels: ['planned', 'epic', 'story'],
   seedFallback: false,
-  maxPerCycle: 6,
+  maxPerCycle: 3,
 };
