@@ -5,10 +5,10 @@ import * as core from '../lib/core.mjs';
 // Minimal config fixture mirroring lib/config.mjs shape.
 const CFG = {
   AGENTS: {
-    'consus-dev': { id: 'C', runtime: 'claude', maxInflight: 2 },
-    'heimdall-dev': { id: 'H', runtime: 'opencode', maxInflight: 3 },
-    'auriga-dev': { id: 'A', runtime: 'codex', maxInflight: 3 },
-    'heimdall-dev-codex': { id: 'HC', runtime: 'codex', maxInflight: 3 },
+    'consus-dev': { id: 'C', runtime: 'claude', maxInflight: 2, repo: 'mdostal/consus' },
+    'heimdall-dev': { id: 'H', runtime: 'opencode', maxInflight: 3, repo: 'mdostal/heimdall' },
+    'auriga-dev': { id: 'A', runtime: 'codex', maxInflight: 3, repo: 'mdostal/auriga' },
+    'heimdall-dev-codex': { id: 'HC', runtime: 'codex', maxInflight: 3, repo: 'mdostal/heimdall' },
   },
   RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
   PROJECT_LANE: {
@@ -25,6 +25,12 @@ const CFG = {
 
 const todo = (id, project, num, assignee = null, title = 'work') =>
   ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title });
+
+const provisionedRepos = {
+  'mdostal/consus': { ok: true },
+  'mdostal/heimdall': { ok: true },
+  'mdostal/auriga': { ok: true },
+};
 
 test('isSmokeScratch matches smoke/scratch/verification tickets only', () => {
   assert.ok(core.isSmokeScratch('SMOKE: dispatch nurse test'));
@@ -122,6 +128,44 @@ test('blockedRuntimes skips a rate-limited lane', () => {
   const issues = [todo('a1', 'AURIGA', 1)];
   const picks = core.selectAssignments(issues, CFG, {}, { blockedRuntimes: new Set(['codex']) });
   assert.equal(picks.length, 0);
+});
+
+test('repo provisioning gate: provisioned repo dispatches normally', () => {
+  const issues = [todo('a1', 'AURIGA', 1)];
+  const picks = core.selectAssignments(issues, CFG, {}, { repoProvisioning: provisionedRepos });
+  assert.deepEqual(picks.map((p) => p.identifier), ['a1']);
+  assert.deepEqual(core.selectRepoProvisioningBlocks(issues, CFG, provisionedRepos), []);
+});
+
+test('repo provisioning gate: missing repo blocks as needs-repo instead of dispatching', () => {
+  const issues = [todo('a1', 'AURIGA', 1)];
+  const repoProvisioning = {
+    ...provisionedRepos,
+    'mdostal/auriga': { ok: false, state: 'needs-repo', repoPath: '/tmp/missing/auriga', reason: 'missing origin' },
+  };
+
+  const picks = core.selectAssignments(issues, CFG, {}, { repoProvisioning });
+  assert.deepEqual(picks, []);
+
+  const blocks = core.selectRepoProvisioningBlocks(issues, CFG, repoProvisioning);
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].identifier, 'a1');
+  assert.equal(blocks[0].state, 'needs-repo');
+  assert.equal(blocks[0].status, 'blocked');
+  assert.equal(blocks[0].blockedReason, 'needs-repo');
+  assert.deepEqual(blocks[0].repos, ['mdostal/auriga']);
+});
+
+test('repo provisioning gate: default lane can use another provisioned repo', () => {
+  const issues = [todo('j1', 'JANUS', 1)];
+  const repoProvisioning = {
+    ...provisionedRepos,
+    'mdostal/auriga': { ok: false, state: 'needs-repo', repoPath: '/tmp/missing/auriga', reason: 'missing origin' },
+  };
+
+  const picks = core.selectAssignments(issues, CFG, {}, { repoProvisioning });
+  assert.deepEqual(picks.map((p) => p.agent), ['heimdall-dev-codex']);
+  assert.deepEqual(core.selectRepoProvisioningBlocks(issues, CFG, repoProvisioning), []);
 });
 
 test('selection ignores smoke/scratch and assigned/backlog issues', () => {

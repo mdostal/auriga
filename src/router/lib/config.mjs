@@ -19,7 +19,7 @@ export const AGENTS = {
     id: '18d3ce15-3167-46ce-92bd-04e989f5e71d',
     runtime: 'codex', // shares runtime a86c890c with heimdall-dev-codex
     maxInflight: 3,
-    repo: 'mdostal/pantheon-orchestrator',
+    repo: 'mdostal/auriga',
   },
   'heimdall-dev-codex': {
     id: 'e60c0630-761c-4106-aa39-bb3803336e50',

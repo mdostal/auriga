@@ -17,6 +17,9 @@
 //   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG.
 
 import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import * as mca from './lib/multica.mjs';
@@ -32,6 +35,8 @@ const MAX_ASSIGN = parseInt(val('--max-assign', '0'), 10) || Infinity;
 
 const PIDFILE = process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
 const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
+const ROUTER_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_BASE = process.env.AURIGA_REPO_BASE || path.resolve(ROUTER_DIR, '../../..');
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
@@ -70,6 +75,35 @@ function log(event, data) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---- repo provisioning gate ------------------------------------------------
+function repoPathEnvName(repo) {
+  return `AURIGA_REPO_PATH_${repo.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+}
+
+function repoPathForSlug(repo) {
+  const override = process.env[repoPathEnvName(repo)];
+  if (override) return override;
+  return path.join(REPO_BASE, repo.split('/').pop());
+}
+
+function checkRepoProvisioning(repo) {
+  const repoPath = repoPathForSlug(repo);
+  try {
+    const remote = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    return { ok: true, repoPath, remote };
+  } catch (e) {
+    return { ok: false, state: 'needs-repo', repoPath, reason: e.message };
+  }
+}
+
+function checkAgentRepos(agents) {
+  const repos = [...new Set(Object.values(agents).map((a) => a.repo).filter(Boolean))];
+  return Object.fromEntries(repos.map((repo) => [repo, checkRepoProvisioning(repo)]));
+}
+
 // ---- one cycle -------------------------------------------------------------
 async function cycle() {
   const now = Date.now();
@@ -80,6 +114,7 @@ async function cycle() {
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = core.computeAssignedQueued(issues, cfg.AGENTS);
+  const repoProvisioning = checkAgentRepos(cfg.AGENTS);
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
   log('scan', {
@@ -89,6 +124,16 @@ async function cycle() {
     runtimeInflight,
     assignedQueued,
   });
+
+  for (const b of core.selectRepoProvisioningBlocks(issues, cfg, repoProvisioning)) {
+    log('needs_repo', { identifier: b.identifier, lane: b.lane, repos: b.repoProvisioning, applied: !DRY });
+    if (!DRY) {
+      try {
+        mca.setIssueMetadata(b.identifier, 'blocked_reason', b.blockedReason);
+        mca.setIssueStatus(b.identifier, b.status);
+      } catch (e) { log('needs_repo_error', { identifier: b.identifier, error: e.message }); }
+    }
+  }
 
   const blockedRuntimes = new Set();
 
@@ -123,6 +168,7 @@ async function cycle() {
   const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
   const picks = core.selectAssignments(issues, cfg, inflight, {
     blockedRuntimes,
+    repoProvisioning,
     maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
   });
 

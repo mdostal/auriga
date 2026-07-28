@@ -7,6 +7,25 @@ const ACTIVE_RUN_STATUSES = new Set([
 const FAILED_RUN_STATUSES = new Set(['failed', 'error', 'errored', 'cancelled', 'canceled', 'timeout']);
 const ACTIVE_ISSUE_STATUSES = new Set(['in_progress', 'in progress', 'running']);
 
+function candidateIssues(issues, cfg) {
+  return issues
+    .filter((i) => (i.status || '').toLowerCase() === 'todo')
+    .filter((i) => !i.assignee_id)
+    .filter((i) => !isSmokeScratch(i.title))
+    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
+}
+
+function issueLane(issue, cfg) {
+  return cfg.PROJECT_LANE[issue.project_id] || cfg.DEFAULT_LANE;
+}
+
+function repoProvisionedForAgent(name, agents, repoProvisioning) {
+  if (!repoProvisioning) return true;
+  const repo = agents[name]?.repo;
+  if (!repo) return false;
+  return repoProvisioning[repo]?.ok === true;
+}
+
 // Ignore smoke/scratch/verification tickets by title.
 export function isSmokeScratch(title = '') {
   return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
@@ -119,6 +138,7 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
   const lane = cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE;
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
+    && repoProvisionedForAgent(name, cfg.AGENTS, projected.repoProvisioning)
   );
   if (!eligible.length) return null;
   // Prefer lane order but break by lowest projected load.
@@ -141,14 +161,10 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.perCyclePerAgent;
 
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {}, repoProvisioning: opts.repoProvisioning };
 
   // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set.
-  const candidates = issues
-    .filter((i) => (i.status || '').toLowerCase() === 'todo')
-    .filter((i) => !i.assignee_id)
-    .filter((i) => !isSmokeScratch(i.title))
-    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
+  const candidates = candidateIssues(issues, cfg);
 
   // Stable ordering: by project scan order, then by issue number ascending
   // (older/foundational tickets first).
@@ -183,6 +199,32 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     });
   }
   return chosen;
+}
+
+// Find todo issues whose entire target lane is unavailable because no lane
+// agent has a locally provisioned repo with origin.
+export function selectRepoProvisioningBlocks(issues, cfg, repoProvisioning) {
+  if (!repoProvisioning) return [];
+
+  return candidateIssues(issues, cfg)
+    .filter((issue) => {
+      const lane = issueLane(issue, cfg);
+      return lane.length > 0 && !lane.some((name) => repoProvisionedForAgent(name, cfg.AGENTS, repoProvisioning));
+    })
+    .map((issue) => {
+      const repos = [...new Set(issueLane(issue, cfg).map((name) => cfg.AGENTS[name]?.repo).filter(Boolean))];
+      return {
+        identifier: issue.identifier,
+        issueId: issue.id,
+        projectId: issue.project_id,
+        lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
+        state: 'needs-repo',
+        status: 'blocked',
+        blockedReason: 'needs-repo',
+        repos,
+        repoProvisioning: Object.fromEntries(repos.map((repo) => [repo, repoProvisioning[repo] || { ok: false, state: 'needs-repo', reason: 'repo not checked' }])),
+      };
+    });
 }
 
 // Detect zombies among in_progress issues.

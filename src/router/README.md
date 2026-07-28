@@ -23,6 +23,13 @@ node 24 install. Override via env if needed.
 - `auriga-router.mjs` — entrypoint / scan loop.
 - `lib/` — `config.mjs`, `core.mjs`, `multica.mjs`.
 - `test/core.test.mjs` — `npm test`.
+- Repo provisioning gate: before dispatch, the router checks each lane agent's
+  configured repo with `git -C <repo_path> remote get-url origin`. Missing repos
+  or repos without `origin` are not assigned; if every repo in an issue's lane
+  fails that check, the issue is set to `blocked` with metadata
+  `blocked_reason=needs-repo`.
+  `AURIGA_REPO_BASE` defaults to the parent directory of the checked-out plugin
+  repos, and `AURIGA_REPO_PATH_<OWNER>_<REPO>` can override a single repo path.
 - Pidfiles / logs (in `/tmp`, single-instance safety):
   - `/tmp/auriga-router.pid`, `/tmp/auriga-router.log`, `/tmp/auriga-router.jsonl`
   - `/tmp/auriga-supervisor.pid`, `/tmp/auriga-supervisor.log`
