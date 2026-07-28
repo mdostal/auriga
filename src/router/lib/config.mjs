@@ -60,6 +60,24 @@ export const AGENTS = {
     maxInflight: 2,
     repo: 'mdostal/votum',
   },
+  // ALIGNED build lane for the REVIEWER + RELEASER, home = mdostal/auriga (the
+  // in_review review lane + auto-release-on-green live in this repo). Claude
+  // runtime + plugin-hive /hive:execute+review+test — the codex/opencode lanes
+  // cannot run /hive:* (that is why the first reviewer-story dispatch self-blocked
+  // with 'no plugin-hive surface'). Multica agent id
+  // f8678f39-633f-45ef-9b1d-2ac63425877c; the Auriga project now carries a
+  // github_repo resource -> mdostal/auriga so this agent's workdir clones the
+  // right repo. NOTE (still owed): reviewer stories only BUILD once their
+  // plugin-hive .pHive/epics/<epic>/ plan is committed INTO mdostal/auriga —
+  // Minerva's --file-to-multica filed board sub-issues only, not the in-repo
+  // epic plan /hive:execute needs. Also note claude RUNTIME_CAP is tight (see
+  // below); adding this lane may need the cap revisited by the operator.
+  'auriga-build': {
+    id: 'f8678f39-633f-45ef-9b1d-2ac63425877c',
+    runtime: 'claude', // claude-sonnet-5 — aligned repo, plugin-hive at every stage
+    maxInflight: 2,
+    repo: 'mdostal/auriga',
+  },
 };
 
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
@@ -113,7 +131,7 @@ const VOTUM = '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf';
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
   [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
-  [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
+  [AURIGA]: ['auriga-build', 'auriga-dev'], // aligned repo mdostal/auriga: auriga-build (Claude + plugin-hive) preferred for real story builds incl the reviewer+releaser; auriga-dev (Codex, no /hive:*) fallback for non-hive/legacy
   [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
   [MNEMOSYNE]: ['mnemosyne-dev'], // aligned repo mdostal/mnemosyne (Claude)
   [VOTUM]: ['votum-dev'], // aligned repo mdostal/votum (Claude)
