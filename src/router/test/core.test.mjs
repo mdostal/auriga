@@ -42,18 +42,30 @@ test('classifyRun distinguishes active/done/failed', () => {
   assert.equal(core.classifyRun({ status: 'completed', error: 'boom' }, now).failed, true);
 });
 
-test('computeInflight counts assigned in_progress and assigned-todo', () => {
+test('computeInflight counts ONLY assigned+running (not assigned-todo) — P0 deadlock fix', () => {
   const issues = [
-    todo('i1', 'AURIGA', 1, 'A'),                                   // assigned todo -> inflight A
+    todo('i1', 'AURIGA', 1, 'A'),                                   // assigned todo -> NOT inflight (queued, not running)
     { id: 'i2', status: 'in_progress', assignee_id: 'A', title: 'x' }, // running -> inflight A
     { id: 'i3', status: 'in_progress', assignee_id: 'H', title: 'x' }, // running -> inflight H
     todo('i4', 'AURIGA', 2, null),                                  // unassigned -> not counted
     { id: 'i5', status: 'done', assignee_id: 'A', title: 'x' },     // done -> not counted
   ];
   const inflight = core.computeInflight(issues, CFG.AGENTS);
-  assert.equal(inflight['auriga-dev'], 2);
+  assert.equal(inflight['auriga-dev'], 1);  // only i2 (running); i1 assigned-todo no longer inflates this
   assert.equal(inflight['heimdall-dev'], 1);
   assert.equal(inflight['consus-dev'], 0);
+});
+
+test('computeAssignedQueued reports the assigned-todo backlog (observability only)', () => {
+  const issues = [
+    todo('i1', 'AURIGA', 1, 'A'),                                   // assigned todo -> queued A
+    todo('i2', 'AURIGA', 2, 'A'),                                   // assigned todo -> queued A
+    { id: 'i3', status: 'in_progress', assignee_id: 'A', title: 'x' }, // running -> NOT queued
+    todo('i4', 'AURIGA', 3, null),                                  // unassigned -> not counted
+  ];
+  const queued = core.computeAssignedQueued(issues, CFG.AGENTS);
+  assert.equal(queued['auriga-dev'], 2);
+  assert.equal(queued['heimdall-dev'], 0);
 });
 
 test('computeRuntimeInflight aggregates the shared codex runtime', () => {
