@@ -18,6 +18,22 @@ nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
 (`~/Documents/work/dostal/code/auriga/src/router`) and `NODE` to the mise
 node 24 install. Override via env if needed.
 
+## Human-todo filter (priority-1)
+
+Issues labeled `human-todo`, or carrying metadata `waiting_on: <human name>`
+(names configured in `lib/config.mjs` `HUMAN_NAMES`), are excluded from the
+dispatch candidate pool — see `isHumanTodo` in `lib/core.mjs`. This is a
+priority-1 rule: it runs before any lane/capacity logic in
+`selectAssignments`, so these issues never reach an agent. `waiting_on` values
+that don't match a known human name (e.g. an issue identifier like
+`PAN-1234`, meaning "waiting on that dependency") are left in the normal
+dispatch pool.
+
+Excluded issues aren't just dropped — run
+`node ../../scripts/export-human-queue.mjs` (from this directory) or
+`node scripts/export-human-queue.mjs` (from the repo root) to write them to
+`.pHive/human-queue.yaml` for a human to triage.
+
 ## Files / paths
 
 - `auriga-router.mjs` — entrypoint / scan loop.
