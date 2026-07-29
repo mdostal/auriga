@@ -1,0 +1,98 @@
+id: p1-router-capability-routing
+epic: p1-dispatch-throughput
+title: Fix capability-aware routing for hive stories
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Route stories tagged build/implementation/classic-methodology to CLAUDE+plugin-hive lanes ONLY
+  (auriga-build, mnemosyne-dev, votum-dev, minerva-dev). NEVER route to codex/opencode.
+
+  Problem: Build/hive stories currently route to codex agents whose runtime has no callable
+  /hive:execute|review|test. Agent runs then self-blocks (PAN-6636, PAN-6640, PAN-6646).
+
+  Fix: Update DEFAULT_LANE + add PROJECT_LANE entries for 8 unmapped projects.
+
+acceptance_criteria:
+  - "Given a story tagged 'build' OR 'implementation' OR 'classic-methodology'"
+  - "When the Auriga router selects a dispatch lane"
+  - "Then the story routes to a claude+plugin-hive lane (auriga-build, mnemosyne-dev, votum-dev, minerva-dev)"
+  - "And NEVER routes to codex/opencode lanes"
+
+steps:
+  - id: research
+    description: Locate Auriga router config (routing.yaml or routing logic), identify DEFAULT_LANE, map unmapped projects
+    agent: researcher
+  - id: implement
+    description: Update routing rules — fix DEFAULT_LANE, add PROJECT_LANE for Tools/flayr/lct/il/ps/hf/analytics/tree
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Validate routing rules — test story with 'build' label routes to claude+hive lane, NOT codex
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review routing config changes for correctness and completeness
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push routing config changes
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: routing-config
+  key_files:
+    - path: config/routing.yaml
+      purpose: Routing rules config (or similar — research will confirm)
+    - path: src/router/dispatch.ts
+      purpose: Dispatch logic that consumes routing rules
+
+files_to_modify:
+  - file: config/routing.yaml
+    change: Fix DEFAULT_LANE, add PROJECT_LANE entries for 8 unmapped projects
+
+design_decisions:
+  - decision: Route hive stories to claude+plugin-hive lanes exclusively
+    rationale: Codex runtime cannot execute /hive:execute|review|test — routing hive stories there causes self-blocking
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Update routing.yaml comments to explain capability-aware routing logic"
+
+risks:
+  - severity: medium
+    description: Routing rules syntax error could block all dispatch
+    mitigation: Syntax validation tests + canary deployment before full rollout
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R1: Capability-Aware Routing
+      Route stories tagged build/implementation/classic-methodology to claude+plugin-hive lanes ONLY.
+      Fix DEFAULT_LANE + add PROJECT_LANE entries for Tools, flayr, lct, il, ps, hf, analytics, tree.
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      Priority 3 routing rule: hive stories → claude+hive lanes
+      PROJECT_LANE_MAP: Tools/flayr/lct/il/ps/hf/analytics/tree → auriga-build
+
+metric:
+  applies: true
+  name: routing.hive_stories_to_codex_count
+  direction: down
+  unit: stories
+  baseline: ">0 (unknown exact count)"
+  target: "0"
+  window: "validation run"
+  source:
+    kind: manual
+    ref: "Auriga dispatch logs — filter for hive-labeled stories routed to codex lanes"
+  verify_at: "integrate"
+  owner: developer
