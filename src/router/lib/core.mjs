@@ -185,6 +185,42 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   return chosen;
 }
 
+// Pure-code state-machine: advance in_progress issues whose latest run
+// completed successfully to in_review. No agent call — a done, non-failed run
+// (see classifyRun) is the only signal. Only considers issues currently
+// in_progress, so a re-scan after the transition naturally stops re-firing
+// (the issue is no longer in the input set) — idempotent by construction.
+export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now()) {
+  const actions = [];
+  for (const i of inProgressIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    const lr = latestRun(runsByIssue[i.identifier] || []);
+    if (!lr) continue;
+    if (classifyRun(lr, now).done) {
+      actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-in-review' });
+    }
+  }
+  return actions;
+}
+
+// Pure-code state-machine: advance in_review issues to done once verify_ok is
+// real — a linked PR has actually merged (state 'merged' or a non-null
+// merged_at), not merely runStatus reporting success. This is the
+// false-confidence guard: runStatus is never treated as "done" on its own.
+// prsByIssue: { [identifier]: pullRequest[] } from `multica issue pull-requests`.
+export function detectVerifiedDone(inReviewIssues, prsByIssue) {
+  const actions = [];
+  for (const i of inReviewIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    const prs = prsByIssue[i.identifier] || [];
+    const merged = prs.some((pr) => pr.state === 'merged' || pr.merged_at != null);
+    if (merged) {
+      actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-done' });
+    }
+  }
+  return actions;
+}
+
 // Detect zombies among in_progress issues.
 // runsByIssue: { [identifier]: runs[] }. Returns recovery actions.
 // action 'rerun' when the issue already has an assignee; 'assign' when it needs (re)routing.
