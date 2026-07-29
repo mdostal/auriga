@@ -12,6 +12,23 @@ export function isSmokeScratch(title = '') {
   return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
 }
 
+// Detect a "hive story" — a Minerva/plugin-hive-planned story that must route to
+// HIVE_LANE (claude+plugin-hive agents), never DEFAULT_LANE/codex. Two signals:
+// (1) explicit labels (forward-compat for when labels start being set), or
+// (2) the description shape Minerva actually emits today: a `methodology:` key plus
+// a `steps:` block with hive-role `agent:` entries (researcher/developer/tester/reviewer).
+const HIVE_LABELS = new Set(['build', 'implementation', 'classic-methodology']);
+const HIVE_METHODOLOGY_RE = /\bmethodology:\s*(classic|tdd|bdd)\b/i;
+const HIVE_STEPS_RE = /\bsteps:\s*\r?\n/i;
+const HIVE_STEP_AGENT_RE = /\bagent:\s*(researcher|developer|tester|reviewer)\b/i;
+
+export function isHiveStory(issue = {}) {
+  const labels = Array.isArray(issue.labels) ? issue.labels : [];
+  if (labels.some((l) => HIVE_LABELS.has(String(l).toLowerCase()))) return true;
+  const desc = issue.description || '';
+  return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
+}
+
 // Classify a single run object.
 export function classifyRun(run, now = Date.now()) {
   const status = (run.status || '').toLowerCase();
@@ -112,11 +129,12 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   return true;
 }
 
-// Choose the best lane agent for a project: honor PROJECT_LANE order, else
-// DEFAULT_LANE, picking the candidate with the lowest current+projected load
-// that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected) {
-  const lane = cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE;
+// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
+// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
+// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
+// load that still has capacity.
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false) {
+  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
   );
@@ -162,7 +180,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected);
+    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
     if (!agent) continue;
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
@@ -203,6 +221,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
       projectId: i.project_id,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
+      isHive: isHiveStory(i),
       action: i.assignee_id ? 'rerun' : 'assign',
       reason: !lr ? 'no-runs' : (classifyRun(lr, now).failed ? 'last-run-failed' : 'run-stale'),
     });
