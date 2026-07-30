@@ -199,6 +199,47 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
   assert.equal(byId['z3'], undefined); // healthy, active run
 });
 
+test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok' },
+    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running' },
+    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run' },
+    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs' },
+    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me' },
+  ];
+  const runs = {
+    r1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    r2: [{ status: 'running', completed_at: null, created_at: new Date(now).toISOString() }],
+    r3: [{ status: 'failed', error: 'boom', completed_at: new Date(now).toISOString() }],
+    r4: [],
+    r5: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+  };
+  const actions = core.detectRunCompletions(inProgress, runs, now);
+  assert.deepEqual(actions.map((a) => a.identifier), ['r1']);
+  assert.equal(actions[0].action, 'advance-in-review');
+});
+
+test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
+  const inReview = [
+    { id: 'v1', identifier: 'v1', project_id: 'AURIGA', status: 'in_review', title: 'merged via state' },
+    { id: 'v2', identifier: 'v2', project_id: 'AURIGA', status: 'in_review', title: 'merged via merged_at' },
+    { id: 'v3', identifier: 'v3', project_id: 'AURIGA', status: 'in_review', title: 'still open' },
+    { id: 'v4', identifier: 'v4', project_id: 'AURIGA', status: 'in_review', title: 'no PRs' },
+    { id: 'v5', identifier: 'v5', project_id: 'AURIGA', status: 'in_review', title: 'SMOKE: ignore me' },
+  ];
+  const prs = {
+    v1: [{ state: 'merged', merged_at: null }],
+    v2: [{ state: 'open', merged_at: '2026-07-28T00:00:00Z' }],
+    v3: [{ state: 'open', merged_at: null }],
+    v4: [],
+    v5: [{ state: 'merged', merged_at: '2026-07-28T00:00:00Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs);
+  assert.deepEqual(actions.map((a) => a.identifier).sort(), ['v1', 'v2']);
+  assert.ok(actions.every((a) => a.action === 'advance-done'));
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();

@@ -60,3 +60,17 @@ export function assignIssue(identifier, agentName) {
 export function rerunIssue(identifier) {
   return run(['issue', 'rerun', identifier, '--output', 'json']);
 }
+
+export function issueStatus(identifier, status) {
+  return run(['issue', 'status', identifier, status, '--output', 'json']);
+}
+
+export function issuePullRequests(identifier) {
+  try {
+    const res = run(['issue', 'pull-requests', identifier, '--output', 'json']);
+    return (res && res.pull_requests) || [];
+  } catch (e) {
+    process.stderr.write(`issuePullRequests(${identifier}) failed: ${e.message}\n`);
+    return [];
+  }
+}

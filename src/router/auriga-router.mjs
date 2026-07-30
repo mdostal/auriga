@@ -92,11 +92,36 @@ async function cycle() {
 
   const blockedRuntimes = new Set();
 
+  // ---- state-machine: in_progress -> in_review, in_review -> done ----
+  // Pure-code, no agent calls. Single-instance pidfile lock (acquireLock above)
+  // makes each cycle atomic w.r.t. other router processes; re-deriving the
+  // candidate set fresh from board state every cycle makes both transitions
+  // idempotent (a transitioned issue simply drops out of its source filter).
+  const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
+  const runsByIssue = {};
+  for (const i of inProgress) runsByIssue[i.identifier] = mca.issueRuns(i.identifier);
+
+  const completions = core.detectRunCompletions(inProgress, runsByIssue, now);
+  for (const c of completions) {
+    log('advance', { identifier: c.identifier, to: 'in_review', applied: !DRY });
+    if (!DRY) {
+      try { mca.issueStatus(c.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
+    }
+  }
+
+  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
+  const prsByIssue = {};
+  for (const i of inReview) prsByIssue[i.identifier] = mca.issuePullRequests(i.identifier);
+  const verified = core.detectVerifiedDone(inReview, prsByIssue);
+  for (const v of verified) {
+    log('advance', { identifier: v.identifier, to: 'done', applied: !DRY });
+    if (!DRY) {
+      try { mca.issueStatus(v.identifier, 'done'); } catch (e) { log('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+    }
+  }
+
   // ---- zombie recovery ----
   if (!NO_ZOMBIE) {
-    const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
-    const runsByIssue = {};
-    for (const i of inProgress) runsByIssue[i.identifier] = mca.issueRuns(i.identifier);
     const zombies = core.detectZombies(inProgress, runsByIssue, cfg, now);
     for (const z of zombies) {
       if (assignedThisProcess >= MAX_ASSIGN) break;
