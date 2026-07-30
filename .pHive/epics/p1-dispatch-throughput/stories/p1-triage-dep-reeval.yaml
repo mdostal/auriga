@@ -1,0 +1,90 @@
+id: p1-triage-dep-reeval
+epic: p1-dispatch-throughput
+title: Re-evaluate dependency-wait blocks after state-machine lands
+status: pending
+complexity: low
+methodology: classic
+depends_on: [p1-state-machine-auto-unblock]
+
+description: |
+  After state-machine auto-unblock feature is deployed, re-check dependency-blocked issues.
+
+  Example cascade: PAN-6640 depends on PAN-6637 — if 6637 done, 6640 should unblock.
+
+  Drains dependency cascades; moves stale blocks to todo.
+
+acceptance_criteria:
+  - "Given the state-machine auto-unblock feature is deployed (R4.3)"
+  - "When the bulk re-evaluation runs"
+  - "Then each issue blocked on dependencies has its blocking set re-checked"
+  - "And if blocking dependencies are now 'done', issue advances to 'todo'"
+  - "And blocking reason is cleared"
+
+steps:
+  - id: research
+    description: Query dependency-blocked issues (state=blocked, depends_on field populated)
+    agent: researcher
+  - id: implement
+    description: Write bulk re-evaluation script — check blocking set, advance to todo if clear
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test bulk re-eval — verify done deps unblock dependents, state advances to todo
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review bulk re-eval script for correctness (handles multi-dep, partial unblock)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Run bulk re-eval on dependency-blocked issues, commit script
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: multica
+  tech_stack:
+    language: typescript
+    framework: bulk-action-script
+  key_files:
+    - path: scripts/bulk-reeval-dep-blocks.ts
+      purpose: Bulk dependency re-evaluation script
+
+files_to_modify:
+  - file: scripts/bulk-reeval-dep-blocks.ts
+    change: Create bulk dependency re-evaluation script
+
+design_decisions:
+  - decision: Run AFTER state-machine auto-unblock deploys
+    rationale: Auto-unblock handles future transitions; this script drains the pre-existing backlog
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document dependency re-eval procedure in runbook"
+
+risks:
+  - severity: low
+    description: Partial unblock (multi-dep issue) could advance prematurely
+    mitigation: Only advance when blocking set is EMPTY (all deps done)
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      T4: Re-Evaluate Dependency-Wait Blocks
+      Run AFTER R4.3 deploys. Example cascade: PAN-6640 depends on PAN-6637.
+
+metric:
+  applies: true
+  name: triage.dep_blocks_unblocked_count
+  direction: up
+  unit: issues
+  baseline: "0"
+  target: "count of dependency-blocked issues with done deps"
+  window: "triage run"
+  source:
+    kind: manual
+    ref: "Bulk re-eval script output — count issues unblocked"
+  verify_at: "integrate"
+  owner: developer

@@ -76,6 +76,9 @@ function log(event, data) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- repo provisioning gate ------------------------------------------------
+// Pre-dispatch validation (PAN-6594): a lane agent's configured repo must exist
+// locally AND have a remote `origin`, or its issues are blocked with a distinct
+// `needs-repo` signal instead of being dispatched into a build that will fail.
 function repoPathEnvName(repo) {
   return `AURIGA_REPO_PATH_${repo.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 }
@@ -99,6 +102,7 @@ function checkRepoProvisioning(repo) {
   }
 }
 
+// Check every distinct repo referenced by any configured agent, once per cycle.
 function checkAgentRepos(agents) {
   const repos = [...new Set(Object.values(agents).map((a) => a.repo).filter(Boolean))];
   return Object.fromEntries(repos.map((repo) => [repo, checkRepoProvisioning(repo)]));
@@ -125,8 +129,9 @@ async function cycle() {
     assignedQueued,
   });
 
+  // ---- repo provisioning gate: block issues whose whole lane is unprovisioned ----
   for (const b of core.selectRepoProvisioningBlocks(issues, cfg, repoProvisioning)) {
-    log('needs_repo', { identifier: b.identifier, lane: b.lane, repos: b.repoProvisioning, applied: !DRY });
+    log('needs_repo', { identifier: b.identifier, lane: b.lane, repos: b.repos, applied: !DRY });
     if (!DRY) {
       try {
         mca.setIssueMetadata(b.identifier, 'blocked_reason', b.blockedReason);
@@ -150,7 +155,7 @@ async function cycle() {
         if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} });
+        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {}, repoProvisioning }, z.isHive);
         if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
         log('zombie', { ...z, agent, applied: !DRY });
         if (!DRY) {

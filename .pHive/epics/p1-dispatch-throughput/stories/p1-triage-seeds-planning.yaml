@@ -1,0 +1,90 @@
+id: p1-triage-seeds-planning
+epic: p1-dispatch-throughput
+title: Route mis-dispatched seeds back to Minerva planning
+status: pending
+complexity: low
+methodology: classic
+depends_on: [p1-router-seed-planning]
+
+description: |
+  Move seeds incorrectly routed to build lanes back to Minerva planning lane.
+
+  Example: PAN-6646 blocked with "Unplanned top-level seed; needs Minerva/plugin-hive planning".
+
+  Recovers blocked seeds; ensures planning happens before build.
+
+acceptance_criteria:
+  - "Given an issue blocked with reason 'Unplanned top-level seed; needs Minerva/plugin-hive planning'"
+  - "When the bulk routing correction runs"
+  - "Then the issue's lane is updated to Minerva PLANNING lane"
+  - "And issue state resets to 'todo'"
+  - "And blocking reason is cleared"
+
+steps:
+  - id: research
+    description: Query blocked seeds with planning-needed reason (PAN-6646, etc.)
+    agent: researcher
+  - id: implement
+    description: Write bulk routing script — update lane to minerva-planning, reset state, clear block reason
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test bulk routing — verify seeds route to planning, state resets to todo
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review bulk routing script for correctness
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Run bulk routing on mis-dispatched seeds, commit script
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: bulk-action-script
+  key_files:
+    - path: scripts/bulk-reroute-seeds.ts
+      purpose: Bulk seed routing script
+
+files_to_modify:
+  - file: scripts/bulk-reroute-seeds.ts
+    change: Create bulk seed routing script
+
+design_decisions:
+  - decision: Clear blocking reason on reroute
+    rationale: Blocking reason was specific to mis-dispatch; once routed correctly, reason is stale
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document seed rerouting procedure in runbook"
+
+risks:
+  - severity: low
+    description: Bulk reroute could miss seeds if query is too narrow
+    mitigation: Broad query (all seeds with planning-needed block reason) + manual review before run
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      T2: Route Mis-Dispatched Seeds Back to Planning
+      Example: PAN-6646 blocked with "Unplanned top-level seed; needs Minerva/plugin-hive planning".
+
+metric:
+  applies: true
+  name: triage.seeds_rerouted_count
+  direction: up
+  unit: seeds
+  baseline: "0"
+  target: "count of mis-dispatched seeds (PAN-6646, etc.)"
+  window: "triage run"
+  source:
+    kind: manual
+    ref: "Bulk routing script output — count seeds updated"
+  verify_at: "integrate"
+  owner: developer

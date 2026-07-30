@@ -1,0 +1,73 @@
+name: p1-dispatch-throughput
+title: "P1: Convert Dispatch Throughput to DONE Throughput"
+target_codebase: /Users/dostal/.minerva/runs/5708c28b-89ea-4f8e-b38e-29db9e8b7e26/workspace
+methodology: classic
+version_bump: none
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: []
+  roster: []
+  per_tag_reasoning: {}
+  confidence: 1.0
+  gate_decisions: {}
+
+stories:
+  - id: p1-router-capability-routing
+    title: Fix capability-aware routing for hive stories
+    complexity: medium
+    depends_on: []
+
+  - id: p1-router-seed-planning
+    title: Route unplanned seeds to Minerva planning lane
+    complexity: low
+    depends_on: []
+
+  - id: p1-router-repo-gate
+    title: Add repo-provisioning gate to prevent dispatch failures
+    complexity: low
+    depends_on: []
+
+  - id: p1-state-machine-transitions
+    title: Implement pure-code state-machine transitions (todo→in_review→done)
+    complexity: high
+    depends_on: []
+
+  - id: p1-state-machine-auto-unblock
+    title: Implement auto-unblock when dependencies reach done
+    complexity: medium
+    depends_on: [p1-state-machine-transitions]
+
+  - id: p1-router-human-filter
+    title: Exclude human-todos from agent dispatch pool
+    complexity: low
+    depends_on: []
+
+  - id: p1-triage-bulk-reassign
+    title: Bulk reassign codex-self-blocked stories to claude+hive lanes
+    complexity: medium
+    depends_on: [p1-router-capability-routing, p1-state-machine-transitions]
+
+  - id: p1-triage-seeds-planning
+    title: Route mis-dispatched seeds back to Minerva planning
+    complexity: low
+    depends_on: [p1-router-seed-planning]
+
+  - id: p1-triage-human-queue
+    title: Move human-todos to human queue
+    complexity: low
+    depends_on: [p1-router-human-filter]
+
+  - id: p1-triage-dep-reeval
+    title: Re-evaluate dependency-wait blocks after state-machine lands
+    complexity: low
+    depends_on: [p1-state-machine-auto-unblock]
+
+  - id: p1-validation-end-to-end
+    title: Validate end-to-end — one build story produces real merged PR + reaches done
+    complexity: high
+    depends_on: [p1-router-capability-routing, p1-router-seed-planning, p1-router-repo-gate, p1-state-machine-transitions, p1-state-machine-auto-unblock, p1-router-human-filter]

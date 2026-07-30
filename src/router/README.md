@@ -23,11 +23,15 @@ node 24 install. Override via env if needed.
 - `auriga-router.mjs` — entrypoint / scan loop.
 - `lib/` — `config.mjs`, `core.mjs`, `multica.mjs`.
 - `test/core.test.mjs` — `npm test`.
-- Repo provisioning gate: before dispatch, the router checks each lane agent's
-  configured repo with `git -C <repo_path> remote get-url origin`. Missing repos
-  or repos without `origin` are not assigned; if every repo in an issue's lane
-  fails that check, the issue is set to `blocked` with metadata
-  `blocked_reason=needs-repo`.
+- Repo provisioning gate: before dispatch, the router checks every distinct repo
+  referenced by `lib/config.mjs` `AGENTS[*].repo` with
+  `git -C <repo_path> remote get-url origin`. A todo only blocks on this if
+  EVERY agent in its target lane (hive stories use `HIVE_LANE`, everything else
+  `PROJECT_LANE`/`DEFAULT_LANE`) has a missing/un-provisioned repo; if at least
+  one lane agent's repo is provisioned, dispatch proceeds to that agent as
+  normal. A fully-blocked issue is set to status `blocked` with metadata
+  `blocked_reason=needs-repo` (Multica's status enum has no `needs-repo`
+  literal, so this pairing is the distinct signal — see PAN-6594).
   `AURIGA_REPO_BASE` defaults to the parent directory of the checked-out plugin
   repos, and `AURIGA_REPO_PATH_<OWNER>_<REPO>` can override a single repo path.
 - Pidfiles / logs (in `/tmp`, single-instance safety):

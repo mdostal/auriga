@@ -3,15 +3,14 @@ import { execFileSync } from 'node:child_process';
 
 const CLI = process.env.MULTICA_CLI || '/Users/dostal/.local/bin/multica';
 const PROFILE = process.env.MULTICA_PROFILE || 'dostal';
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// Stale Multica env vars can 404. Preserve daemon-provided task tokens and
-// UUID workspace IDs, but drop non-task tokens and malformed workspace values.
+// The three env vars must be UNSET (stale values 404). execFileSync inherits
+// process.env, so we delete them from a cloned env instead of `env -u`.
 function cleanEnv() {
   const e = { ...process.env };
-  if (!e.MULTICA_TOKEN?.startsWith('mat_')) delete e.MULTICA_TOKEN;
+  delete e.MULTICA_TOKEN;
   delete e.MULTICA_PAT_TOKEN;
-  if (!UUID_RE.test(e.MULTICA_WORKSPACE_ID || '')) delete e.MULTICA_WORKSPACE_ID;
+  delete e.MULTICA_WORKSPACE_ID;
   return e;
 }
 
@@ -58,14 +57,17 @@ export function assignIssue(identifier, agentName) {
   return run(['issue', 'assign', identifier, '--to', agentName, '--output', 'json']);
 }
 
+export function rerunIssue(identifier) {
+  return run(['issue', 'rerun', identifier, '--output', 'json']);
+}
+
 export function setIssueStatus(identifier, status) {
   return run(['issue', 'status', identifier, status, '--output', 'json']);
 }
 
+// Multica's status enum has no `needs-repo` literal (verified via
+// `multica issue status --help`), so the repo-provisioning gate signals via
+// status `blocked` + this metadata key instead — see selectRepoProvisioningBlocks.
 export function setIssueMetadata(identifier, key, value, type = 'string') {
   return run(['issue', 'metadata', 'set', identifier, '--key', key, '--value', value, '--type', type, '--output', 'json']);
-}
-
-export function rerunIssue(identifier) {
-  return run(['issue', 'rerun', identifier, '--output', 'json']);
 }

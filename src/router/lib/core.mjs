@@ -7,6 +7,30 @@ const ACTIVE_RUN_STATUSES = new Set([
 const FAILED_RUN_STATUSES = new Set(['failed', 'error', 'errored', 'cancelled', 'canceled', 'timeout']);
 const ACTIVE_ISSUE_STATUSES = new Set(['in_progress', 'in progress', 'running']);
 
+// Ignore smoke/scratch/verification tickets by title.
+export function isSmokeScratch(title = '') {
+  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
+}
+
+// Detect a "hive story" — a Minerva/plugin-hive-planned story that must route to
+// HIVE_LANE (claude+plugin-hive agents), never DEFAULT_LANE/codex. Two signals:
+// (1) explicit labels (forward-compat for when labels start being set), or
+// (2) the description shape Minerva actually emits today: a `methodology:` key plus
+// a `steps:` block with hive-role `agent:` entries (researcher/developer/tester/reviewer).
+const HIVE_LABELS = new Set(['build', 'implementation', 'classic-methodology']);
+const HIVE_METHODOLOGY_RE = /\bmethodology:\s*(classic|tdd|bdd)\b/i;
+const HIVE_STEPS_RE = /\bsteps:\s*\r?\n/i;
+const HIVE_STEP_AGENT_RE = /\bagent:\s*(researcher|developer|tester|reviewer)\b/i;
+
+export function isHiveStory(issue = {}) {
+  const labels = Array.isArray(issue.labels) ? issue.labels : [];
+  if (labels.some((l) => HIVE_LABELS.has(String(l).toLowerCase()))) return true;
+  const desc = issue.description || '';
+  return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
+}
+
+// Candidate pool shared by selectAssignments and selectRepoProvisioningBlocks:
+// unassigned, status todo, not smoke/scratch, project in scan set.
 function candidateIssues(issues, cfg) {
   return issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
@@ -15,20 +39,21 @@ function candidateIssues(issues, cfg) {
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
 }
 
+// The lane an issue would route to, mirroring chooseAgentForProject's own
+// lane selection (hive stories always go to HIVE_LANE, regardless of project).
 function issueLane(issue, cfg) {
-  return cfg.PROJECT_LANE[issue.project_id] || cfg.DEFAULT_LANE;
+  return isHiveStory(issue) ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[issue.project_id] || cfg.DEFAULT_LANE);
 }
 
+// Is this agent's configured repo locally provisioned (present + has an
+// `origin` remote)? Agents with no `repo` configured, or when no
+// repoProvisioning map was supplied at all (gate disabled/not computed),
+// are treated as provisioned so the gate is opt-in and non-breaking.
 function repoProvisionedForAgent(name, agents, repoProvisioning) {
   if (!repoProvisioning) return true;
   const repo = agents[name]?.repo;
-  if (!repo) return false;
+  if (!repo) return true;
   return repoProvisioning[repo]?.ok === true;
-}
-
-// Ignore smoke/scratch/verification tickets by title.
-export function isSmokeScratch(title = '') {
-  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
 }
 
 // Classify a single run object.
@@ -131,11 +156,12 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   return true;
 }
 
-// Choose the best lane agent for a project: honor PROJECT_LANE order, else
-// DEFAULT_LANE, picking the candidate with the lowest current+projected load
-// that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected) {
-  const lane = cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE;
+// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
+// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
+// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
+// load that still has capacity.
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false) {
+  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
     && repoProvisionedForAgent(name, cfg.AGENTS, projected.repoProvisioning)
@@ -163,7 +189,6 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
   const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {}, repoProvisioning: opts.repoProvisioning };
 
-  // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set.
   const candidates = candidateIssues(issues, cfg);
 
   // Stable ordering: by project scan order, then by issue number ascending
@@ -178,7 +203,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected);
+    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
     if (!agent) continue;
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
@@ -201,8 +226,14 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   return chosen;
 }
 
-// Find todo issues whose entire target lane is unavailable because no lane
-// agent has a locally provisioned repo with origin.
+// Find todo issues whose entire target lane is unprovisioned — no lane agent
+// has a locally checked-out repo with an `origin` remote. These are pulled out
+// of normal dispatch and surfaced with a distinct `needs-repo` signal so a
+// provisioning gap doesn't read as a generic stall (PAN-6594). Multica's live
+// status enum has no `needs-repo` literal, so the caller applies this as
+// status `blocked` + metadata `blocked_reason=needs-repo` (see auriga-router.mjs).
+// A lane with at least one provisioned repo is left alone — selectAssignments
+// will route normally to whichever lane member is provisioned.
 export function selectRepoProvisioningBlocks(issues, cfg, repoProvisioning) {
   if (!repoProvisioning) return [];
 
@@ -212,7 +243,8 @@ export function selectRepoProvisioningBlocks(issues, cfg, repoProvisioning) {
       return lane.length > 0 && !lane.some((name) => repoProvisionedForAgent(name, cfg.AGENTS, repoProvisioning));
     })
     .map((issue) => {
-      const repos = [...new Set(issueLane(issue, cfg).map((name) => cfg.AGENTS[name]?.repo).filter(Boolean))];
+      const lane = issueLane(issue, cfg);
+      const repos = [...new Set(lane.map((name) => cfg.AGENTS[name]?.repo).filter(Boolean))];
       return {
         identifier: issue.identifier,
         issueId: issue.id,
@@ -222,7 +254,9 @@ export function selectRepoProvisioningBlocks(issues, cfg, repoProvisioning) {
         status: 'blocked',
         blockedReason: 'needs-repo',
         repos,
-        repoProvisioning: Object.fromEntries(repos.map((repo) => [repo, repoProvisioning[repo] || { ok: false, state: 'needs-repo', reason: 'repo not checked' }])),
+        repoProvisioning: Object.fromEntries(
+          repos.map((repo) => [repo, repoProvisioning[repo] || { ok: false, state: 'needs-repo', reason: 'repo not checked' }])
+        ),
       };
     });
 }
@@ -245,6 +279,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
       projectId: i.project_id,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
+      isHive: isHiveStory(i),
       action: i.assignee_id ? 'rerun' : 'assign',
       reason: !lr ? 'no-runs' : (classifyRun(lr, now).failed ? 'last-run-failed' : 'run-stale'),
     });
