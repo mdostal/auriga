@@ -51,6 +51,15 @@ export const AGENTS = {
   // NOTE: minerva-dev (07208ea2-...) is intentionally NOT a hive-execute build lane —
   // its live agent instructions are Minerva's *planning* lane only (bin/minerva-plan),
   // not /hive:execute. Do not add it to HIVE_LANE below.
+  // Planning lane (not a build agent): un-planned "seed" issues route here
+  // instead of a build lane so they get an epic + dependency-tracked stories
+  // before any build agent ever sees them (see PAN-6646).
+  'minerva-dev': {
+    id: '07208ea2-3d2f-455d-a07c-60ab56c26e5c',
+    runtime: 'claude-planning', // own runtime bucket; not shared with consus-dev's `claude`
+    maxInflight: 3, // mirrors the real agent's max_concurrent_tasks
+    repo: null, // planning lane; no fixed target repo — plans land on whichever project the seed belongs to
+  },
 };
 
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,

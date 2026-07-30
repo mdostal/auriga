@@ -12,6 +12,9 @@ const CFG = {
     'auriga-build': { id: 'AB', runtime: 'claude', maxInflight: 2 },
     'mnemosyne-dev': { id: 'MN', runtime: 'claude', maxInflight: 2 },
     'votum-dev': { id: 'VT', runtime: 'claude', maxInflight: 2 },
+    // Planning lane fixture mirroring lib/config.mjs's minerva-dev entry:
+    // deliberately absent from RUNTIME_CAP below (own uncapped runtime bucket).
+    'minerva-dev': { id: 'M', runtime: 'claude-planning', maxInflight: 3 },
   },
   RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
   PROJECT_LANE: {
@@ -40,6 +43,13 @@ steps:
   - id: implement
     agent: developer
 `;
+
+// Like todo(), but sets parent_issue_id so the fixture represents a planned
+// story under an epic rather than a top-level seed (see isSeed). Used for the
+// pre-existing build-lane routing tests, which predate the seed/minerva-dev
+// routing split and mean to exercise chooseAgentForProject, not isSeed.
+const story = (id, project, num, parentId, assignee = null, title = 'work') =>
+  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title, parent_issue_id: parentId });
 
 test('isSmokeScratch matches smoke/scratch/verification tickets only', () => {
   assert.ok(core.isSmokeScratch('SMOKE: dispatch nurse test'));
@@ -101,7 +111,7 @@ test('agentHasCapacity respects per-agent AND per-runtime caps', () => {
 });
 
 test('routing: aligned lanes go to their agent; Consus to claude', () => {
-  const issues = [todo('c1', 'CONSUS', 1), todo('a1', 'AURIGA', 2), todo('m1', 'MINERVA', 3)];
+  const issues = [story('c1', 'CONSUS', 1, 'EPIC1'), story('a1', 'AURIGA', 2, 'EPIC1'), story('m1', 'MINERVA', 3, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
   assert.equal(byId['c1'], 'consus-dev');
@@ -110,7 +120,7 @@ test('routing: aligned lanes go to their agent; Consus to claude', () => {
 });
 
 test('routing: default lane spreads across the two codex agents', () => {
-  const issues = [todo('j1', 'JANUS', 1), todo('j2', 'JANUS', 2)];
+  const issues = [story('j1', 'JANUS', 1, 'EPIC1'), story('j2', 'JANUS', 2, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, {}, {});
   const agents = picks.map((p) => p.agent).sort();
   assert.deepEqual(agents, ['auriga-dev', 'heimdall-dev-codex']); // load-balanced
@@ -118,7 +128,7 @@ test('routing: default lane spreads across the two codex agents', () => {
 
 test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
   // 10 Auriga todos, only auriga-dev is the lane. perAgent cycle cap = 2.
-  const issues = Array.from({ length: 10 }, (_, i) => todo('a' + i, 'AURIGA', i));
+  const issues = Array.from({ length: 10 }, (_, i) => story('a' + i, 'AURIGA', i, 'EPIC1'));
   const picks = core.selectAssignments(issues, CFG, {}, {});
   assert.ok(picks.length <= CFG.CAPS.perCycleTotal);
   const aurigaCount = picks.filter((p) => p.agent === 'auriga-dev').length;
@@ -127,14 +137,14 @@ test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
 
 test('runtime cap gates the whole codex lane in one cycle', () => {
   // Many default-lane (codex) todos; codex runtime cap 4, both agents empty.
-  const issues = Array.from({ length: 10 }, (_, i) => todo('j' + i, 'JANUS', i));
+  const issues = Array.from({ length: 10 }, (_, i) => story('j' + i, 'JANUS', i, 'EPIC1'));
   const picks = core.selectAssignments(issues, CFG, {}, { maxTotal: 20, maxPerAgent: 20 });
   // Both codex agents share cap 4 -> at most 4 codex assignments.
   assert.ok(picks.length <= 4, `got ${picks.length}`);
 });
 
 test('blockedRuntimes skips a rate-limited lane', () => {
-  const issues = [todo('a1', 'AURIGA', 1)];
+  const issues = [story('a1', 'AURIGA', 1, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, {}, { blockedRuntimes: new Set(['codex']) });
   assert.equal(picks.length, 0);
 });
@@ -144,7 +154,7 @@ test('selection ignores smoke/scratch and assigned/backlog issues', () => {
     todo('s1', 'AURIGA', 1, null, 'SMOKE: dispatch test'),
     todo('a1', 'AURIGA', 2, 'A'), // already assigned
     { id: 'b1', identifier: 'b1', project_id: 'AURIGA', number: 3, status: 'backlog', assignee_id: null, title: 'work' },
-    todo('a2', 'AURIGA', 4),
+    story('a2', 'AURIGA', 4, 'EPIC1'),
   ];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   assert.deepEqual(picks.map((p) => p.identifier), ['a2']);
@@ -281,7 +291,10 @@ test('routing: a hive-tagged story in Auriga (PROJECT_LANE -> codex) still lands
 });
 
 test('routing: a non-hive story with no PROJECT_LANE entry still falls back to DEFAULT_LANE (regression)', () => {
-  const issues = [todo('j1', 'JANUS', 1)];
+  // A planned story (has a parent) so it is NOT a seed — the seed/minerva-dev
+  // split (PAN-6646) routes unmarked top-level childless todos to the planning
+  // lane, so this DEFAULT_LANE fallback regression must use a non-seed story.
+  const issues = [story('j1', 'JANUS', 1, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, {}, {});
   assert.equal(picks.length, 1);
   assert.ok(CFG.DEFAULT_LANE.includes(picks[0].agent));
@@ -301,4 +314,89 @@ test('detectZombies flags isHive on the zombie action so re-routing respects HIV
   const z = core.detectZombies(inProgress, { z6: [] }, CFG, now);
   const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
   assert.equal(byId['z6'].isHive, true);
+});
+
+// --- isSeed (PAN-6646 planning-lane routing) -------------------------------
+
+test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
+  assert.equal(core.isSeed({ id: 'x1', labels: ['idea'], parent_issue_id: 'p1' }, []), true);
+  assert.equal(core.isSeed({ id: 'x2', labels: ['needs-plan'] }, []), true);
+});
+
+test('isSeed: real API label shape (array of {name,...} objects, not strings) is still detected', () => {
+  // multica issue list/get return labels as objects, e.g.
+  // [{ id, name: 'idea', color, ... }] — not ['idea']. A child issue (has a
+  // parent) explicitly labeled 'idea' must still be seed-classified: the
+  // label leg has to override the parent/children heuristic even against the
+  // real object shape, not just the string-array test fixture shape.
+  const issue = {
+    id: 'x7',
+    parent_issue_id: 'epic1',
+    labels: [{ id: 'l1', name: 'idea', color: '#22c55e' }],
+  };
+  assert.equal(core.isSeed(issue, []), true);
+});
+
+test('isSeed: unmarked, top-level, and childless is a seed', () => {
+  const issue = { id: 'x3' }; // no parent_issue_id, no labels, no children in the empty set
+  assert.equal(core.isSeed(issue, []), true);
+});
+
+test('isSeed: has a parent_issue_id is not a seed', () => {
+  const issue = { id: 'x4', parent_issue_id: 'epic1' };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test('isSeed: top-level but has a child in allIssues is not a seed', () => {
+  const issue = { id: 'x5' };
+  const allIssues = [{ id: 'x6', parent_issue_id: 'x5' }];
+  assert.equal(core.isSeed(issue, allIssues), false);
+});
+
+// --- selectAssignments seed routing (PAN-6646) ------------------------------
+
+test('routing: issue labeled idea routes to minerva-dev, never a build agent', () => {
+  const issue = { ...todo('seed1', 'AURIGA', 1), labels: ['idea'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: issue labeled needs-plan routes to minerva-dev', () => {
+  const issue = { ...todo('seed2', 'AURIGA', 1), labels: ['needs-plan'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: unmarked, top-level, childless issue routes to minerva-dev', () => {
+  const issue = todo('seed3', 'AURIGA', 1); // no parent_issue_id, no children -> seed
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: issue with a parent_issue_id is not seed-classified, uses the normal build lane', () => {
+  const issue = story('story1', 'AURIGA', 1, 'epic1');
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
+});
+
+test('routing: top-level issue with a child in the scanned set is not seed-classified', () => {
+  const parent = todo('parent1', 'AURIGA', 1); // no parent_issue_id itself
+  const child = story('child1', 'AURIGA', 2, 'parent1');
+  const picks = core.selectAssignments([parent, child], CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['parent1'], 'auriga-dev'); // has a child -> not a seed -> normal build lane
+  assert.equal(byId['child1'], 'auriga-dev');  // has a parent -> not a seed -> normal build lane
+});
+
+test('routing: seed skipped when minerva-dev has no capacity, never falls back to a build agent', () => {
+  const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['idea'] };
+  // minerva-dev's maxInflight is 3 in the CFG fixture; exhaust it directly via inflight.
+  const inflight = { 'minerva-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {});
+  assert.equal(picks.length, 0); // skipped this cycle, not routed anywhere
+  assert.ok(!picks.some((p) => p.agent !== 'minerva-dev')); // never falls back to a build agent
 });

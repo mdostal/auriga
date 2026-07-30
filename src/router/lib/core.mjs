@@ -152,6 +152,36 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   return true;
 }
 
+// Is this issue an un-planned "seed" that must route to the Minerva planning
+// lane instead of a build lane (PAN-6646: build agents can't plan and just
+// self-block on unplanned work)? True when either:
+//   - it is explicitly marked ('idea' or 'needs-plan' label), OR
+//   - it is unmarked, top-level (no parent_issue_id), AND childless (no issue
+//     in allIssues has parent_issue_id === issue.id).
+// allIssues should be the same in-memory candidate/scan array the caller
+// already has (e.g. the `issues` passed into selectAssignments) — "childless"
+// is only checked within that scanned set, which is expected.
+//
+// Scope note: the story's design doc frames the heuristic as three AND'd legs
+// (no epic.yaml + no children + top-level). The "no epic.yaml" leg is
+// deliberately dropped here — this router only has the Multica issue API, no
+// filesystem access to any repo's .pHive/epics/, so it cannot check for an
+// epic.yaml at all. This is a scope reduction, not an oversight: the
+// remaining two legs (childless + top-level) match this story's verbatim
+// acceptance criteria, which only asks for "unmarked AND childless AND
+// top-level" and never mentions epic.yaml.
+export function isSeed(issue, allIssues = []) {
+  // `multica issue list`/`get` return labels as an array of label OBJECTS
+  // ({ id, name, color, ... }), not plain strings — normalize to names so
+  // this matches real API data, not just string-array test fixtures.
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan');
+  if (explicitlyMarked) return true;
+  const isTopLevel = !issue.parent_issue_id;
+  const isChildless = !allIssues.some((i) => i.parent_issue_id === issue.id);
+  return isTopLevel && isChildless;
+}
+
 // Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
@@ -203,9 +233,37 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     return (a.number || 0) - (b.number || 0);
   });
 
+  const PLANNING_AGENT = 'minerva-dev';
+
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
+
+    // Un-planned seeds MUST route to the Minerva planning lane, never a build
+    // lane — and if the planning lane has no capacity this cycle, skip the
+    // issue entirely rather than falling back to chooseAgentForProject.
+    if (isSeed(issue, issues) && !isHiveStory(issue)) {
+      if (!cfg.AGENTS[PLANNING_AGENT]) continue;
+      if (!agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) continue;
+      const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
+      if (blockedRuntimes.has(runtime)) continue;
+      if ((projected.perAgentCycle[PLANNING_AGENT] || 0) >= maxPerAgent) continue;
+
+      projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
+      projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
+      projected.perAgentCycle[PLANNING_AGENT] = (projected.perAgentCycle[PLANNING_AGENT] || 0) + 1;
+
+      chosen.push({
+        identifier: issue.identifier,
+        issueId: issue.id,
+        projectId: issue.project_id,
+        lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
+        agent: PLANNING_AGENT,
+        runtime,
+      });
+      continue;
+    }
+
     const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
     if (!agent) continue;
     const runtime = cfg.AGENTS[agent].runtime;
