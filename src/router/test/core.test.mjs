@@ -9,6 +9,9 @@ const CFG = {
     'heimdall-dev': { id: 'H', runtime: 'opencode', maxInflight: 3 },
     'auriga-dev': { id: 'A', runtime: 'codex', maxInflight: 3 },
     'heimdall-dev-codex': { id: 'HC', runtime: 'codex', maxInflight: 3 },
+    'auriga-build': { id: 'AB', runtime: 'claude', maxInflight: 2 },
+    'mnemosyne-dev': { id: 'MN', runtime: 'claude', maxInflight: 2 },
+    'votum-dev': { id: 'VT', runtime: 'claude', maxInflight: 2 },
   },
   RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
   PROJECT_LANE: {
@@ -18,14 +21,25 @@ const CFG = {
     MINERVA: ['auriga-dev'],
   },
   DEFAULT_LANE: ['auriga-dev', 'heimdall-dev-codex'],
+  HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus' },
   CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
-const todo = (id, project, num, assignee = null, title = 'work') =>
-  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title });
+const todo = (id, project, num, assignee = null, title = 'work', extra = {}) =>
+  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title, ...extra });
+
+// A description shaped like a real Minerva-planned plugin-hive story.
+const HIVE_DESCRIPTION = `id: some-story
+methodology: classic
+steps:
+  - id: research
+    agent: researcher
+  - id: implement
+    agent: developer
+`;
 
 test('isSmokeScratch matches smoke/scratch/verification tickets only', () => {
   assert.ok(core.isSmokeScratch('SMOKE: dispatch nurse test'));
@@ -202,4 +216,48 @@ test('detectZombies: stale-but-old run triggers recovery, fresh done does not', 
   assert.equal(byId['z4'], 'rerun');
   // z5: fresh running run -> healthy, not flagged.
   assert.equal(byId['z5'], undefined);
+});
+
+test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {
+  assert.ok(core.isHiveStory({ description: HIVE_DESCRIPTION }));
+  assert.ok(!core.isHiveStory({ description: 'Just fix the login bug, no special format here.' }));
+  assert.ok(!core.isHiveStory({}));
+});
+
+test('isHiveStory detects capability labels (forward-compat, no description needed)', () => {
+  assert.ok(core.isHiveStory({ labels: ['build'] }));
+  assert.ok(core.isHiveStory({ labels: ['implementation'] }));
+  assert.ok(core.isHiveStory({ labels: ['classic-methodology'] }));
+  assert.ok(!core.isHiveStory({ labels: ['bug'] }));
+});
+
+test('routing: a hive-tagged story in Auriga (PROJECT_LANE -> codex) still lands on HIVE_LANE, never codex', () => {
+  const issues = [todo('h1', 'AURIGA', 1, null, 'hive story', { description: HIVE_DESCRIPTION })];
+  const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
+  assert.equal(picks.length, 1);
+  assert.ok(CFG.HIVE_LANE.includes(picks[0].agent), `expected a HIVE_LANE agent, got ${picks[0].agent}`);
+  assert.ok(!['auriga-dev', 'heimdall-dev-codex', 'heimdall-dev'].includes(picks[0].agent));
+});
+
+test('routing: a non-hive story with no PROJECT_LANE entry still falls back to DEFAULT_LANE (regression)', () => {
+  const issues = [todo('j1', 'JANUS', 1)];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.ok(CFG.DEFAULT_LANE.includes(picks[0].agent));
+});
+
+test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even for aligned codex projects', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForProject('AURIGA', CFG, {}, {}, empty, true);
+  assert.ok(CFG.HIVE_LANE.includes(agent));
+});
+
+test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'z6', identifier: 'z6', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled hive story', description: HIVE_DESCRIPTION },
+  ];
+  const z = core.detectZombies(inProgress, { z6: [] }, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
+  assert.equal(byId['z6'].isHive, true);
 });

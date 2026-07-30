@@ -105,7 +105,7 @@ async function cycle() {
         if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} });
+        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
         if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
         log('zombie', { ...z, agent, applied: !DRY });
         if (!DRY) {
