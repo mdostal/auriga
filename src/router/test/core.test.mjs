@@ -25,6 +25,7 @@ const CFG = {
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus' },
   CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10 },
+  HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
 const todo = (id, project, num, assignee = null, title = 'work', extra = {}) =>
@@ -147,6 +148,36 @@ test('selection ignores smoke/scratch and assigned/backlog issues', () => {
   ];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   assert.deepEqual(picks.map((p) => p.identifier), ['a2']);
+});
+
+test('isHumanTodo: matches the human-todo label regardless of case', () => {
+  assert.ok(core.isHumanTodo({ labels: ['human-todo'], metadata: {} }, CFG));
+  assert.ok(core.isHumanTodo({ labels: ['Human-Todo'], metadata: {} }, CFG));
+  assert.ok(core.isHumanTodo({ labels: [{ name: 'human-todo' }], metadata: {} }, CFG));
+  assert.ok(!core.isHumanTodo({ labels: ['bug'], metadata: {} }, CFG));
+});
+
+test('isHumanTodo: matches waiting_on a known human name (PAN-6644 case)', () => {
+  assert.ok(core.isHumanTodo({ labels: [], metadata: { waiting_on: 'Mathew' } }, CFG));
+  assert.ok(core.isHumanTodo({ labels: [], metadata: { waiting_on: 'waiting on Dostal for review' } }, CFG));
+  assert.ok(!core.isHumanTodo({ labels: [], metadata: { waiting_on: 'PAN-1234' } }, CFG)); // dependency, not a human
+  assert.ok(!core.isHumanTodo({ labels: [], metadata: {} }, CFG));
+  assert.ok(!core.isHumanTodo({ labels: [], metadata: { waiting_on: '' } }, CFG));
+});
+
+test('humanTodoReason: label wins over waiting_on when both are set', () => {
+  assert.equal(core.humanTodoReason({ labels: ['human-todo'], metadata: { waiting_on: 'Mathew' } }), 'label');
+  assert.equal(core.humanTodoReason({ labels: [], metadata: { waiting_on: 'Mathew' } }), 'waiting_on');
+});
+
+test('selectAssignments: priority-1 rule excludes human-todos from the dispatch candidate pool', () => {
+  const issues = [
+    { ...todo('h1', 'AURIGA', 1), labels: ['human-todo'] },
+    { ...todo('h2', 'AURIGA', 2), metadata: { waiting_on: 'Mathew' } },
+    todo('a1', 'AURIGA', 3), // ordinary todo, still dispatched
+  ];
+  const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['a1']);
 });
 
 test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (assignee)', () => {

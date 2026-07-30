@@ -125,6 +125,13 @@ export const HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
 // gated decision. Needs reconciliation with Minerva/operator before this part of the epic can
 // be completed.
 
+// Known human names for the `waiting_on: <human>` priority-1 dispatch filter
+// (see isHumanTodo in lib/core.mjs). Matched case-insensitively, substring OK
+// (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
+// Add a name here when a new human-owned ticket needs to route to the human
+// queue (scripts/export-human-queue.mjs) instead of an agent lane.
+export const HUMAN_NAMES = ['mathew', 'dostal'];
+
 // Batch / cadence caps.
 export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip

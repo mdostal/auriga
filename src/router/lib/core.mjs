@@ -12,6 +12,29 @@ export function isSmokeScratch(title = '') {
   return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
 }
 
+const HUMAN_TODO_LABEL = 'human-todo';
+
+// Priority-1 filter: true when an issue must never enter the agent dispatch
+// pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
+// — because only a human can complete it. Excluded issues belong in the
+// separate human queue instead (see scripts/export-human-queue.mjs).
+export function isHumanTodo(issue, cfg) {
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.includes(HUMAN_TODO_LABEL)) return true;
+  const waitingOn = issue.metadata && issue.metadata.waiting_on;
+  if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
+  const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
+  const w = waitingOn.trim().toLowerCase();
+  return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
+}
+
+// Why an issue was routed to the human queue — 'label' or 'waiting_on'.
+// Callers should only call this once isHumanTodo(issue, cfg) is true.
+export function humanTodoReason(issue) {
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  return labels.includes(HUMAN_TODO_LABEL) ? 'label' : 'waiting_on';
+}
+
 // Detect a "hive story" — a Minerva/plugin-hive-planned story that must route to
 // HIVE_LANE (claude+plugin-hive agents), never DEFAULT_LANE/codex. Two signals:
 // (1) explicit labels (forward-compat for when labels start being set), or
@@ -161,12 +184,15 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
   const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
 
-  // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set.
+  // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set,
+  // and NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the human
+  // queue instead via scripts/export-human-queue.mjs).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
     .filter((i) => !i.assignee_id)
     .filter((i) => !isSmokeScratch(i.title))
-    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
+    .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
+    .filter((i) => !isHumanTodo(i, cfg));
 
   // Stable ordering: by project scan order, then by issue number ascending
   // (older/foundational tickets first).
