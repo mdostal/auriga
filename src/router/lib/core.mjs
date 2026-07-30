@@ -175,7 +175,7 @@ export function isSeed(issue, allIssues = []) {
   // ({ id, name, color, ... }), not plain strings — normalize to names so
   // this matches real API data, not just string-array test fixtures.
   const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
-  const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan');
+  const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
   if (explicitlyMarked) return true;
   const isTopLevel = !issue.parent_issue_id;
   const isChildless = !allIssues.some((i) => i.parent_issue_id === issue.id);
