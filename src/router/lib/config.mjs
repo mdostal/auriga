@@ -95,7 +95,7 @@ export const PROJECT_NAMES = {
 };
 
 // All project IDs the router scans.
-export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96']; // ALIGNED-ONLY overnight (Auriga/Heimdall/Consus); the 14 unaligned projects need agents+repos (Mathew AM decision) before their tickets do real work
+export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', 'd8ecfab4-79bd-4290-8127-290885f01f38']; // Aligned lanes (Auriga/Heimdall/Consus) PLUS Pantheon Core (d8ecfab4): the Consus ideabox drops [idea] seeds here and they must be scanned so the router routes them to the Minerva planning lane (dogfood front-half loop, PAN-6646). Pantheon Core currently holds ONLY unplanned seeds -> minerva-dev planning, zero build-lane dispatch. The other unaligned projects still need agents+repos before their tickets do real work
 
 // Project -> ordered candidate agent lanes.
 // Aligned lanes (agent repo matches the project) are preferred and listed first.

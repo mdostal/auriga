@@ -323,6 +323,11 @@ test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/
   assert.equal(core.isSeed({ id: 'x2', labels: ['needs-plan'] }, []), true);
 });
 
+test("isSeed: 'consus-idea' label (Consus ideabox) is an explicit seed even with a parent", () => {
+  assert.equal(core.isSeed({ id: 'ci1', labels: ['consus-idea'], parent_issue_id: 'epic1' }, []), true);
+  assert.equal(core.isSeed({ id: 'ci2', labels: [{ id: 'l', name: 'consus-idea' }] }, []), true);
+});
+
 test('isSeed: real API label shape (array of {name,...} objects, not strings) is still detected', () => {
   // multica issue list/get return labels as objects, e.g.
   // [{ id, name: 'idea', color, ... }] — not ['idea']. A child issue (has a
