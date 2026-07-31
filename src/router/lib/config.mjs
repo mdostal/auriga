@@ -95,7 +95,7 @@ export const PROJECT_NAMES = {
 };
 
 // All project IDs the router scans.
-export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', 'd8ecfab4-79bd-4290-8127-290885f01f38']; // Aligned lanes (Auriga/Heimdall/Consus) PLUS Pantheon Core (d8ecfab4): the Consus ideabox drops [idea] seeds here and they must be scanned so the router routes them to the Minerva planning lane (dogfood front-half loop, PAN-6646). Pantheon Core currently holds ONLY unplanned seeds -> minerva-dev planning, zero build-lane dispatch. The other unaligned projects still need agents+repos before their tickets do real work
+export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', 'd8ecfab4-79bd-4290-8127-290885f01f38']; // Aligned lanes (Auriga/Heimdall/Consus) PLUS Pantheon Core (d8ecfab4): the Consus ideabox drops [idea] seeds here and they must be scanned so the router routes them to the Minerva planning lane (dogfood front-half loop, PAN-6646). Pantheon Core now closes the FULL loop: seeds -> minerva-dev planning, AND the decomposed non-seed child stories Minerva files back INTO this same project -> auriga-build (see PROJECT_LANE[PANTHEON_CORE]). The other unaligned projects still need agents+repos before their tickets do real work
 
 // Project -> ordered candidate agent lanes.
 // Aligned lanes (agent repo matches the project) are preferred and listed first.
@@ -104,12 +104,22 @@ const CONSUS = '282343e2-b741-4438-bc80-b93c34819a96';
 const HEIMDALL = '8cb0298a-8a45-45c2-8d09-bc219e2d8a82';
 const AURIGA = 'd78a9f5d-8792-45e8-89e0-bd7b916564ca';
 const MINERVA = '6327fdaf-789e-4290-ab41-1421957b55c6';
+const PANTHEON_CORE = 'd8ecfab4-79bd-4290-8127-290885f01f38';
 
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
   [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
   [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
   [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
+  // Pantheon Core is the dogfood seed drop (Consus ideabox) AND where Minerva now files the
+  // decomposed child stories of those seeds (a seed dropped here yields stories here — see
+  // Minerva's fileStoriesToMultica project resolution). Seeds themselves still route to
+  // minerva-dev (the isSeed check in core.mjs runs FIRST); this lane applies only to the
+  // NON-seed decomposed build-stories. They must never fall back to DEFAULT_LANE (codex/opencode
+  // have no plugin-hive and self-block on /hive:execute) — route them to the claude+hive BUILD
+  // lane. Minerva's stories are also hive-shaped, so isHiveStory routes most of them via
+  // HIVE_LANE anyway; this entry closes the gap for any decomposed story that isn't hive-shaped.
+  [PANTHEON_CORE]: ['auriga-build'],
 };
 
 // Fallback lane for every other project: spread across the two Codex agents.
