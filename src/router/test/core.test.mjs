@@ -22,11 +22,12 @@ const CFG = {
     HEIMDALL: ['heimdall-dev', 'heimdall-dev-codex'],
     AURIGA: ['auriga-dev'],
     MINERVA: ['auriga-dev'],
+    PCORE: ['auriga-build'], // Pantheon Core: decomposed non-seed stories -> claude+hive build lane
   },
   DEFAULT_LANE: ['auriga-dev', 'heimdall-dev-codex'],
   HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
-  PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS'],
-  PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus' },
+  PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
+  PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus', PCORE: 'Pantheon Core' },
   CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
@@ -395,6 +396,41 @@ test('routing: top-level issue with a child in the scanned set is not seed-class
   const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
   assert.equal(byId['parent1'], 'auriga-dev'); // has a child -> not a seed -> normal build lane
   assert.equal(byId['child1'], 'auriga-dev');  // has a parent -> not a seed -> normal build lane
+});
+
+test('routing: a decomposed non-seed story in Pantheon Core routes to the build lane, not codex', () => {
+  // The full-loop close: a seed dropped in Pantheon Core is planned by Minerva, which files the
+  // child stories back INTO Pantheon Core. Those non-seed stories must reach auriga-build.
+  const epicParent = todo('pc-epic', 'PCORE', 1); // has a child below -> not a seed
+  const childStory = story('pc-story', 'PCORE', 2, 'pc-epic'); // non-hive-shaped decomposed story
+  const picks = core.selectAssignments([epicParent, childStory], CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['pc-story'], 'auriga-build'); // build lane, never DEFAULT_LANE codex
+});
+
+test('depsSatisfied: gates a story on its depends_on metadata (only done/cancelled unblock)', () => {
+  const statusById = new Map([['dep-done', 'done'], ['dep-open', 'in_progress'], ['dep-cxl', 'cancelled']]);
+  assert.equal(core.depsSatisfied({ metadata: {} }, statusById), true); // no deps
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: '' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-done' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-cxl' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-open' } }, statusById), false);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-done,dep-open' } }, statusById), false);
+  // A dependency we can't see (not in the scanned set) must NOT block (no deadlock).
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'ghost' } }, statusById), true);
+});
+
+test('routing: selectAssignments withholds a story whose dep isn\'t done, dispatches once it is', () => {
+  // s2 depends_on s1 (carried as the resolved issue id in metadata). While s1 is todo, only s1
+  // dispatches; when s1 is done, s2 becomes eligible.
+  const s1 = story('s1id', 'AURIGA', 1, 'epicX');
+  const s2 = { ...story('s2id', 'AURIGA', 2, 'epicX'), metadata: { depends_on: 's1id' } };
+  let picks = core.selectAssignments([s1, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['s1id']); // s2 blocked by unfinished s1
+
+  const s1done = { ...s1, status: 'done' };
+  picks = core.selectAssignments([s1done, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['s2id']); // s1 done -> s2 unblocked
 });
 
 test('routing: seed skipped when minerva-dev has no capacity, never falls back to a build agent', () => {

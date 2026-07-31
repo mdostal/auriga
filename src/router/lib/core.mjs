@@ -182,6 +182,28 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// Dependency gate: is this issue's declared depends_on satisfied enough to dispatch?
+// Minerva carries a decomposed story's story->story DAG into Multica as a `depends_on`
+// metadata value (comma-separated dependency ISSUE ids — see fileStoriesToMultica). The router
+// must NOT dispatch a story whose dependency stories aren't done yet. `statusById` is a Map of
+// issueId -> lowercased status built from the same scanned board the caller already has.
+//
+// Rule: a dependency BLOCKS iff we can SEE it (it's in the scanned set) AND it isn't a terminal
+// success/dead state (done/cancelled). A dependency we can't see (different/unscanned project)
+// is NOT treated as blocking — that would deadlock forever on something the router can't observe;
+// in practice an epic's stories all land in the same project so every dep is visible.
+export function depsSatisfied(issue, statusById) {
+  const raw = issue && issue.metadata && issue.metadata.depends_on;
+  if (raw == null || raw === '') return true;
+  const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  for (const id of ids) {
+    const st = statusById.get(id);
+    if (st === undefined) continue; // unseen dep -> don't block (avoid deadlock)
+    if (st !== 'done' && st !== 'cancelled' && st !== 'canceled') return false;
+  }
+  return true;
+}
+
 // Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
@@ -214,15 +236,21 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
   const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
 
+  // issueId -> lowercased status, over the WHOLE scanned board (not just candidates) so the
+  // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
+  const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
+
   // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set,
-  // and NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the human
-  // queue instead via scripts/export-human-queue.mjs).
+  // NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the human queue instead via
+  // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never dispatch a
+  // decomposed story whose dependency stories aren't done yet — see depsSatisfied).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
     .filter((i) => !i.assignee_id)
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
-    .filter((i) => !isHumanTodo(i, cfg));
+    .filter((i) => !isHumanTodo(i, cfg))
+    .filter((i) => depsSatisfied(i, statusById));
 
   // Stable ordering: by project scan order, then by issue number ascending
   // (older/foundational tickets first).
