@@ -104,8 +104,20 @@ async function cycle() {
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     const unblocks = core.detectUnblocks(blockedIssues, statusById);
     for (const u of unblocks) {
-      const priorRuns = mca.issueRuns(u.identifier);
-      if (priorRuns.length > 0) { log('unblock_skip', { identifier: u.identifier, reason: 'has-prior-runs', runs: priorRuns.length }); continue; }
+      // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
+      // means it is already in review, a MERGED PR means it already shipped. A
+      // merely-stale or failed run from earlier churn must NOT block the unblock
+      // (that is exactly the cm-02/cm-03 case: one refused run each from the
+      // pre-target_repo churn, but never actually built). So gate on a real PR,
+      // discovered via gh in the story's own target repo, not on run count.
+      const issueObj = blockedIssues.find((b) => b.id === u.issueId) || {};
+      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      let hasPr = false;
+      if (slug) {
+        try { hasPr = mca.ghPrs(slug, 'all').some((pr) => core.prReferencesIssue(pr, u.identifier)); }
+        catch (e) { log('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
+      }
+      if (hasPr) { log('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
       log('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !DRY });
       if (!DRY) {
         try {
