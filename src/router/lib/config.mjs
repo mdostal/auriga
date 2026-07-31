@@ -82,6 +82,19 @@ export const PROJECT_LANE = {
 // Fallback lane for every other project: spread across the two Codex agents.
 export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
 
+// Known human names for the `waiting_on: <human>` priority-1 dispatch filter
+// (see isHumanTodo in lib/core.mjs). Matched case-insensitively, substring OK
+// (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
+// Add a name here when a new human-owned ticket needs to route to the human
+// queue (scripts/export-human-queue.mjs) instead of an agent lane.
+export const HUMAN_NAMES = ['mathew', 'dostal'];
+
+// Workspace member to @mention when a human-todo needs the operator's
+// attention (see scripts/bulk-extract-human-todos.mjs notifyOperator).
+// Resolved via `multica workspace member list --output json` (user_id field);
+// this workspace currently has exactly one human member.
+export const HUMAN_OPERATOR_MEMBER_ID = '6506b1e5-08da-452c-81d9-d32e2ca31950'; // dostalmathew, owner
+
 // Batch / cadence caps.
 export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip
