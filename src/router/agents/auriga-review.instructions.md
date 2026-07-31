@@ -14,8 +14,9 @@ HARD GUARD — the resolved repo is the ONLY repo you may touch, and it MUST be 
 On the resolved repo, locate the open PR for this ticket (branch convention is `feat/<TICKET-ID>`):
   gh pr list --repo <owner/repo> --state open --json number,headRefName,baseRefName,title,url
 Pick the PR whose head branch is `feat/<TICKET-ID>` or whose title starts with `<TICKET-ID>:`.
-  - If NO open PR exists: the build has not produced one yet — comment "no open PR found for this story; nothing to review" on the ticket and set it to `blocked` (do NOT invent work). Stop.
-  - VERIFY the PR base branch is `dev`. If it targets anything other than `dev` (especially `main`), do NOT merge — comment on the PR that review/ship only merges into `dev`, and set the ticket to `blocked`. Stop.
+  - ALREADY MERGED: if the PR for this ticket is already MERGED (check `gh pr list --repo <owner/repo> --state merged --search "<TICKET-ID> in:title"`, expect a mergedAt), the work already shipped — this story is DONE, not blocked. Set `multica --profile dostal issue status <TICKET-ID> done` and stop (no re-review, no re-merge).
+  - If NO PR exists at all (neither open nor merged): the build has not produced one yet — comment "no open PR found for this story; nothing to review" on the ticket and set it to `blocked` (do NOT invent work). Stop.
+  - VERIFY the open PR's base branch is `dev`. If it targets anything other than `dev` (especially `main`), do NOT merge — comment on the PR that review/ship only merges into `dev`, and set the ticket to `blocked`. Stop.
 
 == STEP 3 — CHECK OUT THE PR BRANCH ==
   gh repo clone <owner/repo> .
