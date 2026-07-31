@@ -92,6 +92,42 @@ async function cycle() {
 
   const blockedRuntimes = new Set();
 
+  // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
+  // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
+  // not built yet) is invisible to every other pass — the build candidate pool only
+  // scans `todo`. detectUnblocks finds blocked stories whose DECLARED depends_on graph
+  // is fully satisfied and advances them to todo + unassign so they re-enter routing as
+  // fresh candidates. Guard: skip any that already have runs (already built / in flight),
+  // so an anomalous blocked-with-open-PR story is never re-dispatched.
+  {
+    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked');
+    const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
+    const unblocks = core.detectUnblocks(blockedIssues, statusById);
+    for (const u of unblocks) {
+      const priorRuns = mca.issueRuns(u.identifier);
+      if (priorRuns.length > 0) { log('unblock_skip', { identifier: u.identifier, reason: 'has-prior-runs', runs: priorRuns.length }); continue; }
+      log('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !DRY });
+      if (!DRY) {
+        try {
+          mca.issueStatus(u.identifier, 'todo');
+          try { mca.unassignIssue(u.identifier); } catch (e) { log('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
+        } catch (e) { log('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
+      }
+    }
+
+    // ---- state-machine: parent/epic -> done when every child is terminal ----
+    // Nothing else closes a parent when its last child completes. Fires only when
+    // ALL of a parent's visible children are done/cancelled and the parent isn't
+    // already terminal.
+    const parentDone = core.detectParentDone(issues);
+    for (const pd of parentDone) {
+      log('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !DRY });
+      if (!DRY) {
+        try { mca.issueStatus(pd.identifier, 'done'); } catch (e) { log('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
+      }
+    }
+  }
+
   // ---- state-machine: in_progress -> in_review, in_review -> done ----
   // Pure-code, no agent calls. Single-instance pidfile lock (acquireLock above)
   // makes each cycle atomic w.r.t. other router processes; re-deriving the
