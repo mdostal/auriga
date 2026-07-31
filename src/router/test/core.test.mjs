@@ -687,6 +687,46 @@ test('descDepsSatisfied resolves slug deps against siblings by short key', () =>
   assert.equal(core.descDepsSatisfied(m02, [m02]), true);
 });
 
+// Regression (PAN-6664, 2026-07-31): the "p1-<name>" epic convention has NO short
+// "prefix-NN" key — the whole slug is the id — so storyKey/slugKey both return
+// null for it and the short-key lookup above silently skipped every dep, making
+// descDepsSatisfied vacuously true regardless of the real dependency's status.
+// This produced a live blocked->todo->blocked loop on PAN-6664 every router cycle.
+test('descStoryId reads the story-level `id:` front-matter slug', () => {
+  const s = { description: 'id: p1-triage-bulk-reassign\nepic: p1-dispatch-throughput\ntitle: x\ndepends_on: [p1-router-capability-routing]\n' };
+  assert.equal(core.descStoryId(s), 'p1-triage-bulk-reassign');
+  assert.equal(core.descStoryId({ description: 'no id line here' }), null);
+});
+
+test('descDepsSatisfied resolves "p1-<name>" slug deps by exact `id:` match, not short key', () => {
+  const parent = 'P';
+  // slugKey/storyKey both return null for this convention (epic tag "p1" mixes a
+  // letter and a digit before the hyphen) — confirms the short-key path can't help here.
+  assert.equal(core.slugKey('p1-router-capability-routing'), null);
+  assert.equal(core.storyKey({ title: '[p1-router-capability-routing] Fix capability-aware routing' }), null);
+
+  const capRoutingDone = {
+    id: 'a', status: 'done', parent_issue_id: parent,
+    title: '[p1-router-capability-routing] Fix capability-aware routing for hive stories',
+    description: 'id: p1-router-capability-routing\ndepends_on: []\n',
+  };
+  const stateMachineBlocked = {
+    id: 'c', status: 'blocked', parent_issue_id: parent,
+    title: '[p1-state-machine-transitions] Implement pure-code state-machine transitions',
+    description: 'id: p1-state-machine-transitions\ndepends_on: []\n',
+  };
+  const bulkReassign = {
+    id: 'b', status: 'blocked', parent_issue_id: parent,
+    title: '[p1-triage-bulk-reassign] Bulk reassign codex-self-blocked stories',
+    description: 'id: p1-triage-bulk-reassign\ndepends_on: [p1-router-capability-routing, p1-state-machine-transitions]\n',
+  };
+  // one dep done, one still blocked -> must NOT be satisfied
+  assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineBlocked]), false);
+  // both deps done -> satisfied
+  const stateMachineDone = { ...stateMachineBlocked, status: 'done' };
+  assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineDone]), true);
+});
+
 test('detectUnblocks fires on a blocked story whose DESCRIPTION dep (not metadata) is done', () => {
   const parent = 'P';
   const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };

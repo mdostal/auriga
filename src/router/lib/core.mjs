@@ -101,6 +101,22 @@ export function descStoryDeps(issue = {}) {
     .filter((s) => !HIVE_PHASE_TOKENS.has(s.toLowerCase()));
 }
 
+// A story's own declared id, from the Minerva YAML front-matter `id: <slug>` line
+// (e.g. "id: p1-router-capability-routing"). Some epics (the "p1-..." convention)
+// use this full descriptive slug as BOTH the story's identity and the value every
+// sibling's depends_on: [...] names — there is no separate short "prefix-NN" key
+// to extract (storyKey/slugKey return null for "p1-router-capability-routing",
+// since the epic tag "p1" mixes a letter and a digit before the first hyphen,
+// which the [a-z]{1,8}-\d{1,3} pattern below doesn't match). Falling through
+// descDepsSatisfied's short-key lookup for this convention silently treated
+// EVERY dep as unresolved -> vacuously satisfied, so a story never actually
+// waited on its declared deps (PAN-6664 loop-integrity bug, 2026-07-31).
+export function descStoryId(issue = {}) {
+  const desc = issue.description || '';
+  const m = desc.match(/(^|\n)\s*id:\s*([a-z0-9][a-z0-9_-]*)/i);
+  return m ? m[2].trim().toLowerCase() : null;
+}
+
 // Classify a single run object.
 export function classifyRun(run, now = Date.now()) {
   const status = (run.status || '').toLowerCase();
@@ -691,20 +707,29 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 // check, so a story that was parked in `blocked` but already carries runs / an
 // open PR (an anomaly) is never re-dispatched.
 // Are this story's DESCRIPTION-declared dependency slugs all satisfied? Each dep
-// slug (e.g. "m-01-core-recall-interface") is resolved to its SIBLING story (same
-// parent_issue_id) by short key (storyKey === slugKey). A resolved sibling BLOCKS
-// unless it is terminal (done/cancelled). An unresolvable slug (no sibling visible)
-// does NOT block — same anti-deadlock rule depsSatisfied uses for unseen deps.
+// slug (e.g. "m-01-core-recall-interface" or "p1-router-capability-routing") is
+// resolved to its SIBLING story (same parent_issue_id) by, in order:
+//   1. an EXACT match against the sibling's own declared `id:` slug (descStoryId)
+//      — the "p1-..." convention, where the full slug IS the identity; or
+//   2. the short epic-scoped key (storyKey === slugKey) — the "m-01"/"cm-07"
+//      convention, kept for backward compatibility.
+// A resolved sibling BLOCKS unless it is terminal (done/cancelled). A slug that
+// resolves via NEITHER form does NOT block — same anti-deadlock rule depsSatisfied
+// uses for unseen deps.
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
   const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
   const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
   for (const slug of slugs) {
-    const k = slugKey(slug);
-    if (!k) continue;
-    const dep = siblings.find((s) => storyKey(s) === k);
-    if (!dep) continue; // unresolved — don't block (avoid deadlock)
+    const slugLower = slug.toLowerCase();
+    let dep = siblings.find((s) => descStoryId(s) === slugLower);
+    if (!dep) {
+      const k = slugKey(slug);
+      if (!k) continue; // neither form resolves — unresolved, don't block (avoid deadlock)
+      dep = siblings.find((s) => storyKey(s) === k);
+      if (!dep) continue; // unresolved — don't block (avoid deadlock)
+    }
     if (!terminal((dep.status || '').toLowerCase())) return false;
   }
   return true;
