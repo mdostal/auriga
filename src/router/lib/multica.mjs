@@ -25,9 +25,37 @@ function run(args, { json = true } = {}) {
   return out.trim() ? JSON.parse(out) : null;
 }
 
-export function listIssues(projectId) {
-  const res = run(['issue', 'list', '--project', projectId, '--output', 'json']);
-  return (res && res.issues) || [];
+// `multica issue list` caps at --limit (default 50) issues per call. Projects with
+// more than a page of issues (Pantheon Core — the seed-flood project) were therefore
+// only PARTIALLY scanned: every status pass silently missed the tail of the board
+// (PAN-6952 and dozens of others were invisible, so they never advanced). Paginate
+// with --offset until a short page is returned so we get EVERY issue in the project.
+export function listIssues(projectId, pageSize = 200) {
+  const all = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const res = run(['issue', 'list', '--project', projectId, '--output', 'json',
+      '--limit', String(pageSize), '--offset', String(offset)]);
+    const page = (res && res.issues) || [];
+    for (const i of page) all.push(i);
+    if (page.length < pageSize) break; // last (short) page
+    if (offset > 100000) break;         // hard safety stop
+  }
+  return all;
+}
+
+// Every project id in the workspace. Used by the board-wide STATUS passes (unblock,
+// parent-rollup, false-done, verified-done) which must see the whole board — the
+// blocked/done lies live in projects the build DISPATCH set deliberately excludes.
+// Returns [] on any error so the caller falls back to the static PROJECT_IDS.
+export function listAllProjectIds() {
+  try {
+    const res = run(['project', 'list', '--output', 'json']);
+    const ps = Array.isArray(res) ? res : (res && res.projects) || [];
+    return ps.map((p) => p && p.id).filter(Boolean);
+  } catch (e) {
+    process.stderr.write('listAllProjectIds failed: ' + e.message + '\n');
+    return [];
+  }
 }
 
 export function listAllIssues(projectIds) {
@@ -90,6 +118,23 @@ export function ghOpenPrs(repo) {
     return Array.isArray(arr) ? arr : [];
   } catch (e) {
     process.stderr.write('ghOpenPrs(' + repo + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}
+
+// Every repo slug for an owner via `gh repo list`, as ['owner/name', ...]. Lets the
+// review lane sweep ALL of the owner's repos for open PRs — not just a hardcoded
+// subset (logic-loops PR#1 sat forever because its repo was not in the static list).
+// Returns [] on any error so the caller falls back to REVIEW_SEARCH_REPOS.
+export function ghListRepos(owner, limit = 300) {
+  try {
+    const out = execFileSync(GH, [
+      'repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
+  } catch (e) {
+    process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
     return [];
   }
 }

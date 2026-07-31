@@ -639,3 +639,125 @@ test('detectParentDone: an already-done parent is not re-emitted', () => {
   ];
   assert.equal(core.detectParentDone(issues).length, 0);
 });
+
+// ============================================================================
+// Loop-integrity fixes (2026-07-31): story-key matching, description-declared
+// dep resolution, false-done demotion, hive-lane zombie reroute.
+// ============================================================================
+
+test('storyKey extracts the short epic key from a [key-NN-...] title', () => {
+  assert.equal(core.storyKey({ title: '[m-02-file-layer-implementation] Implement file layer' }), 'm-02');
+  assert.equal(core.storyKey({ title: '[cm-07-e2e-integration] End-to-end' }), 'cm-07');
+  assert.equal(core.storyKey({ title: '[hf-01-data-persistence-layer] SQLite' }), 'hf-01');
+  assert.equal(core.storyKey({ title: 'No bracket here' }), null);
+});
+
+test('slugKey reduces a full dep slug to its short key', () => {
+  assert.equal(core.slugKey('m-01-core-recall-interface'), 'm-01');
+  assert.equal(core.slugKey('research'), null);
+});
+
+test('descStoryDeps reads the story-level depends_on and drops hive phase tokens', () => {
+  const dep = { description: 'id: m-02\ndepends_on: [m-01-core-recall-interface]\nsteps:\n  - id: research\n    depends_on: [research]\n' };
+  assert.deepEqual(core.descStoryDeps(dep), ['m-01-core-recall-interface']);
+  const root = { description: 'id: m-01\ndepends_on: []\nsteps:\n' };
+  assert.deepEqual(core.descStoryDeps(root), []);
+  const none = { description: 'no deps at all' };
+  assert.deepEqual(core.descStoryDeps(none), []);
+});
+
+test('prMatchesStory matches on PAN id OR the short story key (slug-branched PRs)', () => {
+  const m01 = { identifier: 'PAN-6439', title: '[m-01-core-recall-interface] recall iface' };
+  assert.ok(core.prMatchesStory({ headRefName: 'feat/m-01-service' }, m01)); // slug-branch, no PAN id
+  const s = { identifier: 'PAN-6952', title: '[s1-project-scaffold] scaffold' };
+  assert.ok(core.prMatchesStory({ headRefName: 'feat/PAN-6952' }, s)); // PAN id (uppercase)
+  // must NOT match a longer-numbered key (m-01 vs m-010)
+  assert.ok(!core.prMatchesStory({ headRefName: 'feat/m-010-other' }, m01));
+  assert.ok(!core.prMatchesStory({ headRefName: 'docs/oss-launch' }, m01));
+});
+
+test('descDepsSatisfied resolves slug deps against siblings by short key', () => {
+  const parent = 'P';
+  const m01done = { id: 'a', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };
+  const m01todo = { ...m01done, status: 'todo' };
+  const m02 = { id: 'b', title: '[m-02-file-layer] y', status: 'blocked', parent_issue_id: parent, description: 'depends_on: [m-01-core-recall-interface]\n' };
+  assert.equal(core.descDepsSatisfied(m02, [m02, m01done]), true);
+  assert.equal(core.descDepsSatisfied(m02, [m02, m01todo]), false);
+  // unresolved dep (no sibling) -> does not block (anti-deadlock)
+  assert.equal(core.descDepsSatisfied(m02, [m02]), true);
+});
+
+test('detectUnblocks fires on a blocked story whose DESCRIPTION dep (not metadata) is done', () => {
+  const parent = 'P';
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };
+  const m02 = { id: 'b', identifier: 'PAN-6440', project_id: 'MEM', title: '[m-02-file-layer] y', status: 'blocked', parent_issue_id: parent, metadata: {}, description: 'depends_on: [m-01-core-recall-interface]\n' };
+  const all = [m01, m02];
+  const statusById = new Map(all.map((i) => [i.id, i.status]));
+  const acts = core.detectUnblocks([m02], statusById, all);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'PAN-6440');
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  // if the dep is not done, it stays blocked
+  const m01todo = { ...m01, status: 'todo' };
+  const all2 = [m01todo, m02];
+  const s2 = new Map(all2.map((i) => [i.id, i.status]));
+  assert.equal(core.detectUnblocks([m02], s2, all2).length, 0);
+});
+
+test('detectFalseDone demotes a done story that still has an OPEN matching PR', () => {
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done' };
+  const openPrs = [{ headRefName: 'feat/m-01-service', state: 'open', url: 'u' }];
+  const acts = core.detectFalseDone([m01], openPrs);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  // a merged PR (not open) does NOT demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-service', state: 'merged', merged_at: 'x' }]).length, 0);
+  // no PR at all -> leave the done story alone (may be a legit non-code task)
+  assert.equal(core.detectFalseDone([m01], []).length, 0);
+});
+
+test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => {
+  assert.ok(core.isHiveCapableAssignee('AB', CFG));  // auriga-build
+  assert.ok(core.isHiveCapableAssignee('RV', CFG));  // auriga-review
+  assert.ok(!core.isHiveCapableAssignee('A', CFG));  // auriga-dev (codex)
+  assert.ok(!core.isHiveCapableAssignee('HC', CFG)); // heimdall-dev-codex
+  assert.ok(!core.isHiveCapableAssignee(null, CFG));
+});
+
+test('detectZombies reroutes a hive story stuck on a codex lane instead of rerunning it', () => {
+  const stale = Date.now() - (60 * 60 * 1000); // 1h old
+  const hiveOnCodex = { id: 'z1', identifier: 'PAN-z1', project_id: 'MEM', title: '[m-05-x] y', status: 'in_progress', assignee_id: 'A', description: HIVE_DESCRIPTION };
+  const runs = { 'PAN-z1': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
+  const acts = core.detectZombies([hiveOnCodex], runs, CFG, Date.now());
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'assign'); // reroute, NOT rerun
+  assert.equal(acts[0].reason, 'hive-on-noncapable-lane');
+  // a non-hive story on codex is a normal rerun
+  const plainOnCodex = { id: 'z2', identifier: 'PAN-z2', project_id: 'AURIGA', title: 'plain task', status: 'in_progress', assignee_id: 'A' };
+  const runs2 = { 'PAN-z2': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
+  const a2 = core.detectZombies([plainOnCodex], runs2, CFG, Date.now());
+  assert.equal(a2[0].action, 'rerun');
+});
+
+test('prIdentityMatchesStory ignores body mentions (branch/title only)', () => {
+  const s = { identifier: 'PAN-6659', title: '[p1-router-human-filter] x' };
+  // body merely references the ticket -> NOT this PR's identity
+  assert.ok(!core.prIdentityMatchesStory({ headRefName: 'feat/other', title: 'unrelated', body: 'builds on PAN-6659' }, s));
+  // branch carrying the id IS identity
+  assert.ok(core.prIdentityMatchesStory({ headRefName: 'feat/pan-6659-router', title: 'x' }, s));
+});
+
+test('detectFalseDone does not demote on a body-only mention or a wrong-repo PR', () => {
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', metadata: { target_repo: 'mdostal/mnemosyne' } };
+  // right key but WRONG repo -> no demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-thing', state: 'open', _repo: 'mdostal/other' }]).length, 0);
+  // body-only mention -> no demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/z', title: 'z', body: 'PAN-6439 referenced', state: 'open', _repo: 'mdostal/mnemosyne' }]).length, 0);
+  // right key AND right repo (branch identity) -> demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-service', state: 'open', _repo: 'mdostal/mnemosyne', url: 'https://github.com/mdostal/mnemosyne/pull/1' }]).length, 1);
+});
+
+test('repoFromPrUrl parses owner/repo from a PR url', () => {
+  assert.equal(core.repoFromPrUrl({ url: 'https://github.com/mdostal/mnemosyne/pull/1' }), 'mdostal/mnemosyne');
+  assert.equal(core.repoFromPrUrl({}), null);
+});
