@@ -12,15 +12,25 @@
 // by its title. isHumanTodoBroad below layers a title check on top of
 // core.isHumanTodo without changing core.mjs's existing behavior/signature.
 //
-// Default mode is report-only / dry-run: it NEVER mutates an issue. Per the
-// story's own risk mitigation ("Broad query + manual review before run"), a
-// human should review .pHive/human-todo-extraction-report.yaml before any
-// label is applied. Pass --apply (or set AURIGA_HUMAN_QUEUE_APPLY=1) to
-// opt in to applying the `human-todo` label to eligible entries.
+// Default mode is report-only / dry-run for MUTATION: it never applies the
+// human-todo label unless asked. Per the story's own risk mitigation ("Broad
+// query + manual review before run"), a human should review
+// .pHive/human-todo-extraction-report.yaml before that label is applied. Pass
+// --apply (or set AURIGA_HUMAN_QUEUE_APPLY=1) to opt in.
 //
-// Run (report-only):  node scripts/bulk-extract-human-todos.mjs
-// Run (apply labels):  node scripts/bulk-extract-human-todos.mjs --apply
-// Env overrides: AURIGA_HUMAN_TODO_REPORT (output path), AURIGA_HUMAN_QUEUE_APPLY=1
+// NOTIFICATION is not gated the same way: it's a single low-risk comment (not
+// a board mutation), so it runs by default whenever a still-exposed
+// (todo/in_progress), not-yet-labeled human-todo is found — that's the whole
+// point of the "human operator is notified" acceptance criterion; a human
+// shouldn't have to remember to go check a YAML file. Pass --no-notify (or
+// set AURIGA_HUMAN_QUEUE_NOTIFY=0) to suppress it (e.g. for a dry inspection
+// run, or CI).
+//
+// Run (report only, default):        node scripts/bulk-extract-human-todos.mjs
+// Run (report + apply labels):       node scripts/bulk-extract-human-todos.mjs --apply
+// Run (report only, no notify):      node scripts/bulk-extract-human-todos.mjs --no-notify
+// Env overrides: AURIGA_HUMAN_TODO_REPORT (output path), AURIGA_HUMAN_QUEUE_APPLY=1,
+//                AURIGA_HUMAN_QUEUE_NOTIFY=0
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,6 +42,7 @@ import * as mca from '../src/router/lib/multica.mjs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const OUT = process.env.AURIGA_HUMAN_TODO_REPORT || path.join(__dirname, '..', '.pHive', 'human-todo-extraction-report.yaml');
 const APPLY = process.argv.includes('--apply') || process.env.AURIGA_HUMAN_QUEUE_APPLY === '1';
+const NOTIFY = !(process.argv.includes('--no-notify') || process.env.AURIGA_HUMAN_QUEUE_NOTIFY === '0');
 
 const HUMAN_TODO_LABEL = 'human-todo';
 
@@ -85,6 +96,10 @@ export function buildExtractionReport(issues, cfg_) {
         // Only entries actually sitting in an agent-dispatchable state right
         // now, not yet labeled, are candidates for --apply's label mutation.
         applyEligible: status === 'todo' && reason !== undefined && !alreadyLabeled,
+        // Entries still exposed to a dispatch pool (todo/in_progress) and not
+        // yet labeled get an operator notification by default — once labeled,
+        // treat it as already surfaced and don't re-notify on every re-run.
+        notifyEligible: (status === 'todo' || status === 'in_progress') && !alreadyLabeled,
       };
     });
 
@@ -99,6 +114,34 @@ export function buildExtractionReport(issues, cfg_) {
   }).length;
 
   return { entries, already_excluded_count, needs_attention_count };
+}
+
+// The comment body posted to a notifyEligible entry. Pure/testable — takes
+// the operator member id as a param rather than importing cfg directly, so
+// tests don't need a real member id.
+export function buildNotificationMessage(entry, operatorMemberId) {
+  const mention = operatorMemberId ? `[@operator](mention://member/${operatorMemberId})` : '@operator';
+  return (
+    `${mention} — flagged as a human-todo by the bulk extraction sweep ` +
+    `(\`scripts/bulk-extract-human-todos.mjs\`, reason: \`${entry.reason}\`). ` +
+    `This issue is currently \`${entry.status}\` and still exposed to the agent dispatch pool. ` +
+    `See \`.pHive/human-todo-extraction-report.yaml\` for the full sweep.`
+  );
+}
+
+// Notify the operator on every notifyEligible entry via a real Multica
+// mention (mca.postComment), not just the report file / console log — a
+// human shouldn't have to remember to go check a file. One comment per
+// issue (not a single digest) so it shows up where the human is already
+// looking for that specific ticket. Returns the list of identifiers notified.
+export function notifyOperator(report, cfg_, mca_) {
+  const notified = [];
+  for (const e of report.entries) {
+    if (!e.notifyEligible) continue;
+    mca_.postComment(e.identifier, buildNotificationMessage(e, cfg_.HUMAN_OPERATOR_MEMBER_ID));
+    notified.push(e.identifier);
+  }
+  return notified;
 }
 
 function yamlScalar(value) {
@@ -128,6 +171,7 @@ function toYaml(report, generatedAt) {
     lines.push(`    assignee_id: ${yamlScalar(e.assignee_id)}`);
     lines.push(`    reason: ${yamlScalar(e.reason)}`);
     lines.push(`    applyEligible: ${e.applyEligible}`);
+    lines.push(`    notifyEligible: ${e.notifyEligible}`);
   }
   return lines.join('\n') + '\n';
 }
@@ -143,6 +187,11 @@ function main() {
       `${report.already_excluded_count} already excluded (blocked/cancelled), ` +
       `${report.needs_attention_count} still exposed to dispatch (todo/in_progress). Report: ${OUT}`
   );
+
+  if (NOTIFY) {
+    const notified = notifyOperator(report, cfg, mca);
+    console.log(`[bulk-extract-human-todos] notified operator on ${notified.length} issue(s): ${notified.join(', ') || '(none)'}`);
+  }
 
   if (!APPLY) return;
 

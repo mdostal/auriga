@@ -1,10 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildExtractionReport, isHumanTodoBroad, humanTodoReasonBroad } from './bulk-extract-human-todos.mjs';
+import {
+  buildExtractionReport,
+  isHumanTodoBroad,
+  humanTodoReasonBroad,
+  buildNotificationMessage,
+  notifyOperator,
+} from './bulk-extract-human-todos.mjs';
 
 const CFG = {
   PROJECT_NAMES: { AURIGA: 'Auriga' },
   HUMAN_NAMES: ['mathew', 'dostal'],
+  HUMAN_OPERATOR_MEMBER_ID: 'operator-uuid-123',
 };
 
 const issue = (id, overrides = {}) => ({
@@ -98,4 +105,46 @@ test('buildExtractionReport: empty when no human-todos are present on the board'
   assert.deepEqual(report.entries, []);
   assert.equal(report.already_excluded_count, 0);
   assert.equal(report.needs_attention_count, 0);
+});
+
+test('buildExtractionReport: notifyEligible is true for todo/in_progress not-yet-labeled matches, false once labeled or terminal', () => {
+  const issues = [
+    issue('t1', { status: 'todo', title: 'HUMAN TODO (Mathew): something' }), // unlabeled, todo -> eligible
+    issue('t2', { status: 'todo', labels: ['human-todo'] }), // already labeled -> not eligible (already surfaced)
+    issue('ip1', { status: 'in_progress', metadata: { waiting_on: 'Mathew' } }), // unlabeled, in_progress -> eligible
+    issue('bl1', { status: 'blocked', title: 'HUMAN TODO (Mathew): something' }), // blocked -> not eligible (not exposed)
+  ];
+  const report = buildExtractionReport(issues, CFG);
+  const byId = Object.fromEntries(report.entries.map((e) => [e.identifier, e]));
+  assert.equal(byId.t1.notifyEligible, true);
+  assert.equal(byId.t2.notifyEligible, false);
+  assert.equal(byId.ip1.notifyEligible, true);
+  assert.equal(byId.bl1.notifyEligible, false);
+});
+
+test('buildNotificationMessage: includes a real member mention, the detection reason, and the report path', () => {
+  const entry = { identifier: 'PAN-6644', status: 'todo', reason: 'title' };
+  const msg = buildNotificationMessage(entry, 'operator-uuid-123');
+  assert.match(msg, /mention:\/\/member\/operator-uuid-123/);
+  assert.match(msg, /reason: `title`/);
+  assert.match(msg, /todo/);
+  assert.match(msg, /human-todo-extraction-report\.yaml/);
+});
+
+test('notifyOperator: posts one comment per notifyEligible entry via mca.postComment, skips ineligible ones, returns notified identifiers', () => {
+  const issues = [
+    issue('t1', { status: 'todo', title: 'HUMAN TODO (Mathew): something' }), // eligible
+    issue('t2', { status: 'todo', labels: ['human-todo'] }), // already labeled -> not eligible
+    issue('d1', { status: 'done', labels: ['human-todo'] }), // terminal -> not a report entry at all
+  ];
+  const report = buildExtractionReport(issues, CFG);
+  const calls = [];
+  const fakeMca = { postComment: (identifier, body) => calls.push({ identifier, body }) };
+
+  const notified = notifyOperator(report, CFG, fakeMca);
+
+  assert.deepEqual(notified, ['t1']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].identifier, 't1');
+  assert.match(calls[0].body, /mention:\/\/member\/operator-uuid-123/);
 });

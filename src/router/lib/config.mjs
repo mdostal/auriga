@@ -89,6 +89,12 @@ export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
 // queue (scripts/export-human-queue.mjs) instead of an agent lane.
 export const HUMAN_NAMES = ['mathew', 'dostal'];
 
+// Workspace member to @mention when a human-todo needs the operator's
+// attention (see scripts/bulk-extract-human-todos.mjs notifyOperator).
+// Resolved via `multica workspace member list --output json` (user_id field);
+// this workspace currently has exactly one human member.
+export const HUMAN_OPERATOR_MEMBER_ID = '6506b1e5-08da-452c-81d9-d32e2ca31950'; // dostalmathew, owner
+
 // Batch / cadence caps.
 export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip

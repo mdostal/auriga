@@ -1,5 +1,8 @@
 // Thin wrapper around the multica CLI with the mandated clean env + profile.
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const CLI = process.env.MULTICA_CLI || '/Users/dostal/.local/bin/multica';
 const PROFILE = process.env.MULTICA_PROFILE || 'dostal';
@@ -110,4 +113,20 @@ function resolveHumanTodoLabelId() {
 export function attachHumanTodoLabel(identifier) {
   const labelId = resolveHumanTodoLabelId();
   return run(['issue', 'label', 'add', identifier, labelId], { json: false });
+}
+
+// Post a comment via a temp file + --content-file, never inline --content:
+// inline content lets the shell mangle backticks/`$()`/quotes in the body
+// before the CLI ever sees them (same rule build/review agents follow for
+// issue comments). Used by scripts/bulk-extract-human-todos.mjs to notify
+// the human operator with a real Multica mention (not just console/file
+// output, which a human has to remember to go look at).
+export function postComment(identifier, body) {
+  const tmp = path.join(os.tmpdir(), `auriga-comment-${identifier}-${process.pid}-${Math.random().toString(36).slice(2)}.md`);
+  fs.writeFileSync(tmp, body);
+  try {
+    return run(['issue', 'comment', 'add', identifier, '--content-file', tmp], { json: false });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
 }
