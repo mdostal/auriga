@@ -576,3 +576,66 @@ test('selectReviewDispatch: dispatches a story once its id is in openPrIds (real
   assert.equal(picks[0].action, 'dispatch-review');
   assert.equal(picks[0].agent, 'auriga-review');
 });
+
+// ---- blocked -> todo auto-unblock (PAN-6662) --------------------------------
+test('detectUnblocks: blocked story with satisfied declared deps -> unblock', () => {
+  const statusById = new Map([['dep1', 'done'], ['dep2', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const acts = core.detectUnblocks([b], statusById);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  assert.equal(acts[0].identifier, 'PAN-1');
+});
+
+test('detectUnblocks: an unsatisfied declared dep keeps the story blocked', () => {
+  const statusById = new Map([['dep1', 'done'], ['dep2', 'in_progress']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 0);
+});
+
+test('detectUnblocks: blocked story with NO declared deps is left untouched', () => {
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', metadata: {} };
+  assert.equal(core.detectUnblocks([b], new Map()).length, 0);
+});
+
+test('detectUnblocks: smoke/scratch blocked story ignored even with satisfied deps', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'SMOKE test', metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 0);
+});
+
+test('detectUnblocks: cancelled dep counts as satisfied (terminal)', () => {
+  const statusById = new Map([['dep1', 'cancelled']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 1);
+});
+
+// ---- parent roll-up (all children terminal -> parent done) ------------------
+test('detectParentDone: parent rolls up once every child is done', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  const acts = core.detectParentDone(issues);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'PAN-P');
+  assert.equal(acts[0].action, 'advance-parent-done');
+});
+
+test('detectParentDone: a not-yet-done child keeps the parent open', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'in_progress', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: an already-done parent is not re-emitted', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'done', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});

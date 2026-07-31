@@ -93,3 +93,11 @@ export function ghOpenPrs(repo) {
     return [];
   }
 }
+
+// Remove an issue's current assignee. Used by the blocked->todo auto-unblock pass
+// so a freshly-unblocked story re-enters build routing as an UNASSIGNED candidate
+// (selectAssignments only considers unassigned todos), instead of keeping its
+// stale plan-time assignee which would exclude it from the candidate pool.
+export function unassignIssue(identifier) {
+  return run(['issue', 'assign', identifier, '--unassign', '--output', 'json']);
+}

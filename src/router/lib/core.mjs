@@ -560,3 +560,68 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   }
   return actions;
 }
+
+// ============================================================================
+// MULTI-STORY CRUX: blocked -> todo auto-unblock (PAN-6662, 2026-07-31)
+// ----------------------------------------------------------------------------
+// A decomposed epic parks its non-root stories in `blocked` at plan time because
+// their dependency stories aren't built yet. Every other pass here only ever
+// looks at todo/in_progress/in_review — NOTHING un-parks a blocked story once its
+// deps merge. So an epic builds its root story, advances it to done, and then
+// stalls forever: cm-02 (depends on cm-01) never leaves `blocked`, even though
+// cm-01 is done. This pass closes that gap.
+//
+// A blocked story is READY to become `todo` iff:
+//   (a) it DECLARES a dependency graph — metadata.depends_on is non-empty, AND
+//   (b) every declared dependency is in a terminal-success state (depsSatisfied,
+//       the same gate the build-dispatch candidate pool uses).
+// A blocked story with NO declared deps is parked for some other (human) reason
+// and is deliberately left untouched — this pass never touches `deps=NONE`
+// blocked work.
+//
+// The router applies the transition (status->todo + unassign so it re-enters
+// routing as a fresh candidate) and separately guards with a zero-prior-runs
+// check, so a story that was parked in `blocked` but already carries runs / an
+// open PR (an anomaly) is never re-dispatched.
+export function detectUnblocks(blockedIssues, statusById) {
+  const actions = [];
+  for (const i of blockedIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    const raw = i && i.metadata && i.metadata.depends_on;
+    const hasDeclaredDeps = raw != null && String(raw).trim() !== '';
+    if (!hasDeclaredDeps) continue; // parked for a non-dependency reason — leave it
+    if (!depsSatisfied(i, statusById)) continue; // a declared dep isn't done yet
+    actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
+  }
+  return actions;
+}
+
+// Pure-code state-machine: which non-terminal PARENT issues should roll up to
+// `done` because every one of their children is already terminal (done/cancelled)?
+// Nothing else advances a parent/epic when its last child completes — detectVerifiedDone
+// only advances the leaf story that owns a merged PR. `issues` is the whole scanned
+// board; a parent is any issue that at least one other issue names via parent_issue_id.
+// Only fires when the parent is IN the scanned set, is not already terminal, and ALL of
+// its (visible) children are terminal — so it never rolls up an epic mid-flight.
+export function detectParentDone(issues) {
+  const byId = new Map(issues.map((i) => [i.id, i]));
+  const childrenByParent = new Map();
+  for (const i of issues) {
+    if (!i.parent_issue_id) continue;
+    if (!childrenByParent.has(i.parent_issue_id)) childrenByParent.set(i.parent_issue_id, []);
+    childrenByParent.get(i.parent_issue_id).push(i);
+  }
+  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
+  const actions = [];
+  for (const [parentId, kids] of childrenByParent) {
+    const parent = byId.get(parentId);
+    if (!parent) continue; // parent not in scanned set — can't judge
+    if (isSmokeScratch(parent.title)) continue;
+    const pst = (parent.status || '').toLowerCase();
+    if (terminal(pst)) continue; // already closed
+    if (!kids.length) continue;
+    const allDone = kids.every((k) => terminal((k.status || '').toLowerCase()));
+    if (allDone) actions.push({ identifier: parent.identifier, issueId: parent.id, projectId: parent.project_id, action: 'advance-parent-done' });
+  }
+  return actions;
+}
