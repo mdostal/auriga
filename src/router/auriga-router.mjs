@@ -73,7 +73,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---- one cycle -------------------------------------------------------------
 async function cycle() {
   const now = Date.now();
-  const issues = mca.listAllIssues(cfg.PROJECT_IDS);
+  // BOARD-WIDE scan for the STATUS passes (unblock, parent-rollup, false-done,
+  // run-completion, verified-done): the blocked/done lies live in projects the
+  // build-DISPATCH set (cfg.PROJECT_IDS) deliberately excludes, so scanning only
+  // those 4 hid them. selectAssignments still filters to cfg.PROJECT_IDS internally
+  // (dispatch stays gated to aligned lanes); only observation goes board-wide.
+  const discovered = mca.listAllProjectIds();
+  const scanIds = [...new Set([...(discovered.length ? discovered : cfg.PROJECT_IDS), ...cfg.PROJECT_IDS])];
+  const issues = mca.listAllIssues(scanIds);
   const inflight = core.computeInflight(issues, cfg.AGENTS);
   const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
@@ -102,7 +109,9 @@ async function cycle() {
   {
     const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked');
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
-    const unblocks = core.detectUnblocks(blockedIssues, statusById);
+    // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
+    // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
+    const unblocks = core.detectUnblocks(blockedIssues, statusById, issues);
     for (const u of unblocks) {
       // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
       // means it is already in review, a MERGED PR means it already shipped. A
@@ -114,7 +123,7 @@ async function cycle() {
       const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
       let hasPr = false;
       if (slug) {
-        try { hasPr = mca.ghPrs(slug, 'all').some((pr) => core.prReferencesIssue(pr, u.identifier)); }
+        try { hasPr = mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj)); }
         catch (e) { log('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
       if (hasPr) { log('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
@@ -179,26 +188,51 @@ async function cycle() {
   const inReviewRuns = {};
   for (const i of inReview) inReviewRuns[i.identifier] = mca.issueRuns(i.identifier);
 
-  // Compute which in_review stories have a REAL open PR referencing the ticket.
+  // Board-wide open-PR gather (shared by false-done + review dispatch).
   // Multica's issue<->PR linkage is empty in practice, so discover PRs directly via
-  // gh across the baseline review-search repos PLUS any explicit target_repo declared
-  // on an in_review story, matching broadly (head branch / title / body). Stories with
-  // no matching open PR (parent seeds / planning / idea tickets) are NOT dispatched to
-  // review, so the review path can never false-block them.
-  const repoSet = new Set((cfg.REVIEW_SEARCH_REPOS || []).map((r) => core.normalizeRepoSlug(r)).filter(Boolean));
-  for (const i of inReview) {
-    const slug = core.normalizeRepoSlug(core.targetRepoValue(i) || '');
-    if (slug) repoSet.add(slug);
-  }
+  // gh across ALL of the owner's repos (live discovery — a new repo like logic-loops
+  // is covered the moment it exists) PLUS the static fallback PLUS any explicit
+  // target_repo on an in_review/done story. Matching is slug-aware (prMatchesStory):
+  // it matches the story's short key (m-01) in a branch, not only the PAN id, so
+  // slug-branched PRs (mnemosyne#1 feat/m-01-service) are found.
+  const discoveredRepos = mca.ghListRepos(cfg.REVIEW_REPO_OWNER);
+  const repoSet = new Set([
+    ...discoveredRepos,
+    ...(cfg.REVIEW_SEARCH_REPOS || []),
+  ].map((r) => core.normalizeRepoSlug(r)).filter(Boolean));
+  for (const i of inReview) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
+  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
+  for (const i of doneIssues) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
   const openPrsAll = [];
   for (const repo of repoSet) {
-    try { for (const pr of mca.ghOpenPrs(repo)) openPrsAll.push(pr); } catch { /* one repo failing must not abort the scan */ }
+    try { for (const pr of mca.ghOpenPrs(repo)) { pr._repo = repo; openPrsAll.push(pr); } } catch { /* one repo failing must not abort the scan */ }
   }
+  // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
+  // parent/seed ticket that some unrelated PR merely references is never dispatched.
   const openPrIds = new Set();
   for (const i of inReview) {
-    if (openPrsAll.some((pr) => core.prReferencesIssue(pr, i.identifier))) openPrIds.add(i.identifier);
+    if (openPrsAll.some((pr) => core.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
   }
   if (inReview.length) log('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
+
+  // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
+  // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
+  // still open is a lie; demote it back to in_review (capped, so never a mass flip)
+  // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
+  // story with no open PR is left alone (may be a legit non-code done task).
+  {
+    const falseDone = core.detectFalseDone(doneIssues, openPrsAll);
+    const cap = (cfg.CAPS && cfg.CAPS.perCycleFalseDone) || 3;
+    let n = 0;
+    for (const f of falseDone) {
+      if (n >= cap) { log('false_done_capped', { remaining: falseDone.length - n }); break; }
+      n++;
+      log('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !DRY });
+      if (!DRY) {
+        try { mca.issueStatus(f.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
+      }
+    }
+  }
 
   const reviewInflight = core.computeReviewInflight(inReview, cfg);
   const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now, openPrIds });
@@ -222,8 +256,12 @@ async function cycle() {
   }
 
   // ---- zombie recovery ----
+  // Board-wide scan feeds the STATUS passes, but zombie recovery DISPATCHES
+  // (rerun/assign), so restrict it to the aligned dispatch set (cfg.PROJECT_IDS) —
+  // never fire a build run into an unscanned/unaligned project.
   if (!NO_ZOMBIE) {
-    const zombies = core.detectZombies(inProgress, runsByIssue, cfg, now);
+    const inProgressDispatch = inProgress.filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
+    const zombies = core.detectZombies(inProgressDispatch, runsByIssue, cfg, now);
     for (const z of zombies) {
       if (assignedThisProcess >= MAX_ASSIGN) break;
       if (z.action === 'rerun') {

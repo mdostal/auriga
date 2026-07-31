@@ -159,6 +159,7 @@ export const CAPS = {
   zombieStaleMs: 20 * 60 * 1000, // 20 min
   verifyDelayMs: 6000, // wait after assign before checking a run started
   perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
+  perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
 };
 
 // ============================================================================
@@ -190,6 +191,13 @@ RUNTIME_CAP['claude-review'] = 1;
 
 // The review/ship lane: in_review stories with an open PR route here.
 export const REVIEW_LANE = ['auriga-review'];
+
+// GitHub owner whose repos the review lane sweeps for open PRs. The router
+// discovers ALL of this owner's repos live (mca.ghListRepos) each cycle so a new
+// repo (logic-loops, house-finder, ...) is covered the moment it exists, instead
+// of waiting to be hand-added to REVIEW_SEARCH_REPOS below. REVIEW_SEARCH_REPOS
+// remains the static fallback used only when live discovery returns nothing.
+export const REVIEW_REPO_OWNER = 'mdostal';
 
 // Baseline repos the review lane searches for a story's open PR. Multica's
 // issue<->PR linkage is empty in practice, so PR discovery goes through gh; the

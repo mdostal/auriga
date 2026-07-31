@@ -52,6 +52,55 @@ export function isHiveStory(issue = {}) {
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
 
+// ---------------------------------------------------------------------------
+// Story-key + slug matching (2026-07-31, loop-integrity fixes).
+// Minerva-planned stories carry a short epic-scoped key in their Multica title,
+// e.g. "[m-02-file-layer-implementation] ..." and their build agents name PR
+// branches after the SAME key ("feat/m-01-service", "feat/PAN-6952", etc.) —
+// NOT always after the PAN-#### ticket id. cron-maker worked because its branches
+// happened to embed the pan-#### id; mnemosyne#1 (feat/m-01-service) does not, so
+// its PR never matched its ticket and sat forever. storyKey() extracts that short
+// key so a PR can be matched to its ticket even when the branch has no PAN id.
+
+// Short epic-scoped key from a story title's leading "[key-NN-...]" bracket
+// (e.g. "m-02", "cm-07", "hf-01"). null when the title has no such bracket.
+export function storyKey(issue = {}) {
+  const m = String(issue.title || '').match(/^\s*\[([a-z]{1,8})-(\d{1,3})/i);
+  return m ? (m[1] + '-' + m[2]).toLowerCase() : null;
+}
+
+// Short key from a dependency SLUG (e.g. "m-01-core-recall-interface" -> "m-01").
+export function slugKey(slug = '') {
+  const m = String(slug).match(/^([a-z]{1,8})-(\d{1,3})/i);
+  return m ? (m[1] + '-' + m[2]).toLowerCase() : null;
+}
+
+// Known plugin-hive PHASE tokens that appear inside a story's `steps:` block as
+// `depends_on: [research]` etc. These are workflow phases, NOT story dependencies,
+// and must be excluded when parsing a story's real cross-story dependency list.
+const HIVE_PHASE_TOKENS = new Set([
+  'research', 'implement', 'implementation', 'test', 'test-spec', 'tests',
+  'review', 'plan', 'design', 'integrate', 'integration', 'spec', 'build',
+]);
+
+// Story-level dependency slugs declared in the DESCRIPTION (not metadata).
+// Minerva emits the story's own dependencies as the FIRST `depends_on: [...]`
+// line in the YAML front-matter (before the `steps:` block). Older stories carry
+// this ONLY in the description, never mirrored into metadata.depends_on — so
+// detectUnblocks/depsSatisfied (which read metadata only) never saw them and the
+// child never unblocked (the m-02-depends-on-m-01 case). We read the FIRST
+// depends_on line and drop any hive PHASE tokens defensively.
+export function descStoryDeps(issue = {}) {
+  const desc = issue.description || '';
+  const m = desc.match(/(^|\n)\s*depends_on:\s*\[([^\]]*)\]/i);
+  if (!m) return [];
+  return m[2]
+    .split(',')
+    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean)
+    .filter((s) => !HIVE_PHASE_TOKENS.has(s.toLowerCase()));
+}
+
 // Classify a single run object.
 export function classifyRun(run, now = Date.now()) {
   const status = (run.status || '').toLowerCase();
@@ -354,6 +403,18 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue) {
 // Detect zombies among in_progress issues.
 // runsByIssue: { [identifier]: runs[] }. Returns recovery actions.
 // action 'rerun' when the issue already has an assignee; 'assign' when it needs (re)routing.
+// Is an assignee id one of the Claude+plugin-hive lanes that can actually run
+// /hive:execute|review|test? Only these may hold a hive-methodology story.
+export function isHiveCapableAssignee(assigneeId, cfg) {
+  if (!assigneeId) return false;
+  const laneNames = new Set([...(cfg.HIVE_LANE || []), ...(cfg.REVIEW_LANE || [])]);
+  for (const name of laneNames) {
+    const a = cfg.AGENTS[name];
+    if (a && a.id === assigneeId) return true;
+  }
+  return false;
+}
+
 export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now()) {
   const actions = [];
   for (const i of inProgressIssues) {
@@ -363,15 +424,22 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     const lr = latestRun(runs);
     const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > cfg.CAPS.zombieStaleMs;
     if (!stale) continue;
+    const isHive = isHiveStory(i);
+    // FIX 2026-07-31 (codex mis-routing): a hive story stuck on a NON-hive-capable
+    // lane (codex/opencode) must never be re-run on that same lane — that just re-
+    // fires the self-block ("plugin-hive execute is unavailable in this Codex
+    // runtime"). Force a REASSIGN to a hive lane instead of a same-assignee rerun.
+    const misLaned = isHive && !!i.assignee_id && !isHiveCapableAssignee(i.assignee_id, cfg);
     actions.push({
       identifier: i.identifier,
       issueId: i.id,
       projectId: i.project_id,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
-      isHive: isHiveStory(i),
-      action: i.assignee_id ? 'rerun' : 'assign',
-      reason: !lr ? 'no-runs' : (classifyRun(lr, now).failed ? 'last-run-failed' : 'run-stale'),
+      isHive,
+      action: (i.assignee_id && !misLaned) ? 'rerun' : 'assign',
+      reason: misLaned ? 'hive-on-noncapable-lane'
+        : (!lr ? 'no-runs' : (classifyRun(lr, now).failed ? 'last-run-failed' : 'run-stale')),
     });
   }
   return actions;
@@ -407,6 +475,45 @@ export function prReferencesIssue(pr = {}, identifier = '') {
     .join('\n')
     .toLowerCase();
   return hay.includes(id);
+}
+
+// Broader PR<->STORY matcher: matches on the ticket identifier (prReferencesIssue)
+// OR on the story's short epic-scoped key (storyKey) appearing in the PR's head
+// branch / title / body. The key match tolerates a trailing "-" (feat/m-01-service)
+// but rejects a trailing digit so "m-01" never matches "m-010". This is what lets
+// slug-branched PRs (mnemosyne#1 feat/m-01-service) match their PAN ticket, which
+// the narrow id-only matcher missed.
+export function prMatchesStory(pr = {}, issue = {}) {
+  if (prReferencesIssue(pr, issue.identifier)) return true;
+  const key = storyKey(issue);
+  if (!key) return false;
+  const hay = [pr.headRefName, pr.head_ref, pr.branch, pr.title, pr.body]
+    .filter((s) => typeof s === 'string').join('\n').toLowerCase();
+  const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
+  return re.test(hay);
+}
+
+// STRICT identity matcher: the ticket id or the story's short key appears in the PR's
+// HEAD BRANCH or TITLE only — never the body. A body can merely *mention* a ticket
+// ("builds on PAN-6659") without being that ticket's PR; using the body to decide a
+// status change (e.g. demoting a legitimately-merged done story) is a false-positive
+// trap. Branch/title is the PR's own identity, so this is safe for status mutations.
+export function prIdentityMatchesStory(pr = {}, issue = {}) {
+  const idHay = [pr.headRefName, pr.head_ref, pr.branch, pr.title]
+    .filter((s) => typeof s === 'string').join('\n').toLowerCase();
+  const id = String(issue.identifier || '').toLowerCase();
+  if (id && idHay.includes(id)) return true;
+  const key = storyKey(issue);
+  if (!key) return false;
+  const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
+  return re.test(idHay);
+}
+
+// owner/repo slug parsed from a PR's html url (github.com/owner/repo/pull/N), or null.
+export function repoFromPrUrl(pr = {}) {
+  const u = pr.url || pr.html_url || '';
+  const m = String(u).match(/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\//i);
+  return m ? m[1] : null;
 }
 
 // Is a PR open (not merged/closed)? Tolerant of gh's uppercase 'OPEN' and of a
@@ -583,15 +690,90 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 // routing as a fresh candidate) and separately guards with a zero-prior-runs
 // check, so a story that was parked in `blocked` but already carries runs / an
 // open PR (an anomaly) is never re-dispatched.
-export function detectUnblocks(blockedIssues, statusById) {
+// Are this story's DESCRIPTION-declared dependency slugs all satisfied? Each dep
+// slug (e.g. "m-01-core-recall-interface") is resolved to its SIBLING story (same
+// parent_issue_id) by short key (storyKey === slugKey). A resolved sibling BLOCKS
+// unless it is terminal (done/cancelled). An unresolvable slug (no sibling visible)
+// does NOT block — same anti-deadlock rule depsSatisfied uses for unseen deps.
+export function descDepsSatisfied(issue, allIssues = []) {
+  const slugs = descStoryDeps(issue);
+  if (!slugs.length) return true;
+  const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
+  for (const slug of slugs) {
+    const k = slugKey(slug);
+    if (!k) continue;
+    const dep = siblings.find((s) => storyKey(s) === k);
+    if (!dep) continue; // unresolved — don't block (avoid deadlock)
+    if (!terminal((dep.status || '').toLowerCase())) return false;
+  }
+  return true;
+}
+
+// True when a story DECLARES a dependency graph anywhere (metadata OR description).
+export function hasDeclaredDeps(issue) {
+  const raw = issue && issue.metadata && issue.metadata.depends_on;
+  if (raw != null && String(raw).trim() !== '') return true;
+  return descStoryDeps(issue).length > 0;
+}
+
+// A story's full dependency gate: BOTH its metadata ticket-id deps (depsSatisfied)
+// AND its description slug deps (descDepsSatisfied) must be satisfied.
+export function allDepsSatisfied(issue, statusById, allIssues = []) {
+  return depsSatisfied(issue, statusById) && descDepsSatisfied(issue, allIssues);
+}
+
+// blocked -> todo when a story's declared deps clear. `allIssues` (optional, added
+// 2026-07-31) lets the pass resolve DESCRIPTION-declared slug deps against siblings,
+// not just metadata ticket-id deps — the m-02-depends-on-m-01 case, where the dep
+// lived only in the description and the child never unblocked though its dep was done.
+export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
-    const raw = i && i.metadata && i.metadata.depends_on;
-    const hasDeclaredDeps = raw != null && String(raw).trim() !== '';
-    if (!hasDeclaredDeps) continue; // parked for a non-dependency reason — leave it
-    if (!depsSatisfied(i, statusById)) continue; // a declared dep isn't done yet
+    if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
+    if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
+  }
+  return actions;
+}
+
+// ============================================================================
+// STATUS TRUTH: "done" must mean MERGED, not branch-pushed (2026-07-31).
+// ----------------------------------------------------------------------------
+// A story can reach `done` via a build/ship agent that set the status directly
+// after merely pushing a branch / opening a PR (bypassing the router's merged
+// gate in detectVerifiedDone, which only ever ADVANCES to done on a real merge —
+// it never DEMOTES a wrongly-done story). detectFalseDone is that missing guard:
+// a `done` story that STILL has a matching OPEN (unmerged) PR is a lie — demote it
+// back to in_review so the review lane picks it up and either merges it (truth) or
+// loops it back. STRICTLY PR-gated: only fires when a real open PR referencing the
+// story is found. A done story with NO discoverable open PR is left untouched — it
+// may be a legitimately-done non-code task (planning/decision/doc), and demoting it
+// on absence would be wrong. `openPrs` is the board-wide open-PR array the router
+// already gathered (gh pr list across the search repos).
+export function detectFalseDone(doneIssues, openPrs = []) {
+  const actions = [];
+  for (const i of doneIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    // Resolve the story's own target repo (if declared) to further constrain the match:
+    // the open PR must be in THAT repo, so a same-key PR in an unrelated repo can't
+    // demote it. When the story declares no target repo we fall back to identity alone.
+    const wantRepo = normalizeRepoSlug(targetRepoValue(i) || '');
+    const pr = (openPrs || []).find((p) => {
+      if (!prIsOpen(p)) return false;
+      if (!prIdentityMatchesStory(p, i)) return false; // branch/title identity only (never body)
+      if (wantRepo) {
+        const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
+        if (prRepo && prRepo !== wantRepo) return false;
+      }
+      return true;
+    });
+    if (!pr) continue; // no OWN open PR -> either merged or a non-code done task -> leave it
+    actions.push({
+      identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+      action: 'demote-to-in-review', prUrl: pr.url || pr.html_url || null,
+    });
   }
   return actions;
 }
