@@ -120,6 +120,37 @@ async function cycle() {
     }
   }
 
+  // ---- BACK-HALF: review / ship dispatch on in_review stories ----
+  // detectVerifiedDone only advances a story once its PR is ALREADY merged; it
+  // never merges anything. This block dispatches the Claude+plugin-hive REVIEW
+  // lane onto in_review stories that have (or should have) an open PR: the agent
+  // runs /hive:review + /hive:test on the PR branch, then merges to dev + sets
+  // the story done, OR comments the required changes + sends it back to todo.
+  // Assignment to the review agent is the idempotency marker (see
+  // selectReviewDispatch) so a story under review is not re-dispatched.
+  const inReviewRuns = {};
+  for (const i of inReview) inReviewRuns[i.identifier] = mca.issueRuns(i.identifier);
+  const reviewInflight = core.computeReviewInflight(inReview, cfg);
+  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now });
+  for (const r of reviewPicks) {
+    log('review', { identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason, applied: !DRY });
+    if (DRY) continue;
+    try {
+      if (r.action === 'dispatch-review') {
+        // reassign the in_review story to the review agent, then force-enqueue a
+        // fresh run for it (assignee-mutation alone does not reliably enqueue —
+        // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
+        // sleep first to let the new assignee propagate before rerun).
+        mca.assignIssue(r.identifier, r.agent);
+        await sleep(cfg.CAPS.verifyDelayMs);
+      }
+      mca.rerunIssue(r.identifier);
+      log('review_dispatched', { identifier: r.identifier, agent: r.agent });
+    } catch (e) {
+      log('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
+    }
+  }
+
   // ---- zombie recovery ----
   if (!NO_ZOMBIE) {
     const zombies = core.detectZombies(inProgress, runsByIssue, cfg, now);

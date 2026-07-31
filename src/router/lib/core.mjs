@@ -376,3 +376,124 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   }
   return actions;
 }
+
+// ============================================================================
+// BACK-HALF OF THE LOOP: review / ship dispatch (pure decision logic).
+// ----------------------------------------------------------------------------
+// The state-machine already advances in_progress -> in_review when a build run
+// completes. But nothing then reviews/tests/merges the PR, so the ticket stalls
+// at in_review. selectReviewDispatch decides which in_review stories to hand to
+// the Claude+plugin-hive REVIEW lane (cfg.REVIEW_LANE). The review AGENT does the
+// git work (find the PR, /hive:review, /hive:test, merge->done OR comment->back);
+// this function only decides *dispatch*, exactly like selectAssignments decides
+// build dispatch. Router shells out (assign + rerun) to actually enqueue.
+
+// A `target_repo:` line in the description is the build-lane's own signal, so its
+// presence is a reliable "this story produced code in a repo" marker.
+const TARGET_REPO_RE = /(^|\n)\s*target_repo:\s*\S+/i;
+export function hasTargetRepo(issue = {}) {
+  return TARGET_REPO_RE.test(issue.description || '');
+}
+
+// Only stories that plausibly produced a PR should burn a Claude review run:
+// a hive/build-shaped story, or one carrying a target_repo. This keeps random
+// in_review items (e.g. a Consus decision doc) from spuriously dispatching review.
+export function reviewEligible(issue = {}) {
+  return isHiveStory(issue) || hasTargetRepo(issue);
+}
+
+// How many review slots each review-lane agent currently occupies. An in_review
+// issue assigned to a review agent = that agent is (or should be) reviewing it,
+// so it holds a slot until it leaves in_review (merged->done) or is sent back.
+// This caps concurrent reviews at each agent's maxInflight without touching the
+// build lanes' claude RUNTIME_CAP accounting (review agents use their own bucket).
+export function computeReviewInflight(inReviewIssues, cfg) {
+  const lane = cfg.REVIEW_LANE || [];
+  const idToName = {};
+  for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
+  const counts = {};
+  for (const n of lane) counts[n] = 0;
+  for (const i of inReviewIssues) {
+    const name = idToName[i.assignee_id];
+    if (name) counts[name] += 1;
+  }
+  return counts;
+}
+
+// Pick the review-lane agent with the most free capacity (lowest current+projected
+// load) that is still under its maxInflight. Returns null when the lane is full.
+export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
+  const lane = cfg.REVIEW_LANE || [];
+  const eligible = lane.filter((name) => {
+    const a = cfg.AGENTS[name];
+    if (!a) return false;
+    const now = (reviewInflight[name] || 0) + (projected[name] || 0);
+    return now < a.maxInflight;
+  });
+  if (!eligible.length) return null;
+  eligible.sort((x, y) => {
+    const lx = (reviewInflight[x] || 0) + (projected[x] || 0);
+    const ly = (reviewInflight[y] || 0) + (projected[y] || 0);
+    if (lx !== ly) return lx - ly;
+    return lane.indexOf(x) - lane.indexOf(y);
+  });
+  return eligible[0];
+}
+
+// Decide this cycle's review/ship dispatches from the in_review board.
+// runsByIssue: { [identifier]: runs[] } for the in_review issues.
+// Returns [{ identifier, issueId, projectId, agent, action, reason }] where
+//   action 'dispatch-review' = (re)assign to a review agent then enqueue a run;
+//   action 'rerun-review'    = already assigned to a review agent but its run went
+//                              stale/failed — re-enqueue the same assignment.
+// IDEMPOTENCY: assignment to a review agent is the "already dispatched" marker.
+//   - assignee is NOT a review agent  -> fresh review needed (dispatch-review).
+//   - assignee IS a review agent + active/fresh run -> reviewing now, skip.
+//   - assignee IS a review agent + run stale/failed -> rerun-review (safety net;
+//     e.g. the agent finished but never merged/looped-back — re-fires after the
+//     zombie window so a wedged review self-heals rather than stalling forever).
+// A clean review leaves in_review by merging->done; a loop-back leaves by going
+// back to todo+unassigned — either way the issue drops out of this input set next
+// cycle, so this never double-acts on a resolved story.
+export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
+  const now = opts.now ?? Date.now();
+  const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
+  const lane = cfg.REVIEW_LANE || [];
+  if (!lane.length) return [];
+  const reviewAgentIds = new Set(lane.map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
+  const idToName = {};
+  for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
+
+  const actions = [];
+  const projected = {};
+  for (const i of inReviewIssues) {
+    if (actions.length >= maxTotal) break;
+    if (isSmokeScratch(i.title)) continue;
+    if (!reviewEligible(i)) continue;
+    const runs = runsByIssue[i.identifier] || [];
+
+    if (reviewAgentIds.has(i.assignee_id)) {
+      // already under review — only re-fire when its run is stale/failed
+      if (hasActiveRun(runs, now, staleMs)) continue; // reviewing now
+      const lr = latestRun(runs);
+      const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
+      if (!stale) continue; // finished recently — give the agent time to act
+      actions.push({
+        identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+        agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',
+      });
+      continue;
+    }
+
+    // not yet under review — pick a review agent with free capacity
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected);
+    if (!agent) continue;
+    projected[agent] = (projected[agent] || 0) + 1;
+    actions.push({
+      identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+      agent, action: 'dispatch-review', reason: 'needs-review',
+    });
+  }
+  return actions;
+}

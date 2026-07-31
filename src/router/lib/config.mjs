@@ -158,4 +158,35 @@ export const CAPS = {
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
   verifyDelayMs: 6000, // wait after assign before checking a run started
+  perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
 };
+
+// ============================================================================
+// BACK-HALF OF THE LOOP: review / ship lane (2026-07-31)
+// ----------------------------------------------------------------------------
+// The front half works: a planned story builds, opens a PR, and auto-advances
+// in_progress -> in_review (detectRunCompletions). But nothing then REVIEWS,
+// TESTS, and MERGES that PR — so a ticket stalls at in_review forever. This lane
+// closes that gap: an in_review story with an open PR is dispatched to a
+// dedicated Claude+plugin-hive REVIEW agent that runs /hive:review + /hive:test
+// on the PR branch, then either merges to dev + sets the story done, or comments
+// the required changes + sends the story back to todo (the loop-back).
+//
+// The review agent MUST be on the Claude runtime (1d5e9b93) because only Claude
+// agents have plugin-hive (/hive:review, /hive:test) — codex/opencode do not.
+// In the router's capacity model it gets its OWN runtime bucket ('claude-review',
+// same pattern as minerva-dev's 'claude-planning') so review dispatch is accounted
+// separately and does not fight the build lanes for the claude RUNTIME_CAP slots.
+// It is deliberately capped tight (maxInflight 1 + perCycleReview 1) because it
+// physically shares the one Claude account (account usage is the real ceiling).
+AGENTS['auriga-review'] = {
+  id: 'c5beb33c-2a6d-4f78-960a-73966f184506', // filled in from `multica agent create` (Claude runtime, plugin-hive)
+  runtime: 'claude-review',  // own capacity bucket; physical Multica runtime is Claude (1d5e9b93)
+  maxInflight: 1,            // one review/ship at a time — sparing on the Claude account
+  repo: null,               // target_repo-driven, exactly like the build lane
+};
+
+RUNTIME_CAP['claude-review'] = 1;
+
+// The review/ship lane: in_review stories with an open PR route here.
+export const REVIEW_LANE = ['auriga-review'];

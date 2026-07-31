@@ -15,8 +15,12 @@ const CFG = {
     // Planning lane fixture mirroring lib/config.mjs's minerva-dev entry:
     // deliberately absent from RUNTIME_CAP below (own uncapped runtime bucket).
     'minerva-dev': { id: 'M', runtime: 'claude-planning', maxInflight: 3 },
+    // BACK-HALF review/ship lane fixture (mirrors config.mjs auriga-review):
+    // own capacity bucket, maxInflight 1 (one review at a time).
+    'auriga-review': { id: 'RV', runtime: 'claude-review', maxInflight: 1 },
   },
-  RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
+  RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4, 'claude-review': 1 },
+  REVIEW_LANE: ['auriga-review'],
   PROJECT_LANE: {
     CONSUS: ['consus-dev'],
     HEIMDALL: ['heimdall-dev', 'heimdall-dev-codex'],
@@ -28,7 +32,7 @@ const CFG = {
   HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus', PCORE: 'Pantheon Core' },
-  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10 },
+  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10, perCycleReview: 1 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
@@ -440,4 +444,80 @@ test('routing: seed skipped when minerva-dev has no capacity, never falls back t
   const picks = core.selectAssignments([issue], CFG, inflight, {});
   assert.equal(picks.length, 0); // skipped this cycle, not routed anywhere
   assert.ok(!picks.some((p) => p.agent !== 'minerva-dev')); // never falls back to a build agent
+});
+
+// ---- BACK-HALF: review / ship dispatch ----------------------------------
+
+const NOW = 1_700_000_000_000;
+// An in_review issue with a target_repo line (build-lane output shape).
+const inReview = (id, num, assignee = null, extra = {}) => ({
+  id, identifier: id, project_id: 'PCORE', number: num, status: 'in_review',
+  assignee_id: assignee, title: 'work', description: 'target_repo: mdostal/cron-maker\n', ...extra,
+});
+const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOString() };
+const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
+const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
+
+test('hasTargetRepo / reviewEligible: build-shaped stories are review-eligible, plain docs are not', () => {
+  assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
+  assert.ok(!core.hasTargetRepo({ description: 'just a design note' }));
+  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }));      // target_repo signal
+  assert.ok(core.reviewEligible({ description: HIVE_DESCRIPTION }));               // hive-shaped
+  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }));       // neither -> not eligible
+});
+
+test('selectReviewDispatch: an in_review story with a build signal dispatches to the review lane', () => {
+  const i = inReview('PAN-1', 1); // unassigned, eligible
+  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-review');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('selectReviewDispatch: ineligible in_review stories (no build signal) are never dispatched', () => {
+  const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc' };
+  const picks = core.selectReviewDispatch([doc], { D1: [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: a story already under active review is NOT re-dispatched (idempotent)', () => {
+  const i = inReview('PAN-2', 2, 'RV'); // assigned to review agent
+  const picks = core.selectReviewDispatch([i], { 'PAN-2': [freshRun] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: reviewer finished recently but story still in_review -> give it time, no re-fire', () => {
+  const i = inReview('PAN-3', 3, 'RV');
+  const picks = core.selectReviewDispatch([i], { 'PAN-3': [doneFresh] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via rerun-review', () => {
+  const i = inReview('PAN-4', 4, 'RV');
+  const picks = core.selectReviewDispatch([i], { 'PAN-4': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'rerun-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
+  const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
+  // Two eligible unassigned stories, perCycleReview=1 -> only one dispatched this cycle.
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  // Lane already full (one review in flight) -> nothing new dispatched.
+  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(full.length, 0);
+});
+
+test('computeReviewInflight: counts in_review issues held by review agents', () => {
+  const held = inReview('PAN-7', 7, 'RV');
+  const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
+  const counts = core.computeReviewInflight([held, other], CFG);
+  assert.equal(counts['auriga-review'], 1);
+});
+
+test('chooseReviewAgent: returns null when the lane is at capacity', () => {
+  assert.equal(core.chooseReviewAgent(CFG, {}, {}), 'auriga-review');
+  assert.equal(core.chooseReviewAgent(CFG, { 'auriga-review': 1 }, {}), null);
 });
