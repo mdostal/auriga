@@ -101,3 +101,22 @@ export function ghOpenPrs(repo) {
 export function unassignIssue(identifier) {
   return run(['issue', 'assign', identifier, '--unassign', '--output', 'json']);
 }
+
+// All PRs (any state) for a repo, as [{number,title,headRefName,baseRefName,body,url,state,mergedAt}].
+// Used by the blocked->todo unblock guard: a story that already has an OPEN or
+// MERGED PR referencing it has progressed past build (in review / shipped) and
+// must NOT be re-dispatched — even though a stale/failed run from earlier churn
+// would (wrongly) make a runs-based guard skip it.
+export function ghPrs(repo, state = 'all') {
+  try {
+    const out = execFileSync(GH, [
+      'pr', 'list', '--repo', repo, '--state', state,
+      '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}
