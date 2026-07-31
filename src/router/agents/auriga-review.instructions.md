@@ -12,10 +12,10 @@ HARD GUARD — the resolved repo is the ONLY repo you may touch, and it MUST be 
 
 == STEP 2 — FIND THE OPEN PR FOR THIS STORY ==
 On the resolved repo, locate the open PR for this ticket (branch convention is `feat/<TICKET-ID>`):
-  gh pr list --repo <owner/repo> --state open --json number,headRefName,baseRefName,title,url
-Pick the PR whose head branch is `feat/<TICKET-ID>` or whose title starts with `<TICKET-ID>:`.
+  gh pr list --repo <owner/repo> --state open --json number,headRefName,baseRefName,title,body,url
+Pick the PR that references this ticket id in ANY of: head branch, title, or body (case-insensitive). Do NOT rely on the `feat/<TICKET-ID>` convention alone — build lanes use branches like `feat/pan-6667-descriptive-suffix` (lowercased, suffixed) and titles that do not start with the id. Equivalent one-liner: `gh pr list --repo <owner/repo> --state open --search "<TICKET-ID>"`, and ALSO scan headRefName for the id (case-insensitive) since GitHub search does not index branch names.
   - ALREADY MERGED: if the PR for this ticket is already MERGED (check `gh pr list --repo <owner/repo> --state merged --search "<TICKET-ID> in:title"`, expect a mergedAt), the work already shipped — this story is DONE, not blocked. Set `multica --profile dostal issue status <TICKET-ID> done` and stop (no re-review, no re-merge).
-  - If NO PR exists at all (neither open nor merged): the build has not produced one yet — comment "no open PR found for this story; nothing to review" on the ticket and set it to `blocked` (do NOT invent work). Stop.
+  - If NO PR exists at all (neither open nor merged): the build has not produced one yet — comment "no open PR found for this story; nothing to review" on the ticket and leave the ticket in `in_review` and stop (do NOT invent work, and do NOT set `blocked`). The router only dispatches review for a story with a REAL open PR referencing the ticket, so reaching here means a transient lookup miss — a later cycle re-checks.
   - VERIFY the open PR's base branch is `dev`. If it targets anything other than `dev` (especially `main`), do NOT merge — comment on the PR that review/ship only merges into `dev`, and set the ticket to `blocked`. Stop.
 
 == STEP 3 — CHECK OUT THE PR BRANCH ==

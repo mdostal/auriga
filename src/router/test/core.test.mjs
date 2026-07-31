@@ -458,17 +458,21 @@ const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOStri
 const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
 const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
 
-test('hasTargetRepo / reviewEligible: build-shaped stories are review-eligible, plain docs are not', () => {
+test('reviewEligible: gates strictly on a real open PR (seeds without a PR are skipped)', () => {
   assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
   assert.ok(!core.hasTargetRepo({ description: 'just a design note' }));
-  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }));      // target_repo signal
-  assert.ok(core.reviewEligible({ description: HIVE_DESCRIPTION }));               // hive-shaped
-  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }));       // neither -> not eligible
+  // reviewEligible now REQUIRES a real open PR (2nd arg). No PR -> NOT eligible, even
+  // for a build/target_repo/hive-shaped story: that is exactly the parent-seed / no-PR
+  // case the review path used to false-block.
+  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }, true));
+  assert.ok(!core.reviewEligible({ description: 'target_repo: mdostal/x' }, false));
+  assert.ok(!core.reviewEligible({ description: HIVE_DESCRIPTION }, false));
+  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }, false));
 });
 
 test('selectReviewDispatch: an in_review story with a build signal dispatches to the review lane', () => {
   const i = inReview('PAN-1', 1); // unassigned, eligible
-  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW });
+  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-1']) });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].agent, 'auriga-review');
   assert.equal(picks[0].action, 'dispatch-review');
@@ -503,10 +507,10 @@ test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via
 test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
   const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
   // Two eligible unassigned stories, perCycleReview=1 -> only one dispatched this cycle.
-  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW });
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-5', 'PAN-6']) });
   assert.equal(picks.length, 1);
   // Lane already full (one review in flight) -> nothing new dispatched.
-  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW, openPrIds: new Set(['PAN-5']) });
   assert.equal(full.length, 0);
 });
 
@@ -520,4 +524,55 @@ test('computeReviewInflight: counts in_review issues held by review agents', () 
 test('chooseReviewAgent: returns null when the lane is at capacity', () => {
   assert.equal(core.chooseReviewAgent(CFG, {}, {}), 'auriga-review');
   assert.equal(core.chooseReviewAgent(CFG, { 'auriga-review': 1 }, {}), null);
+});
+
+// ---- BACK-HALF: PR-eligibility + broad PR matching (2026-07-31 fix) --------
+
+test('prReferencesIssue: matches ticket id in head branch, title, or body (case-insensitive)', () => {
+  assert.ok(core.prReferencesIssue({ headRefName: 'feat/pan-6667-triage-seeds' }, 'PAN-6667'));
+  assert.ok(core.prReferencesIssue({ title: 'PAN-6667: do the thing' }, 'PAN-6667'));
+  assert.ok(core.prReferencesIssue({ body: 'closes PAN-6667' }, 'PAN-6667'));
+  assert.ok(!core.prReferencesIssue({ headRefName: 'feat/other', title: 'unrelated' }, 'PAN-6667'));
+  assert.ok(!core.prReferencesIssue({ headRefName: 'x' }, ''));
+});
+
+test('hasOpenPrForIssue: true only for an OPEN PR that references the id', () => {
+  const prs = [
+    { state: 'OPEN', headRefName: 'feat/pan-6962', title: 'PAN-6962: loader' },
+    { state: 'MERGED', headRefName: 'feat/pan-1', title: 'PAN-1' },
+  ];
+  assert.ok(core.hasOpenPrForIssue('PAN-6962', prs));
+  assert.ok(!core.hasOpenPrForIssue('PAN-1', prs));      // referenced PR is merged, not open
+  assert.ok(!core.hasOpenPrForIssue('PAN-9999', prs));   // no PR references it
+});
+
+test('normalizeRepoSlug: normalizes slug / url / github.com / ssh; junk -> null', () => {
+  assert.equal(core.normalizeRepoSlug('mdostal/cron-maker'), 'mdostal/cron-maker');
+  assert.equal(core.normalizeRepoSlug('github.com/mdostal/consus'), 'mdostal/consus');
+  assert.equal(core.normalizeRepoSlug('https://github.com/mdostal/auriga.git'), 'mdostal/auriga');
+  assert.equal(core.normalizeRepoSlug('git@github.com:mdostal/heimdall.git'), 'mdostal/heimdall');
+  assert.equal(core.normalizeRepoSlug('/Users/dostal/minerva-verify/target'), null);
+  assert.equal(core.normalizeRepoSlug(''), null);
+});
+
+test('targetRepoValue: metadata wins, else the description target_repo line', () => {
+  assert.equal(core.targetRepoValue({ metadata: { target_repo: 'mdostal/cron-maker' } }), 'mdostal/cron-maker');
+  assert.equal(core.targetRepoValue({ description: 'x\ntarget_repo: github.com/mdostal/consus\ny' }), 'github.com/mdostal/consus');
+  assert.equal(core.targetRepoValue({ description: 'no repo here' }), null);
+});
+
+test('selectReviewDispatch: an eligible-shaped in_review story WITHOUT a PR is NOT dispatched (seed guard)', () => {
+  const seed = inReview('PAN-SEED', 42); // has target_repo shape but no open PR
+  const picks = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+  const picks2 = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW, openPrIds: new Set() });
+  assert.equal(picks2.length, 0);
+});
+
+test('selectReviewDispatch: dispatches a story once its id is in openPrIds (real PR found)', () => {
+  const s = inReview('PAN-6962', 43);
+  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-6962']) });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
 });

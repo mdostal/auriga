@@ -395,11 +395,67 @@ export function hasTargetRepo(issue = {}) {
   return TARGET_REPO_RE.test(issue.description || '');
 }
 
-// Only stories that plausibly produced a PR should burn a Claude review run:
-// a hive/build-shaped story, or one carrying a target_repo. This keeps random
-// in_review items (e.g. a Consus decision doc) from spuriously dispatching review.
-export function reviewEligible(issue = {}) {
-  return isHiveStory(issue) || hasTargetRepo(issue);
+// Broad PR<->ticket matcher. The old convention (branch feat/<TICKET-ID> only) was
+// too narrow: build lanes name branches like feat/pan-6667-descriptive (lowercased +
+// suffixed) and rarely start a title with the id. Match the ticket id (case-
+// insensitive) ANYWHERE in the PR's head branch, title, or body.
+export function prReferencesIssue(pr = {}, identifier = '') {
+  if (!identifier) return false;
+  const id = String(identifier).toLowerCase();
+  const hay = [pr.headRefName, pr.head_ref, pr.branch, pr.title, pr.body]
+    .filter((s) => typeof s === 'string')
+    .join('\n')
+    .toLowerCase();
+  return hay.includes(id);
+}
+
+// Is a PR open (not merged/closed)? Tolerant of gh's uppercase 'OPEN' and of a
+// missing state (open only when there is no merged/closed marker).
+export function prIsOpen(pr = {}) {
+  const st = (pr.state || '').toLowerCase();
+  if (st === 'open') return true;
+  if (st === 'merged' || st === 'closed') return false;
+  return !pr.merged_at && !pr.mergedAt && !pr.closed_at && !pr.closedAt;
+}
+
+// Does this ticket have at least one OPEN PR referencing it? `prs` is the array of
+// candidate PRs the router gathered (gh pr list across the story's resolvable repos).
+export function hasOpenPrForIssue(identifier, prs = []) {
+  return (prs || []).some((pr) => prIsOpen(pr) && prReferencesIssue(pr, identifier));
+}
+
+// Normalize a target_repo value (bare slug, https/ssh git URL, github.com/owner/repo,
+// with or without a trailing .git) to an owner/repo slug, or null if it is not a bare
+// GitHub slug (e.g. a local filesystem path with extra segments).
+export function normalizeRepoSlug(value = '') {
+  if (!value || typeof value !== 'string') return null;
+  const v = value.trim()
+    .replace(/^git@github\.com:/i, '')
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/^github\.com\//i, '')
+    .replace(/\.git$/i, '');
+  const m = v.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (!m) return null;
+  return m[1] + '/' + m[2];
+}
+
+// The story's declared target_repo: metadata.target_repo (preferred) or a
+// `target_repo: <value>` line in the description. Raw value (not normalized).
+export function targetRepoValue(issue = {}) {
+  const meta = issue && issue.metadata && issue.metadata.target_repo;
+  if (typeof meta === 'string' && meta.trim()) return meta.trim();
+  const m = (issue.description || '').match(/(^|\n)\s*target_repo:\s*(\S+)/i);
+  return m ? m[2] : null;
+}
+
+// Whether to burn a Claude review run on an in_review story. STRICT gate: a REAL
+// open PR referencing the ticket (hasOpenPR, computed by the router via gh). No PR
+// => a parent seed / planning / idea ticket => NOT eligible => skipped (never
+// dispatched, so the review path can never false-block it). A real matching open PR
+// is also proof the target repo is resolvable (it is the PR's own repo), satisfying
+// the "resolvable target_repo AND a real open PR" requirement.
+export function reviewEligible(issue = {}, hasOpenPR = false) {
+  return !!hasOpenPR;
 }
 
 // How many review slots each review-lane agent currently occupies. An in_review
@@ -459,6 +515,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
+  const openPrIds = opts.openPrIds instanceof Set ? opts.openPrIds : null;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
   const reviewAgentIds = new Set(lane.map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
@@ -470,7 +527,6 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   for (const i of inReviewIssues) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
-    if (!reviewEligible(i)) continue;
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -487,6 +543,13 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     }
 
     // not yet under review — pick a review agent with free capacity
+    // FRESH dispatch: gate on a REAL open PR referencing the ticket (opts.openPrIds,
+    // computed by the router via gh). No PR => a parent seed / planning / idea ticket
+    // => SKIP, so the review path can never false-block it. A story already assigned
+    // to a review agent (handled above) is the self-heal path and is NOT PR-gated.
+    const hasPr = openPrIds ? openPrIds.has(i.identifier) : false;
+    if (!reviewEligible(i, hasPr)) continue;
+
     const agent = chooseReviewAgent(cfg, reviewInflight, projected);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;

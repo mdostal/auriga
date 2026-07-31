@@ -74,3 +74,22 @@ export function issuePullRequests(identifier) {
     return [];
   }
 }
+
+const GH = process.env.GH_CLI || 'gh';
+
+// Open PRs for a repo via gh, as [{number,title,headRefName,baseRefName,body,url,state}].
+// Used by the review lane to discover a story's real open PR: Multica's issue<->PR
+// linkage is empty in practice, and the feat/<id> branch convention is too narrow.
+export function ghOpenPrs(repo) {
+  try {
+    const out = execFileSync(GH, [
+      'pr', 'list', '--repo', repo, '--state', 'open',
+      '--json', 'number,title,headRefName,baseRefName,body,url,state', '--limit', '100',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    process.stderr.write('ghOpenPrs(' + repo + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}

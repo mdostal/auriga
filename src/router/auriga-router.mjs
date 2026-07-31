@@ -130,8 +130,30 @@ async function cycle() {
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
   for (const i of inReview) inReviewRuns[i.identifier] = mca.issueRuns(i.identifier);
+
+  // Compute which in_review stories have a REAL open PR referencing the ticket.
+  // Multica's issue<->PR linkage is empty in practice, so discover PRs directly via
+  // gh across the baseline review-search repos PLUS any explicit target_repo declared
+  // on an in_review story, matching broadly (head branch / title / body). Stories with
+  // no matching open PR (parent seeds / planning / idea tickets) are NOT dispatched to
+  // review, so the review path can never false-block them.
+  const repoSet = new Set((cfg.REVIEW_SEARCH_REPOS || []).map((r) => core.normalizeRepoSlug(r)).filter(Boolean));
+  for (const i of inReview) {
+    const slug = core.normalizeRepoSlug(core.targetRepoValue(i) || '');
+    if (slug) repoSet.add(slug);
+  }
+  const openPrsAll = [];
+  for (const repo of repoSet) {
+    try { for (const pr of mca.ghOpenPrs(repo)) openPrsAll.push(pr); } catch { /* one repo failing must not abort the scan */ }
+  }
+  const openPrIds = new Set();
+  for (const i of inReview) {
+    if (openPrsAll.some((pr) => core.prReferencesIssue(pr, i.identifier))) openPrIds.add(i.identifier);
+  }
+  if (inReview.length) log('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
+
   const reviewInflight = core.computeReviewInflight(inReview, cfg);
-  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now });
+  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now, openPrIds });
   for (const r of reviewPicks) {
     log('review', { identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason, applied: !DRY });
     if (DRY) continue;

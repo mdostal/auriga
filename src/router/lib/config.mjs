@@ -190,3 +190,13 @@ RUNTIME_CAP['claude-review'] = 1;
 
 // The review/ship lane: in_review stories with an open PR route here.
 export const REVIEW_LANE = ['auriga-review'];
+
+// Baseline repos the review lane searches for a story's open PR. Multica's
+// issue<->PR linkage is empty in practice, so PR discovery goes through gh; the
+// router also adds any explicit target_repo it finds on an in_review story, so
+// this is just the default set of OUR private plugin repos.
+export const REVIEW_SEARCH_REPOS = [
+  'mdostal/auriga', 'mdostal/heimdall', 'mdostal/consus',
+  'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
+  'mdostal/cron-maker',
+];
