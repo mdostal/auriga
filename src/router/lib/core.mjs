@@ -62,17 +62,33 @@ export function isHiveStory(issue = {}) {
 // its PR never matched its ticket and sat forever. storyKey() extracts that short
 // key so a PR can be matched to its ticket even when the branch has no PAN id.
 
-// Short epic-scoped key from a story title's leading "[key-NN-...]" bracket
-// (e.g. "m-02", "cm-07", "hf-01"). null when the title has no such bracket.
-export function storyKey(issue = {}) {
-  const m = String(issue.title || '').match(/^\s*\[([a-z]{1,8})-(\d{1,3})/i);
-  return m ? (m[1] + '-' + m[2]).toLowerCase() : null;
+// Unified story-key extractor (2026-07-31, PAN-6999 false-unblock fix). A story key
+// identifies a story within its epic and appears at the START of the story's title
+// bracket ("[<key>-<words>]") and at the start of a dependency SLUG ("<key>-<words>").
+// TWO real naming schemes exist on the board and BOTH must parse — else the dep never
+// resolves, descDepsSatisfied treats it as "unseen -> don't block", and the story
+// FALSE-unblocks (blocked->todo->blocked flip-flop every cycle, burning a dispatch):
+//   1. <letters>-<digits>  e.g. m-02, cm-07, htq-01, flayr-01, jfpm-01, mit-04, v-04, lct-03
+//   2. <letters><digits>   e.g. p1, s1  (the p1-* / s1-* epics: "p1-state-machine-auto-unblock")
+// The trailing (?![0-9]) forces the FULL number to be captured, so a longer-numbered key
+// can never be read as a shorter one — ct-010 never collapses to ct-01, p10 never to p1.
+// Downstream comparison is EXACT string equality (storyKey === slugKey), so correct
+// full-key extraction is exactly what rejects false-prefix cross-matches.
+function extractStoryKey(str = '') {
+  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-?\d{1,3})(?![0-9])/i);
+  return m ? m[1].toLowerCase() : null;
 }
 
-// Short key from a dependency SLUG (e.g. "m-01-core-recall-interface" -> "m-01").
+// Short epic-scoped key from a story TITLE's leading "[key-...]" bracket (e.g. "m-02",
+// "cm-07", "hf-01", "p1"). null when the title has no parseable leading key.
+export function storyKey(issue = {}) {
+  return extractStoryKey(issue.title || '');
+}
+
+// Short key from a dependency SLUG (e.g. "m-01-core-recall-interface" -> "m-01",
+// "p1-state-machine-auto-unblock" -> "p1"). null when unparseable.
 export function slugKey(slug = '') {
-  const m = String(slug).match(/^([a-z]{1,8})-(\d{1,3})/i);
-  return m ? (m[1] + '-' + m[2]).toLowerCase() : null;
+  return extractStoryKey(slug);
 }
 
 // Known plugin-hive PHASE tokens that appear inside a story's `steps:` block as
@@ -90,12 +106,32 @@ const HIVE_PHASE_TOKENS = new Set([
 // detectUnblocks/depsSatisfied (which read metadata only) never saw them and the
 // child never unblocked (the m-02-depends-on-m-01 case). We read the FIRST
 // depends_on line and drop any hive PHASE tokens defensively.
+// Minerva emits a story's own dependency slugs in the description in TWO shapes, and
+// BOTH must parse — else a real dependency is silently dropped and the story
+// false-unblocks (the rsh-03/PAN-5830 case: a block-list dep on rsh-01 was missed, so
+// the story looked dependency-free and was eligible to unblock while rsh-01 was still
+// stuck). Forms:
+//   1. inline array   ->  depends_on: [a-01-foo, b-02-bar]
+//   2. YAML block list ->  depends_on:\n  - a-01-foo\n  - b-02-bar
+// We drop any plugin-hive PHASE tokens (research/implement/test/...) defensively.
 export function descStoryDeps(issue = {}) {
   const desc = issue.description || '';
-  const m = desc.match(/(^|\n)\s*depends_on:\s*\[([^\]]*)\]/i);
-  if (!m) return [];
-  return m[2]
-    .split(',')
+  // Match the FIRST `depends_on:` in the description and capture EITHER an inline
+  // [array] OR a block list — in one regex so the earliest occurrence wins. This
+  // matters because a Minerva story's `steps:` block further down carries per-phase
+  // `depends_on: [research]` lines; parsing inline-anywhere-first would grab a phase
+  // dep and shadow the real story dep declared at the top (the rsh-03/PAN-5830 bug).
+  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|\r?\n(?:[ \t]*-[ \t]*[^\n]+\r?\n?)+)/i);
+  let raw = [];
+  if (m) {
+    const body = m[2];
+    if (body.trimStart().startsWith('[')) {
+      raw = body.trim().replace(/^\[|\]$/g, '').split(',');
+    } else {
+      raw = body.split(/\r?\n/).map((l) => l.replace(/^[ \t]*-[ \t]*/, ''));
+    }
+  }
+  return raw
     .map((s) => s.trim().replace(/^["']|["']$/g, ''))
     .filter(Boolean)
     .filter((s) => !HIVE_PHASE_TOKENS.has(s.toLowerCase()));
