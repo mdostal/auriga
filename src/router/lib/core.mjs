@@ -788,13 +788,49 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
 // may be a legitimately-done non-code task (planning/decision/doc), and demoting it
 // on absence would be wrong. `openPrs` is the board-wide open-PR array the router
 // already gathered (gh pr list across the search repos).
+// The story's OWN recorded PR url (metadata.pr_url, or a `pr_url:` line in the
+// description), or null. This is the authoritative "this exact PR belongs to this
+// story" signal the build/ship lane records when it opens the PR.
+export function ownPrUrl(issue = {}) {
+  const meta = issue && issue.metadata && issue.metadata.pr_url;
+  if (typeof meta === 'string' && meta.trim()) return meta.trim();
+  const m = (issue.description || '').match(/(^|\n)\s*pr_url:\s*(\S+)/i);
+  return m ? m[2].trim() : null;
+}
+
+// Compare two github PR urls ignoring protocol / trailing slash / .git.
+export function samePrUrl(a, b) {
+  const norm = (u) => String(u || '').trim().toLowerCase()
+    .replace(/^https?:\/\//, '').replace(/\/+$/, '').replace(/\.git$/, '');
+  return !!a && !!b && norm(a) === norm(b);
+}
+
 export function detectFalseDone(doneIssues, openPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
-    // Resolve the story's own target repo (if declared) to further constrain the match:
-    // the open PR must be in THAT repo, so a same-key PR in an unrelated repo can't
-    // demote it. When the story declares no target repo we fall back to identity alone.
+    // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
+    // ONLY that exact PR being still open can demote it. If its own PR is merged or
+    // closed (absent from the gathered open-PR set) the story is truly shipped and
+    // must NEVER be demoted. This closes the generic-key collision loop: a story
+    // keyed "s1"/"p1" was being demoted by an UNRELATED open PR that merely said
+    // "S1 ..." in its title, re-dispatching the review lane onto already-merged work
+    // every cycle (PAN-6952: own PR mdostal/logic-loops#1 was MERGED, yet
+    // dostal-swarm#96 "docs: S1 pipeline-contract" kept demoting it). The fuzzy
+    // story key is never trusted for a STATUS MUTATION when an authoritative url exists.
+    const own = ownPrUrl(i);
+    if (own) {
+      const ownStillOpen = (openPrs || []).find((p) => prIsOpen(p) && samePrUrl(p.url || p.html_url, own));
+      if (!ownStillOpen) continue; // own PR merged/closed -> genuinely done, leave it
+      actions.push({
+        identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+        action: 'demote-to-in-review', prUrl: own,
+      });
+      continue;
+    }
+    // FALLBACK (no recorded own PR — older slug-branched stories whose PR branch
+    // carries the story key but not the PAN id): match by branch/title identity,
+    // repo-qualified. Kept so the m-01-style genuine false-done still fires.
     const wantRepo = normalizeRepoSlug(targetRepoValue(i) || '');
     const pr = (openPrs || []).find((p) => {
       if (!prIsOpen(p)) return false;

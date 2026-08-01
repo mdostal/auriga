@@ -761,3 +761,38 @@ test('repoFromPrUrl parses owner/repo from a PR url', () => {
   assert.equal(core.repoFromPrUrl({ url: 'https://github.com/mdostal/mnemosyne/pull/1' }), 'mdostal/mnemosyne');
   assert.equal(core.repoFromPrUrl({}), null);
 });
+
+
+test('detectFalseDone never demotes a done story whose OWN recorded PR is merged (generic-key collision guard)', () => {
+  // PAN-6952 regression: story keyed "s1" whose OWN PR (logic-loops#1) is MERGED.
+  const s1 = {
+    id: 's', identifier: 'PAN-6952', project_id: 'LL',
+    title: '[s1-project-scaffold] Scaffold TypeScript project with npm dependencies',
+    status: 'done', metadata: { pr_url: 'https://github.com/mdostal/logic-loops/pull/1' },
+  };
+  // an UNRELATED open PR that merely says "S1 ..." in its title -> must NOT demote.
+  const unrelated = {
+    headRefName: 'agent/fractional-cto/f5876a10',
+    title: 'docs: S1 pipeline-contract CBA (DOS-1198/DOS-1206)',
+    state: 'open', _repo: 'mdostal/dostal-swarm',
+    url: 'https://github.com/mdostal/dostal-swarm/pull/96',
+  };
+  assert.equal(core.detectFalseDone([s1], [unrelated]).length, 0);
+  // own PR merged (absent from open set) -> genuinely done -> no demote.
+  assert.equal(core.detectFalseDone([s1], []).length, 0);
+  // but if the story's OWN PR is the one still open -> genuine false-done -> demote.
+  const ownOpen = {
+    headRefName: 'feat/PAN-6952', title: 'PAN-6952: Scaffold', state: 'open',
+    _repo: 'mdostal/logic-loops', url: 'https://github.com/mdostal/logic-loops/pull/1',
+  };
+  const acts = core.detectFalseDone([s1], [ownOpen]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  assert.equal(acts[0].prUrl, 'https://github.com/mdostal/logic-loops/pull/1');
+});
+
+test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
+  assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
+  assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
+  assert.equal(core.ownPrUrl({}), null);
+});
