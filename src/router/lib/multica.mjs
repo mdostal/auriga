@@ -165,3 +165,15 @@ export function ghPrs(repo, state = 'all') {
     return [];
   }
 }
+
+// Post a comment onto a Multica issue (used to publish the review-squad plan onto
+// the ticket at dispatch time so it is visible on the board + read by the squad
+// agent). Best-effort: a comment failure must never abort a review dispatch.
+export function issueComment(identifier, body) {
+  try {
+    return run(['issue', 'comment', identifier, '--body', body, '--output', 'json']);
+  } catch (e) {
+    process.stderr.write(`issueComment(${identifier}) failed: ${e.message}\n`);
+    return null;
+  }
+}

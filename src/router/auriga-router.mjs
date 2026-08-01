@@ -236,11 +236,33 @@ async function cycle() {
 
   const reviewInflight = core.computeReviewInflight(inReview, cfg);
   const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now, openPrIds });
+  const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
-    log('review', { identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason, applied: !DRY });
+    // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
+    // qa/ux run, and whether QA drives a real browser via Playwright). Auriga stays
+    // the THIN router — it computes the plan and fires ONE dispatch carrying it; the
+    // auriga-review SQUAD agent reads the plan (logged here + posted onto the ticket)
+    // and runs each enabled perspective, truly verifying. See core.reviewSquadPlan +
+    // agents/auriga-review.instructions.md.
+    const issueObj = inReviewById.get(r.issueId) || { identifier: r.identifier };
+    const plan = core.reviewSquadPlan(issueObj, cfg);
+    log('review', {
+      identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason,
+      squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !DRY,
+    });
     if (DRY) continue;
     try {
       if (r.action === 'dispatch-review') {
+        // Publish the squad plan onto the ticket so what the squad will do is visible
+        // on the board up front and is read by the squad agent (best-effort; a comment
+        // failure must never block the dispatch).
+        mca.issueComment(
+          r.identifier,
+          'REVIEW SQUAD PLAN — ' + core.squadPlanSummary(plan) +
+          '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
+          (plan.playwright ? ' + Playwright/E2E' : '') +
+          '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
+        );
         // reassign the in_review story to the review agent, then force-enqueue a
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
@@ -249,7 +271,7 @@ async function cycle() {
         await sleep(cfg.CAPS.verifyDelayMs);
       }
       mca.rerunIssue(r.identifier);
-      log('review_dispatched', { identifier: r.identifier, agent: r.agent });
+      log('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
     } catch (e) {
       log('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
     }

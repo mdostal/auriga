@@ -208,3 +208,50 @@ export const REVIEW_SEARCH_REPOS = [
   'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
   'mdostal/cron-maker',
 ];
+
+// ============================================================================
+// REVIEW SQUAD RULES — scale-by-ticket-type (2026-07-31, PAN-6546).
+// ----------------------------------------------------------------------------
+// The EXPLICIT, INSPECTABLE rule the review lane uses to size the squad for a
+// ticket. core.reviewSquadPlan(issue, cfg) reads this; the router logs the
+// resulting plan and posts it onto the ticket, so what the squad will do is
+// always visible up front. Edit the keyword lists / tier map here to change how
+// tickets are sized — no code change needed.
+//
+// The four perspectives (Mathew's binding words): product (PO — does it satisfy
+// the story's intent?), technical (correctness/conventions/security via
+// /hive:review), qa (author + RUN tests + real build + Playwright/E2E — TRUE
+// verification), ux (user-facing quality + accessibility via design-review).
+//
+// Sizing posture: the DEFAULT is the full four ("each and every ticket"). We
+// only DROP a perspective on a CLEAR signal it is inapplicable — UX on a
+// headless backend change, product+UX on a docs/chore change. Every drop is
+// logged with its reason.
+export const REVIEW_SQUAD_RULES = {
+  // USER-FACING signals -> tier 'full' (product + technical + qa + ux, Playwright ON).
+  ui: [
+    'ui', 'ux', 'user-facing', 'frontend', 'front-end', 'page', 'screen', 'view',
+    'component', 'dashboard', 'portal', 'css', 'tailwind', 'react', 'svelte', 'vue',
+    'html', 'button', 'form', 'modal', 'layout', 'nav', 'menu', 'visual', 'design',
+    'accessibility', 'a11y', 'responsive', 'animation', 'theme', 'styling', 'playwright',
+  ],
+  // HEADLESS backend signals -> tier 'backend' (product + technical + qa, NO ux).
+  backend: [
+    'api', 'endpoint', 'route', 'server', 'service', 'daemon', 'worker', 'schema',
+    'model', 'database', 'migration', 'sql', 'query', 'integration', 'pipeline',
+    'router', 'dispatch', 'auth', 'token', 'webhook', 'cron', 'queue', 'cli', 'sdk',
+  ],
+  // DOCS / CHORE / CONFIG signals -> tier 'light' (technical + qa-smoke only).
+  light: [
+    'docs', 'documentation', 'readme', 'comment', 'typo', 'rename', 'chore',
+    'bump', 'version bump', 'lint', 'formatting', 'format', 'whitespace',
+    'config', 'gitignore', 'license', 'changelog',
+  ],
+  // tier -> which perspectives run + whether QA must drive a real browser (Playwright).
+  tiers: {
+    full:     { product: true,  technical: true, qa: true, ux: true,  playwright: true },
+    backend:  { product: true,  technical: true, qa: true, ux: false, playwright: false },
+    light:    { product: false, technical: true, qa: true, ux: false, playwright: false },
+    standard: { product: true,  technical: true, qa: true, ux: true,  playwright: true },
+  },
+};
