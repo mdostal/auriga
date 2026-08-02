@@ -160,6 +160,7 @@ export const CAPS = {
   verifyDelayMs: 6000, // wait after assign before checking a run started
   perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
+  perCycleCascade: 5, // CASCADE: at most N completion->dependent enqueues per cycle (bounded self-drain, never a mass fire)
 };
 
 // ============================================================================

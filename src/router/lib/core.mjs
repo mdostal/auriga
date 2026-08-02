@@ -333,6 +333,9 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const blockedRuntimes = opts.blockedRuntimes || new Set();
   const maxTotal = opts.maxTotal ?? cfg.CAPS.perCycleTotal;
   const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.perCyclePerAgent;
+  // Identifiers already handled by the cascade pass this cycle — exclude them so a
+  // just-cascaded (assigned+rerun) dependent is not double-dispatched here.
+  const exclude = opts.exclude || new Set();
 
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
   const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
@@ -347,6 +350,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // decomposed story whose dependency stories aren't done yet — see depsSatisfied).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
+    .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id)
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
@@ -1032,4 +1036,91 @@ export function squadPlanSummary(plan) {
   const qaTag = p.qa ? (plan.playwright ? 'qa+Playwright' : 'qa') : null;
   const parts = on.map((k) => (k === 'qa' ? qaTag : k));
   return `squad[${plan.tier}]: ${parts.join(' + ')} — ${plan.reason}`;
+}
+
+// ============================================================================
+// CASCADE RE-DISPATCH — completion -> enqueue now-unblocked dependents (2026-08-01).
+// ----------------------------------------------------------------------------
+// THE self-draining fix (cascade gap). When a story reaches `done`, its
+// dependents whose full dependency graph is NOW satisfied must be ENQUEUED so
+// they actually build. Historically nothing did this end-to-end: detectUnblocks
+// flipped a blocked dependent to `todo`+unassign and then RELIED on
+// selectAssignments to pick it out of a throttled, board-deep FIFO — and because
+// assignee-mutation alone does not reliably enqueue a run (the dispatch
+// dead-zone), a dependency chain only advanced when a human ran
+// `multica issue rerun`. This pass closes that: it finds the genuine dependents
+// of what has completed and hands the router a targeted, idempotent enqueue action.
+
+// Resolve a dependency SLUG to the exact sibling story it names — UNAMBIGUOUSLY.
+// Order:
+//   1. exact match on the sibling's declared `id:` slug (descStoryId) — the
+//      "p1-<name>" convention, where the full slug IS the identity; else
+//   2. the short epic-scoped key (storyKey === slugKey) ONLY when that key
+//      resolves to EXACTLY ONE sibling. This is the false-unblock guard: the "p1"
+//      short key is shared by every p1-* sibling (slugKey collapses them all to
+//      "p1"), so a non-unique short-key match is REJECTED rather than resolved to
+//      an arbitrary sibling — a story is never treated as satisfied against the
+//      wrong dependency. Returns the sibling issue, or null when unresolved.
+export function resolveDepSibling(slug, siblings = []) {
+  const slugLower = String(slug || '').toLowerCase();
+  if (!slugLower) return null;
+  const byId = siblings.find((s) => descStoryId(s) === slugLower);
+  if (byId) return byId;
+  const k = slugKey(slug);
+  if (!k) return null;
+  const matches = siblings.filter((s) => storyKey(s) === k);
+  return matches.length === 1 ? matches[0] : null; // unique short key only
+}
+
+// Does this story declare a dependency on ANY of the given completed story ids?
+// Resolves BOTH metadata ticket-id deps and description slug deps (the latter via
+// resolveDepSibling, so an ambiguous short key never mis-attributes a dependency).
+export function dependsOnAny(issue, completedIds, allIssues = []) {
+  if (!completedIds || completedIds.size === 0) return false;
+  const raw = issue && issue.metadata && issue.metadata.depends_on;
+  if (raw != null && raw !== '') {
+    const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.some((id) => completedIds.has(id))) return true;
+  }
+  const slugs = descStoryDeps(issue);
+  if (slugs.length) {
+    const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+    for (const slug of slugs) {
+      const dep = resolveDepSibling(slug, siblings);
+      if (dep && completedIds.has(dep.id)) return true;
+    }
+  }
+  return false;
+}
+
+// Pure-code cascade selector. `completedIds`: Set of issue ids in a terminal-done
+// state (the router passes the board's done/cancelled ids, because a story usually
+// reaches `done` via an agent setting status directly, not via the router's
+// merged-PR gate — a purely event-based trigger would miss most completions).
+// Returns the dependents to ENQUEUE now — each is:
+//   - status todo or blocked (never in_progress/in_review/done -> no double-dispatch),
+//   - declares a dep on one of the completed stories (dependsOnAny) -> only the
+//     genuine dependents of what completed, not every satisfied todo on the board,
+//   - has its FULL declared graph satisfied (allDepsSatisfied — the genuine
+//     metadata+slug gate, so a still-unmet sibling dep blocks it), and
+//   - lives in a dispatch-aligned project (cfg.PROJECT_IDS) -> never fire into an
+//     unaligned/unagented project.
+// The caller completes idempotency (skip a candidate with an active run or an
+// existing PR) and applies a per-cycle cap, so a wide board never mass-fires.
+export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}) {
+  if (!completedIds || completedIds.size === 0) return [];
+  const aligned = new Set((cfg && cfg.PROJECT_IDS) || []);
+  const actions = [];
+  for (const i of issues) {
+    const st = (i.status || '').toLowerCase();
+    if (st !== 'todo' && st !== 'blocked') continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (aligned.size && !aligned.has(i.project_id)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+    if (!hasDeclaredDeps(i)) continue;
+    if (!dependsOnAny(i, completedIds, issues)) continue;
+    if (!allDepsSatisfied(i, statusById, issues)) continue;
+    actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, status: st, action: 'cascade-enqueue' });
+  }
+  return actions;
 }
