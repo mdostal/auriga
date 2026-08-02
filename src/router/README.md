@@ -34,6 +34,18 @@ Excluded issues aren't just dropped — run
 `node scripts/export-human-queue.mjs` (from the repo root) to write them to
 `.pHive/human-queue.yaml` for a human to triage.
 
+## Tree-aware routing
+
+When an issue carries `tree_path` (either as a top-level field or in metadata),
+`selectAssignments` first checks `TREE_AGENT_ATTACHMENTS` in `lib/config.mjs`.
+Attachments on the exact tree path and each ancestor path are eligible, with
+closer paths preferred. For example, a task at
+`firefly-events/events/api` considers agents attached to that path, then
+`firefly-events/events`, then `firefly-events`.
+
+If the issue has no `tree_path`, or no tree-attached agent has capacity, routing
+falls back to the existing project lane / default lane behavior.
+
 ## Bulk human-todo extraction (one-off triage sweep)
 
 `scripts/export-human-queue.mjs` above only exports what the *live router*

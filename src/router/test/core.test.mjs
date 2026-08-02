@@ -9,6 +9,8 @@ const CFG = {
     'heimdall-dev': { id: 'H', runtime: 'opencode', maxInflight: 3 },
     'auriga-dev': { id: 'A', runtime: 'codex', maxInflight: 3 },
     'heimdall-dev-codex': { id: 'HC', runtime: 'codex', maxInflight: 3 },
+    'firefly-root': { id: 'FR', runtime: 'codex', maxInflight: 3 },
+    'firefly-api': { id: 'FA', runtime: 'codex', maxInflight: 3 },
   },
   RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
   PROJECT_LANE: {
@@ -20,6 +22,10 @@ const CFG = {
   DEFAULT_LANE: ['auriga-dev', 'heimdall-dev-codex'],
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus' },
+  TREE_AGENT_ATTACHMENTS: {
+    'firefly-events': ['firefly-root'],
+    'firefly-events/events/api': ['FA'],
+  },
   CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
@@ -100,6 +106,28 @@ test('routing: default lane spreads across the two codex agents', () => {
   const picks = core.selectAssignments(issues, CFG, {}, {});
   const agents = picks.map((p) => p.agent).sort();
   assert.deepEqual(agents, ['auriga-dev', 'heimdall-dev-codex']); // load-balanced
+});
+
+test('tree-aware routing: exact tree node attachment overrides project lane', () => {
+  const issues = [{ ...todo('ff1', 'AURIGA', 1), tree_path: 'firefly-events/events/api' }];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.equal(picks[0].agent, 'firefly-api');
+});
+
+test('tree-aware routing: ancestor attachment is eligible for descendant task path', () => {
+  const cfg = {
+    ...CFG,
+    TREE_AGENT_ATTACHMENTS: { 'firefly-events': ['firefly-root'] },
+  };
+  const issues = [{ ...todo('ff2', 'AURIGA', 1), tree_path: 'firefly-events/events/api' }];
+  const picks = core.selectAssignments(issues, cfg, {}, {});
+  assert.equal(picks[0].agent, 'firefly-root');
+});
+
+test('tree-aware routing: task without tree_path uses existing project lane', () => {
+  const issues = [todo('a1', 'AURIGA', 1)];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.equal(picks[0].agent, 'auriga-dev');
 });
 
 test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
