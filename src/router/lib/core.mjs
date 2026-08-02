@@ -75,7 +75,7 @@ export function isHiveStory(issue = {}) {
 // Downstream comparison is EXACT string equality (storyKey === slugKey), so correct
 // full-key extraction is exactly what rejects false-prefix cross-matches.
 function extractStoryKey(str = '') {
-  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-?\d{1,3})(?![0-9])/i);
+  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-\d{1,3})(?![0-9])/i);
   return m ? m[1].toLowerCase() : null;
 }
 
