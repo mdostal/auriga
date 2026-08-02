@@ -1,6 +1,8 @@
 // Auriga auto-router — PURE decision logic (no live calls).
 // Everything here is deterministic and unit-tested with mocked inputs.
 
+import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
+
 const ACTIVE_RUN_STATUSES = new Set([
   'running', 'in_progress', 'in progress', 'queued', 'pending', 'dispatched', 'started', 'assigned',
 ]);
@@ -138,8 +140,7 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
 // Choose the best lane agent for a project: honor PROJECT_LANE order, else
 // DEFAULT_LANE, picking the candidate with the lowest current+projected load
 // that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected) {
-  const lane = cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE;
+export function chooseAgentFromLane(lane, cfg, inflight, runtimeInflight, projected) {
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
   );
@@ -152,6 +153,19 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
     return lane.indexOf(x) - lane.indexOf(y);
   });
   return eligible[0];
+}
+
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected) {
+  const lane = cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE;
+  return chooseAgentFromLane(lane, cfg, inflight, runtimeInflight, projected);
+}
+
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected) {
+  const treeLane = getEligibleAgentsByTreePath(issue, cfg);
+  const treeAgent = treeLane.length
+    ? chooseAgentFromLane(treeLane, cfg, inflight, runtimeInflight, projected)
+    : null;
+  return treeAgent || chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected);
 }
 
 // Select this cycle's assignments from the board.
@@ -188,7 +202,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected);
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected);
     if (!agent) continue;
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;

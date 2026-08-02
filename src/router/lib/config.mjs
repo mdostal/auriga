@@ -82,6 +82,11 @@ export const PROJECT_LANE = {
 // Fallback lane for every other project: spread across the two Codex agents.
 export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
 
+// Tree path -> attached agent lane names or IDs. When an issue carries
+// `tree_path`, the router checks the exact path and each ancestor path before
+// falling back to PROJECT_LANE / DEFAULT_LANE.
+export const TREE_AGENT_ATTACHMENTS = {};
+
 // Known human names for the `waiting_on: <human>` priority-1 dispatch filter
 // (see isHumanTodo in lib/core.mjs). Matched case-insensitively, substring OK
 // (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
