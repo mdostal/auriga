@@ -177,6 +177,71 @@ async function cycle() {
     }
   }
 
+  // ---- CASCADE RE-DISPATCH: a completed story enqueues its now-unblocked dependents ----
+  // THE self-draining fix. Pure code, no agent/LLM. When a story is done, any
+  // dependent whose FULL dependency graph is now satisfied is ENQUEUED immediately
+  // (assignee-mutation alone never enqueues — the dead-zone — so a completion event
+  // historically re-fired nothing and a chain only advanced on a manual
+  // `multica issue rerun`). The completed set is derived from the LIVE board (done
+  // stories), not only this-cycle merges, because a story usually reaches `done` via
+  // an agent setting status directly, not via the router's merged-PR gate — a purely
+  // event-based trigger would miss most completions and never self-heal an already-
+  // stuck chain. Idempotent + bounded: skips any dependent with an active run or an
+  // existing PR, caps per cycle (CAPS.perCycleCascade), and records each handled
+  // identifier in `cascaded` so selectAssignments below does not double-dispatch it.
+  const cascaded = new Set();
+  {
+    const doneIds = new Set(
+      issues
+        .filter((i) => { const s = (i.status || '').toLowerCase(); return s === 'done' || s === 'cancelled' || s === 'canceled'; })
+        .map((i) => i.id)
+    );
+    const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
+    const cascades = core.detectCascadeDispatch(issues, doneIds, statusById, cfg);
+    let cascadeFired = 0;
+    for (const c of cascades) {
+      if (cascadeFired >= cfg.CAPS.perCycleCascade) break;
+      if (assignedThisProcess >= MAX_ASSIGN) break;
+      const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
+      // Idempotency 1: never re-fire a story that already has an active run.
+      let activeRun = false;
+      try { activeRun = mca.issueRuns(c.identifier).some((r) => core.classifyRun(r, Date.now()).active); }
+      catch (e) { log('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
+      if (activeRun) { log('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      // Idempotency 2: never re-dispatch a story that already produced a PR (open =
+      // in review, merged = shipped) — same gh-based guard the unblock pass uses.
+      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      if (slug) {
+        try {
+          if (mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj))) {
+            log('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
+            continue;
+          }
+        } catch (e) { log('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
+      }
+      log('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !DRY });
+      if (DRY) { cascadeFired++; cascaded.add(c.identifier); continue; }
+      try {
+        if (c.status === 'blocked') mca.issueStatus(c.identifier, 'todo');
+        // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
+        // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
+        const agent = core.chooseAgentForProject(c.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
+        if (agent) {
+          mca.assignIssue(c.identifier, agent);
+          inflight[agent] = (inflight[agent] || 0) + 1;
+          await sleep(cfg.CAPS.verifyDelayMs);
+        }
+        mca.rerunIssue(c.identifier);
+        assignedThisProcess++;
+        cascadeFired++;
+        cascaded.add(c.identifier);
+        log('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
+      } catch (e) {
+        log('cascade_error', { identifier: c.identifier, error: e.message });
+      }
+    }
+  }
+
   // ---- BACK-HALF: review / ship dispatch on in_review stories ----
   // detectVerifiedDone only advances a story once its PR is ALREADY merged; it
   // never merges anything. This block dispatches the Claude+plugin-hive REVIEW
@@ -309,6 +374,7 @@ async function cycle() {
   const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
   const picks = core.selectAssignments(issues, cfg, inflight, {
     blockedRuntimes,
+    exclude: cascaded,
     maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
   });
 
