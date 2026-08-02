@@ -62,31 +62,31 @@ export function isHiveStory(issue = {}) {
 // its PR never matched its ticket and sat forever. storyKey() extracts that short
 // key so a PR can be matched to its ticket even when the branch has no PAN id.
 
-// Unified story-key extractor (2026-07-31, PAN-6999 false-unblock fix). A story key
+// Unified story-key extractor. A story key
 // identifies a story within its epic and appears at the START of the story's title
 // bracket ("[<key>-<words>]") and at the start of a dependency SLUG ("<key>-<words>").
-// TWO real naming schemes exist on the board and BOTH must parse — else the dep never
-// resolves, descDepsSatisfied treats it as "unseen -> don't block", and the story
-// FALSE-unblocks (blocked->todo->blocked flip-flop every cycle, burning a dispatch):
-//   1. <letters>-<digits>  e.g. m-02, cm-07, htq-01, flayr-01, jfpm-01, mit-04, v-04, lct-03
-//   2. <letters><digits>   e.g. p1, s1  (the p1-* / s1-* epics: "p1-state-machine-auto-unblock")
+// The short-key convention is strictly <letters>-<digits>, e.g. m-02, cm-07,
+// htq-01, flayr-01, jfpm-01, mit-04, v-04, lct-03. Epic-tag slugs such as
+// "p1-router-capability-routing" are exact story ids, not short keys: treating
+// every p1-* sibling as key "p1" collapses unrelated stories onto one key and
+// can false-unblock dependents.
 // The trailing (?![0-9]) forces the FULL number to be captured, so a longer-numbered key
-// can never be read as a shorter one — ct-010 never collapses to ct-01, p10 never to p1.
+// can never be read as a shorter one — ct-010 never collapses to ct-01.
 // Downstream comparison is EXACT string equality (storyKey === slugKey), so correct
 // full-key extraction is exactly what rejects false-prefix cross-matches.
 function extractStoryKey(str = '') {
-  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-?\d{1,3})(?![0-9])/i);
+  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-\d{1,3})(?![0-9])/i);
   return m ? m[1].toLowerCase() : null;
 }
 
 // Short epic-scoped key from a story TITLE's leading "[key-...]" bracket (e.g. "m-02",
-// "cm-07", "hf-01", "p1"). null when the title has no parseable leading key.
+// "cm-07", "hf-01"). null when the title has no parseable leading key.
 export function storyKey(issue = {}) {
   return extractStoryKey(issue.title || '');
 }
 
 // Short key from a dependency SLUG (e.g. "m-01-core-recall-interface" -> "m-01",
-// "p1-state-machine-auto-unblock" -> "p1"). null when unparseable.
+// "cm-07-e2e-integration" -> "cm-07"). null when unparseable.
 export function slugKey(slug = '') {
   return extractStoryKey(slug);
 }
@@ -753,9 +753,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 //      — the "p1-..." convention, where the full slug IS the identity; or
 //   2. the short epic-scoped key (storyKey === slugKey) — the "m-01"/"cm-07"
 //      convention, kept for backward compatibility.
-// A resolved sibling BLOCKS unless it is terminal (done/cancelled). A slug that
-// resolves via NEITHER form does NOT block — same anti-deadlock rule depsSatisfied
-// uses for unseen deps.
+// A resolved sibling BLOCKS unless it is terminal (done/cancelled). A parseable
+// short-key slug that has no matching sibling does not block, matching the legacy
+// anti-deadlock rule. An unparseable declared slug blocks unless it resolved by
+// exact id first; this keeps p1/v1/s1-style exact-id deps from silently satisfying.
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
@@ -766,7 +767,7 @@ export function descDepsSatisfied(issue, allIssues = []) {
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
     if (!dep) {
       const k = slugKey(slug);
-      if (!k) continue; // neither form resolves — unresolved, don't block (avoid deadlock)
+      if (!k) return false; // exact-id-style dep declared but unresolved: conservative block
       dep = siblings.find((s) => storyKey(s) === k);
       if (!dep) continue; // unresolved — don't block (avoid deadlock)
     }
