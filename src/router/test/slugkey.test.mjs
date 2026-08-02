@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../lib/core.mjs';
 
-// PAN-6999: the slug matcher must parse BOTH naming schemes and reject false prefixes.
+// PAN-7150: only <letters>-<digits> slugs are short keys. Epic-tag slugs such as
+// p1-* / s1-* resolve by exact `id:` front matter instead, so siblings never
+// collapse onto a shared "p1" key.
 
 test('storyKey/slugKey parse classic <letters>-<digits> keys', () => {
   assert.equal(core.storyKey({ title: '[m-02-file-layer-implementation] Implement file layer' }), 'm-02');
@@ -15,28 +17,29 @@ test('storyKey/slugKey parse classic <letters>-<digits> keys', () => {
   assert.equal(core.slugKey('v-04-file-integrations'), 'v-04');
 });
 
-test('storyKey/slugKey parse <letters><digits> keys (p1-* / s1-* epics) — the PAN-6999 case', () => {
-  // These returned null under the old /^([a-z]{1,8})-(\d{1,3})/ regex, which is why
-  // their deps never resolved and the stories false-unblocked.
-  assert.equal(core.slugKey('p1-state-machine-auto-unblock'), 'p1');
-  assert.equal(core.slugKey('p1-triage-dep-reeval'), 'p1');
-  assert.equal(core.storyKey({ title: '[p1-state-machine-auto-unblock] x' }), 'p1');
-  assert.equal(core.storyKey({ title: '[s1-domain-models-draft] x' }), 's1');
+test('storyKey/slugKey reject <letters><digits> epic-tag slugs (p1-* / s1-*)', () => {
+  assert.equal(core.slugKey('p1-state-machine-auto-unblock'), null);
+  assert.equal(core.slugKey('p1-triage-dep-reeval'), null);
+  assert.equal(core.storyKey({ title: '[p1-state-machine-auto-unblock] x' }), null);
+  assert.equal(core.storyKey({ title: '[s1-domain-models-draft] x' }), null);
 });
 
 test('slugKey rejects false-prefix collisions (full number captured)', () => {
-  // ct-010 must NOT collapse to ct-01, p10 must NOT collapse to p1.
+  // ct-010 must NOT collapse to ct-01; p10/p1 epic tags are not short keys.
   assert.equal(core.slugKey('ct-010-foo'), 'ct-010');
   assert.equal(core.slugKey('ct-01-foo'), 'ct-01');
   assert.notEqual(core.slugKey('ct-010-foo'), core.slugKey('ct-01-foo'));
-  assert.equal(core.slugKey('p10-foo'), 'p10');
-  assert.equal(core.slugKey('p1-foo'), 'p1');
-  assert.notEqual(core.slugKey('p10-foo'), core.slugKey('p1-foo'));
+  assert.equal(core.slugKey('p10-foo'), null);
+  assert.equal(core.slugKey('p1-foo'), null);
 });
 
 test('a p1-* dependency now RESOLVES against a sibling and blocks when the dep is not done', () => {
   // parent epic with two p1 stories: p1-state-machine (dep) not done, p1-triage depends on it.
-  const dep = { id: 'A', identifier: 'PAN-A', parent_issue_id: 'EPIC', title: '[p1-state-machine-auto-unblock] build it', status: 'todo' };
+  const dep = {
+    id: 'A', identifier: 'PAN-A', parent_issue_id: 'EPIC',
+    title: '[p1-state-machine-auto-unblock] build it', status: 'todo',
+    description: 'id: p1-state-machine-auto-unblock\ndepends_on: []\n',
+  };
   const child = {
     id: 'B', identifier: 'PAN-B', parent_issue_id: 'EPIC', status: 'blocked',
     title: '[p1-triage-dep-reeval] depends on state machine',
@@ -49,7 +52,11 @@ test('a p1-* dependency now RESOLVES against a sibling and blocks when the dep i
 });
 
 test('detectUnblocks does NOT false-unblock a p1 child whose p1 dep is unbuilt', () => {
-  const dep = { id: 'A', identifier: 'PAN-A', parent_issue_id: 'EPIC', title: '[p1-state-machine-auto-unblock] x', status: 'todo' };
+  const dep = {
+    id: 'A', identifier: 'PAN-A', parent_issue_id: 'EPIC',
+    title: '[p1-state-machine-auto-unblock] x', status: 'todo',
+    description: 'id: p1-state-machine-auto-unblock\ndepends_on: []\n',
+  };
   const child = {
     id: 'B', identifier: 'PAN-B', parent_issue_id: 'EPIC', status: 'blocked',
     title: '[p1-triage-dep-reeval] x',
