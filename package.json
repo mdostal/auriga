@@ -1,0 +1,13 @@
+{
+  "name": "auriga-toolkit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "resume-judge": "./src/tools/resume-judge.ts"
+  },
+  "scripts": {
+    "test": "node --test src/tools/*.test.mjs",
+    "build": "node --check src/tools/resume-judge.ts && node --check src/tools/index.ts && node --check src/skills/taxonomy.ts"
+  }
+}
