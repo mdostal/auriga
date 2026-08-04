@@ -114,6 +114,10 @@ export function computeAssignedQueued(issues, agents) {
   return counts;
 }
 
+export function agentIdSet(agents = {}) {
+  return new Set(Object.values(agents).map((a) => a && a.id).filter(Boolean));
+}
+
 // Runtime in-flight totals derived from per-agent counts.
 export function computeRuntimeInflight(inflight, agents) {
   const rt = {};
@@ -248,4 +252,52 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     });
   }
   return actions;
+}
+
+// Detect assigned `todo` issues that should have dispatched already but are
+// still idle. These do not count as capacity, so recovery is a separate bounded
+// pass instead of part of route selection.
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now()) {
+  const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  const actions = [];
+  for (const i of todoIssues) {
+    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+
+    const touchedAt = i.updated_at || i.created_at;
+    const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
+    if (idleAgeMs < staleMs) continue;
+
+    const runs = runsByIssue[i.identifier] || [];
+    if (hasActiveRun(runs, now, staleMs)) continue;
+    const lr = latestRun(runs);
+    const classified = lr ? classifyRun(lr, now) : null;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      assigneeId: i.assignee_id,
+      projectId: i.project_id,
+      lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+      idleAgeMs,
+      action: 'start',
+      reason: !lr ? 'assigned-todo-no-runs' : (classified.failed ? 'assigned-todo-last-run-failed' : 'assigned-todo-stale'),
+    });
+  }
+  return actions;
+}
+
+export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
+  const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
+  const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.assignedIdlePerAgent ?? 1;
+  const perAgent = {};
+  const selected = [];
+  for (const action of [...actions].sort((a, b) => b.idleAgeMs - a.idleAgeMs)) {
+    if (selected.length >= maxTotal) break;
+    if ((perAgent[action.assigneeId] || 0) >= maxPerAgent) continue;
+    perAgent[action.assigneeId] = (perAgent[action.assigneeId] || 0) + 1;
+    selected.push(action);
+  }
+  return selected;
 }

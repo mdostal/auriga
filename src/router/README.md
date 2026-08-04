@@ -3,6 +3,13 @@
 The auto-router: the decide+assign layer that self-drains the Multica board by
 routing unassigned todos to Pantheon swarm agents. Runs live on the hive.
 
+Each cycle also runs a bounded assigned-idle self-heal pass. If an issue is
+already assigned to a known agent, still `todo`, and older than
+`CAPS.assignedIdleStaleMs`, the router advances it to `in_progress`, then checks
+for a run row and falls back to `issue rerun` if the daemon still did not create
+one. This pass is workspace-wide because it does not choose a lane; it only wakes
+agents already holding queued work.
+
 ## Run
 
 ```sh

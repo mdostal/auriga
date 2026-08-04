@@ -7,13 +7,16 @@ import path from 'node:path';
 const CLI = process.env.MULTICA_CLI || '/Users/dostal/.local/bin/multica';
 const PROFILE = process.env.MULTICA_PROFILE || 'dostal';
 
-// The three env vars must be UNSET (stale values 404). execFileSync inherits
-// process.env, so we delete them from a cloned env instead of `env -u`.
+// Stale token/workspace env values 404 on the live host profile, so drop them
+// from a cloned env instead of shelling through `env -u`. In agent-task
+// sandboxes, though, the CLI requires the scoped mat_ token; keep only that
+// explicitly task-scoped form.
 function cleanEnv() {
   const e = { ...process.env };
-  delete e.MULTICA_TOKEN;
+  const hasTaskToken = String(e.MULTICA_TOKEN || '').startsWith('mat_');
+  if (!hasTaskToken) delete e.MULTICA_TOKEN;
   delete e.MULTICA_PAT_TOKEN;
-  delete e.MULTICA_WORKSPACE_ID;
+  if (!hasTaskToken) delete e.MULTICA_WORKSPACE_ID;
   return e;
 }
 
@@ -46,6 +49,11 @@ export function listAllIssues(projectIds) {
   return all;
 }
 
+export function listAgents() {
+  const res = run(['agent', 'list', '--output', 'json']);
+  return Array.isArray(res) ? res : [];
+}
+
 export function issueRuns(identifier) {
   try {
     const res = run(['issue', 'runs', identifier, '--output', 'json']);
@@ -62,6 +70,10 @@ export function assignIssue(identifier, agentName) {
 
 export function rerunIssue(identifier) {
   return run(['issue', 'rerun', identifier, '--output', 'json']);
+}
+
+export function startIssue(identifier) {
+  return run(['issue', 'status', identifier, 'in_progress', '--output', 'json']);
 }
 
 // Cross-workspace issue listing — unlike listIssues/listAllIssues above (which

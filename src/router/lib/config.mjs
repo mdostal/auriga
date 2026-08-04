@@ -106,5 +106,8 @@ export const CAPS = {
   perCycleTotal: 5,
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
+  assignedIdleStaleMs: 10 * 60 * 1000, // assigned todo older than this is re-dispatched
+  assignedIdlePerCycle: 5,
+  assignedIdlePerAgent: 1,
   verifyDelayMs: 6000, // wait after assign before checking a run started
 };

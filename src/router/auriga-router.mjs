@@ -40,6 +40,23 @@ if (process.env.AURIGA_CYCLE_MS) cfg.CAPS.cycleMs = parseInt(process.env.AURIGA_
 
 let assignedThisProcess = 0;
 
+function liveAgentMap() {
+  const agents = { ...cfg.AGENTS };
+  try {
+    for (const a of mca.listAgents()) {
+      if (!a.id || !a.name) continue;
+      agents[a.name] = {
+        id: a.id,
+        runtime: a.runtime_id || agents[a.name]?.runtime || 'unknown',
+        maxInflight: a.max_concurrent_tasks || agents[a.name]?.maxInflight || 1,
+      };
+    }
+  } catch (e) {
+    log('agent_list_error', { error: e.message });
+  }
+  return agents;
+}
+
 // ---- single-instance guard -------------------------------------------------
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 function acquireLock() {
@@ -74,12 +91,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function cycle() {
   const now = Date.now();
   const issues = mca.listAllIssues(cfg.PROJECT_IDS);
+  const allAgents = liveAgentMap();
+  const allAgentIds = core.agentIdSet(allAgents);
+  const agentNameById = Object.fromEntries(Object.entries(allAgents).map(([name, a]) => [a.id, name]));
+  let workspaceTodoIssues = [];
+  try {
+    workspaceTodoIssues = mca.listAllWorkspaceIssues('todo');
+  } catch (e) {
+    log('assigned_idle_list_error', { error: e.message });
+  }
   const inflight = core.computeInflight(issues, cfg.AGENTS);
   const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = core.computeAssignedQueued(issues, cfg.AGENTS);
+  const assignedQueuedAll = core.computeAssignedQueued(workspaceTodoIssues, allAgents);
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
   log('scan', {
@@ -88,9 +115,53 @@ async function cycle() {
     inflight,
     runtimeInflight,
     assignedQueued,
+    assignedQueuedAll,
   });
 
   const blockedRuntimes = new Set();
+
+  // ---- assigned-todo self-heal ----
+  // Assignment alone can leave an issue stuck in todo without a task row. This
+  // pass is workspace-wide because the stuck issue is already assigned; Auriga is
+  // not choosing a lane here, only waking known agents that are holding old work.
+  const assignedTodoIssues = workspaceTodoIssues
+    .filter((i) => i.assignee_id && allAgentIds.has(i.assignee_id))
+    .filter((i) => !core.isSmokeScratch(i.title))
+    .filter((i) => !core.isHumanTodo(i, cfg));
+  const assignedRuns = {};
+  for (const i of assignedTodoIssues) assignedRuns[i.identifier] = mca.issueRuns(i.identifier);
+  const assignedIdle = core.limitAssignedIdleRecoveries(
+    core.detectAssignedIdle(assignedTodoIssues, assignedRuns, cfg, allAgentIds, now),
+    cfg,
+    { maxTotal: Math.min(cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)) }
+  );
+  for (const a of assignedIdle) {
+    if (assignedThisProcess >= MAX_ASSIGN) break;
+    const agent = agentNameById[a.assigneeId] || a.assigneeId;
+    log('assigned_idle', { ...a, agent, applied: !DRY });
+    if (DRY) continue;
+    try {
+      mca.startIssue(a.identifier);
+      assignedThisProcess++;
+    } catch (e) {
+      log('assigned_idle_start_error', { identifier: a.identifier, agent, error: e.message });
+      continue;
+    }
+    await sleep(cfg.CAPS.verifyDelayMs);
+    const runs = mca.issueRuns(a.identifier);
+    const started = runs.length > 0 && runs.some((r) => {
+      const c = core.classifyRun(r, Date.now());
+      return c.active || c.done || c.failed;
+    });
+    if (!started) {
+      log('assigned_idle_verify_no_run', { identifier: a.identifier, agent, action: 'rerun' });
+      try { mca.rerunIssue(a.identifier); } catch (e) { log('assigned_idle_rerun_error', { identifier: a.identifier, error: e.message }); }
+    } else {
+      const lr = core.latestRun(runs);
+      const c = lr ? core.classifyRun(lr, Date.now()) : {};
+      log('assigned_idle_verify_ok', { identifier: a.identifier, agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+    }
+  }
 
   // ---- zombie recovery ----
   if (!NO_ZOMBIE) {
@@ -132,6 +203,7 @@ async function cycle() {
     if (DRY) continue;
     try {
       mca.assignIssue(p.identifier, p.agent);
+      mca.startIssue(p.identifier);
       assignedThisProcess++;
     } catch (e) {
       const msg = e.message || '';

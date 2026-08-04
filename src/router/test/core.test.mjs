@@ -75,6 +75,44 @@ test('computeAssignedQueued reports the assigned-todo backlog (observability onl
   assert.equal(queued['heimdall-dev'], 0);
 });
 
+test('detectAssignedIdle wakes stale assigned todos for known agents only', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  const fresh = new Date(now - 5 * 60 * 1000).toISOString();
+  const known = core.agentIdSet(CFG.AGENTS);
+  const issues = [
+    { ...todo('stale1', 'AURIGA', 1, 'A'), updated_at: old },
+    { ...todo('fresh1', 'AURIGA', 2, 'A'), updated_at: fresh },
+    { ...todo('unknown1', 'AURIGA', 3, 'UNKNOWN'), updated_at: old },
+    { ...todo('smoke1', 'AURIGA', 4, 'A', 'SMOKE: dispatch test'), updated_at: old },
+    { ...todo('human1', 'AURIGA', 5, 'A'), updated_at: old, labels: ['human-todo'] },
+  ];
+  const recoveries = core.detectAssignedIdle(issues, {}, CFG, known, now);
+  assert.deepEqual(recoveries.map((r) => r.identifier), ['stale1']);
+  assert.equal(recoveries[0].action, 'start');
+  assert.equal(recoveries[0].reason, 'assigned-todo-no-runs');
+});
+
+test('detectAssignedIdle skips assigned todos with a fresh active run', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  const recent = new Date(now - 2 * 60 * 1000).toISOString();
+  const issues = [{ ...todo('active1', 'AURIGA', 1, 'A'), updated_at: old }];
+  const runs = { active1: [{ status: 'running', completed_at: null, created_at: recent }] };
+  const recoveries = core.detectAssignedIdle(issues, runs, CFG, core.agentIdSet(CFG.AGENTS), now);
+  assert.deepEqual(recoveries, []);
+});
+
+test('limitAssignedIdleRecoveries spreads recovery across agents', () => {
+  const actions = [
+    { identifier: 'a1', assigneeId: 'A', idleAgeMs: 50 },
+    { identifier: 'a2', assigneeId: 'A', idleAgeMs: 40 },
+    { identifier: 'h1', assigneeId: 'H', idleAgeMs: 30 },
+  ];
+  const selected = core.limitAssignedIdleRecoveries(actions, CFG, { maxTotal: 3, maxPerAgent: 1 });
+  assert.deepEqual(selected.map((a) => a.identifier), ['a1', 'h1']);
+});
+
 test('computeRuntimeInflight aggregates the shared codex runtime', () => {
   const inflight = { 'auriga-dev': 2, 'heimdall-dev-codex': 1, 'heimdall-dev': 1, 'consus-dev': 0 };
   const rt = core.computeRuntimeInflight(inflight, CFG.AGENTS);
