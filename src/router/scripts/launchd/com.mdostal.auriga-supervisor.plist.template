@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for a per-user launchd LaunchAgent that keeps supervisor.sh (and in
+  turn the auriga-router) alive across logins AND reboots. Do not load this
+  file directly — run install.sh, which fills in __NODE__ / __DIR__ / __HOME__
+  for this machine and installs the result into ~/Library/LaunchAgents/.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mdostal.auriga-supervisor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__DIR__/supervisor.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE</key>
+    <string>__NODE__</string>
+    <key>DIR</key>
+    <string>__DIR__</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__DIR__</string>
+
+  <!-- Reboot-survival: launch at boot/login (RunAtLoad) and respawn on exit
+       (KeepAlive). supervisor.sh itself is single-instance (its own pidfile
+       guard) and loops forever restarting the router, so KeepAlive here is
+       the outer safety net for the rare case supervisor.sh itself dies. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/auriga-supervisor-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/auriga-supervisor-launchd.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

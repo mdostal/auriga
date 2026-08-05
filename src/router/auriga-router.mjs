@@ -15,6 +15,12 @@
 //   --no-zombie       skip zombie recovery this run
 // Env overrides: AURIGA_PER_CYCLE_TOTAL, AURIGA_PER_CYCLE_PER_AGENT,
 //   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG.
+//
+// TESTABILITY: `cycle()` is exported and accepts an options bag so tests can
+// inject a mock Multica layer (opts.mca), a fixture config (opts.cfg), a log
+// sink (opts.log), and a fast/no-op sleep (opts.sleep) — see
+// test/router-cycle.e2e.test.mjs. `main()` (the live daemon loop) only runs
+// when this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
@@ -37,8 +43,6 @@ const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
 if (process.env.AURIGA_PER_CYCLE_PER_AGENT) cfg.CAPS.perCyclePerAgent = parseInt(process.env.AURIGA_PER_CYCLE_PER_AGENT, 10);
 if (process.env.AURIGA_CYCLE_MS) cfg.CAPS.cycleMs = parseInt(process.env.AURIGA_CYCLE_MS, 10);
-
-let assignedThisProcess = 0;
 
 // ---- single-instance guard -------------------------------------------------
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
@@ -71,25 +75,40 @@ function log(event, data) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- one cycle -------------------------------------------------------------
-async function cycle() {
-  const now = Date.now();
+// opts: { mca, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
+// Every dependency defaults to the live module-level singleton, so calling
+// cycle() with no args (from main()) is exactly the original live behavior.
+// Returns { todo, picked, assigned }.
+export async function cycle(opts = {}) {
+  const mcaImpl = opts.mca || mca;
+  const cfgImpl = opts.cfg || cfg;
+  const coreImpl = opts.core || core;
+  const logImpl = opts.log || log;
+  const sleepImpl = opts.sleep || sleep;
+  const dryRun = opts.dryRun ?? DRY;
+  const noZombie = opts.noZombie ?? NO_ZOMBIE;
+  const maxAssign = opts.maxAssign ?? Infinity;
+  const now = opts.now ?? Date.now();
+
+  let assigned = 0;
+
   // BOARD-WIDE scan for the STATUS passes (unblock, parent-rollup, false-done,
   // run-completion, verified-done): the blocked/done lies live in projects the
-  // build-DISPATCH set (cfg.PROJECT_IDS) deliberately excludes, so scanning only
-  // those 4 hid them. selectAssignments still filters to cfg.PROJECT_IDS internally
+  // build-DISPATCH set (cfgImpl.PROJECT_IDS) deliberately excludes, so scanning only
+  // those 4 hid them. selectAssignments still filters to cfgImpl.PROJECT_IDS internally
   // (dispatch stays gated to aligned lanes); only observation goes board-wide.
-  const discovered = mca.listAllProjectIds();
-  const scanIds = [...new Set([...(discovered.length ? discovered : cfg.PROJECT_IDS), ...cfg.PROJECT_IDS])];
-  const issues = mca.listAllIssues(scanIds);
-  const inflight = core.computeInflight(issues, cfg.AGENTS);
-  const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
+  const discovered = mcaImpl.listAllProjectIds();
+  const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
+  const issues = mcaImpl.listAllIssues(scanIds);
+  const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS);
+  const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
-  const assignedQueued = core.computeAssignedQueued(issues, cfg.AGENTS);
+  const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
-  const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
-  log('scan', {
+  const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
+  logImpl('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
     inflight,
@@ -111,7 +130,7 @@ async function cycle() {
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
-    const unblocks = core.detectUnblocks(blockedIssues, statusById, issues);
+    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues);
     for (const u of unblocks) {
       // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
       // means it is already in review, a MERGED PR means it already shipped. A
@@ -120,19 +139,19 @@ async function cycle() {
       // pre-target_repo churn, but never actually built). So gate on a real PR,
       // discovered via gh in the story's own target repo, not on run count.
       const issueObj = blockedIssues.find((b) => b.id === u.issueId) || {};
-      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       let hasPr = false;
       if (slug) {
-        try { hasPr = mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj)); }
-        catch (e) { log('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
+        try { hasPr = mcaImpl.ghPrs(slug, 'all').some((pr) => coreImpl.prMatchesStory(pr, issueObj)); }
+        catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
-      if (hasPr) { log('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
-      log('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !DRY });
-      if (!DRY) {
+      if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
+      logImpl('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !dryRun });
+      if (!dryRun) {
         try {
-          mca.issueStatus(u.identifier, 'todo');
-          try { mca.unassignIssue(u.identifier); } catch (e) { log('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
-        } catch (e) { log('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
+          mcaImpl.issueStatus(u.identifier, 'todo');
+          try { mcaImpl.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
+        } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
       }
     }
 
@@ -140,11 +159,11 @@ async function cycle() {
     // Nothing else closes a parent when its last child completes. Fires only when
     // ALL of a parent's visible children are done/cancelled and the parent isn't
     // already terminal.
-    const parentDone = core.detectParentDone(issues);
+    const parentDone = coreImpl.detectParentDone(issues);
     for (const pd of parentDone) {
-      log('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !DRY });
-      if (!DRY) {
-        try { mca.issueStatus(pd.identifier, 'done'); } catch (e) { log('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
+      logImpl('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !dryRun });
+      if (!dryRun) {
+        try { mcaImpl.issueStatus(pd.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
       }
     }
   }
@@ -156,24 +175,24 @@ async function cycle() {
   // idempotent (a transitioned issue simply drops out of its source filter).
   const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
   const runsByIssue = {};
-  for (const i of inProgress) runsByIssue[i.identifier] = mca.issueRuns(i.identifier);
+  for (const i of inProgress) runsByIssue[i.identifier] = mcaImpl.issueRuns(i.identifier);
 
-  const completions = core.detectRunCompletions(inProgress, runsByIssue, now);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
   for (const c of completions) {
-    log('advance', { identifier: c.identifier, to: 'in_review', applied: !DRY });
-    if (!DRY) {
-      try { mca.issueStatus(c.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
+    logImpl('advance', { identifier: c.identifier, to: 'in_review', applied: !dryRun });
+    if (!dryRun) {
+      try { mcaImpl.issueStatus(c.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
     }
   }
 
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
   const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = mca.issuePullRequests(i.identifier);
-  const verified = core.detectVerifiedDone(inReview, prsByIssue);
+  for (const i of inReview) prsByIssue[i.identifier] = mcaImpl.issuePullRequests(i.identifier);
+  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
   for (const v of verified) {
-    log('advance', { identifier: v.identifier, to: 'done', applied: !DRY });
-    if (!DRY) {
-      try { mca.issueStatus(v.identifier, 'done'); } catch (e) { log('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+    logImpl('advance', { identifier: v.identifier, to: 'done', applied: !dryRun });
+    if (!dryRun) {
+      try { mcaImpl.issueStatus(v.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
     }
   }
 
@@ -187,7 +206,7 @@ async function cycle() {
   // an agent setting status directly, not via the router's merged-PR gate — a purely
   // event-based trigger would miss most completions and never self-heal an already-
   // stuck chain. Idempotent + bounded: skips any dependent with an active run or an
-  // existing PR, caps per cycle (CAPS.perCycleCascade), and records each handled
+  // existing PR, caps per cycle (cfgImpl.CAPS.perCycleCascade), and records each handled
   // identifier in `cascaded` so selectAssignments below does not double-dispatch it.
   const cascaded = new Set();
   {
@@ -197,47 +216,47 @@ async function cycle() {
         .map((i) => i.id)
     );
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
-    const cascades = core.detectCascadeDispatch(issues, doneIds, statusById, cfg);
+    const cascades = coreImpl.detectCascadeDispatch(issues, doneIds, statusById, cfgImpl);
     let cascadeFired = 0;
     for (const c of cascades) {
-      if (cascadeFired >= cfg.CAPS.perCycleCascade) break;
-      if (assignedThisProcess >= MAX_ASSIGN) break;
+      if (cascadeFired >= cfgImpl.CAPS.perCycleCascade) break;
+      if (assigned >= maxAssign) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
       let activeRun = false;
-      try { activeRun = mca.issueRuns(c.identifier).some((r) => core.classifyRun(r, Date.now()).active); }
-      catch (e) { log('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
-      if (activeRun) { log('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      try { activeRun = mcaImpl.issueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
+      catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
+      if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses.
-      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       if (slug) {
         try {
-          if (mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj))) {
-            log('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
+          if (mcaImpl.ghPrs(slug, 'all').some((pr) => coreImpl.prMatchesStory(pr, issueObj))) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
             continue;
           }
-        } catch (e) { log('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
+        } catch (e) { logImpl('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
       }
-      log('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !DRY });
-      if (DRY) { cascadeFired++; cascaded.add(c.identifier); continue; }
+      logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
+      if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
-        if (c.status === 'blocked') mca.issueStatus(c.identifier, 'todo');
+        if (c.status === 'blocked') mcaImpl.issueStatus(c.identifier, 'todo');
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
-        const agent = core.chooseAgentForProject(c.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
+        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
-          mca.assignIssue(c.identifier, agent);
+          mcaImpl.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
-          await sleep(cfg.CAPS.verifyDelayMs);
+          await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         }
-        mca.rerunIssue(c.identifier);
-        assignedThisProcess++;
+        mcaImpl.rerunIssue(c.identifier);
+        assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
-        log('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
+        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
       } catch (e) {
-        log('cascade_error', { identifier: c.identifier, error: e.message });
+        logImpl('cascade_error', { identifier: c.identifier, error: e.message });
       }
     }
   }
@@ -251,7 +270,7 @@ async function cycle() {
   // Assignment to the review agent is the idempotency marker (see
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
-  for (const i of inReview) inReviewRuns[i.identifier] = mca.issueRuns(i.identifier);
+  for (const i of inReview) inReviewRuns[i.identifier] = mcaImpl.issueRuns(i.identifier);
 
   // Board-wide open-PR gather (shared by false-done + review dispatch).
   // Multica's issue<->PR linkage is empty in practice, so discover PRs directly via
@@ -260,25 +279,25 @@ async function cycle() {
   // target_repo on an in_review/done story. Matching is slug-aware (prMatchesStory):
   // it matches the story's short key (m-01) in a branch, not only the PAN id, so
   // slug-branched PRs (mnemosyne#1 feat/m-01-service) are found.
-  const discoveredRepos = mca.ghListRepos(cfg.REVIEW_REPO_OWNER);
+  const discoveredRepos = mcaImpl.ghListRepos(cfgImpl.REVIEW_REPO_OWNER);
   const repoSet = new Set([
     ...discoveredRepos,
-    ...(cfg.REVIEW_SEARCH_REPOS || []),
-  ].map((r) => core.normalizeRepoSlug(r)).filter(Boolean));
-  for (const i of inReview) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
+    ...(cfgImpl.REVIEW_SEARCH_REPOS || []),
+  ].map((r) => coreImpl.normalizeRepoSlug(r)).filter(Boolean));
+  for (const i of inReview) { const s = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
   const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
-  for (const i of doneIssues) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
+  for (const i of doneIssues) { const s = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
   const openPrsAll = [];
   for (const repo of repoSet) {
-    try { for (const pr of mca.ghOpenPrs(repo)) { pr._repo = repo; openPrsAll.push(pr); } } catch { /* one repo failing must not abort the scan */ }
+    try { for (const pr of mcaImpl.ghOpenPrs(repo)) { pr._repo = repo; openPrsAll.push(pr); } } catch { /* one repo failing must not abort the scan */ }
   }
   // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
   // parent/seed ticket that some unrelated PR merely references is never dispatched.
   const openPrIds = new Set();
   for (const i of inReview) {
-    if (openPrsAll.some((pr) => core.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
+    if (openPrsAll.some((pr) => coreImpl.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
   }
-  if (inReview.length) log('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
+  if (inReview.length) logImpl('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
 
   // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
   // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
@@ -286,21 +305,21 @@ async function cycle() {
   // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
   // story with no open PR is left alone (may be a legit non-code done task).
   {
-    const falseDone = core.detectFalseDone(doneIssues, openPrsAll);
-    const cap = (cfg.CAPS && cfg.CAPS.perCycleFalseDone) || 3;
+    const falseDone = coreImpl.detectFalseDone(doneIssues, openPrsAll);
+    const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
-      if (n >= cap) { log('false_done_capped', { remaining: falseDone.length - n }); break; }
+      if (n >= cap) { logImpl('false_done_capped', { remaining: falseDone.length - n }); break; }
       n++;
-      log('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !DRY });
-      if (!DRY) {
-        try { mca.issueStatus(f.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
+      logImpl('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
+      if (!dryRun) {
+        try { mcaImpl.issueStatus(f.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
       }
     }
   }
 
-  const reviewInflight = core.computeReviewInflight(inReview, cfg);
-  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now, openPrIds });
+  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now, openPrIds });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
@@ -310,20 +329,20 @@ async function cycle() {
     // and runs each enabled perspective, truly verifying. See core.reviewSquadPlan +
     // agents/auriga-review.instructions.md.
     const issueObj = inReviewById.get(r.issueId) || { identifier: r.identifier };
-    const plan = core.reviewSquadPlan(issueObj, cfg);
-    log('review', {
+    const plan = coreImpl.reviewSquadPlan(issueObj, cfgImpl);
+    logImpl('review', {
       identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason,
-      squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !DRY,
+      squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !dryRun,
     });
-    if (DRY) continue;
+    if (dryRun) continue;
     try {
       if (r.action === 'dispatch-review') {
         // Publish the squad plan onto the ticket so what the squad will do is visible
         // on the board up front and is read by the squad agent (best-effort; a comment
         // failure must never block the dispatch).
-        mca.issueComment(
+        mcaImpl.issueComment(
           r.identifier,
-          'REVIEW SQUAD PLAN — ' + core.squadPlanSummary(plan) +
+          'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
           '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
           (plan.playwright ? ' + Playwright/E2E' : '') +
           '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
@@ -332,84 +351,84 @@ async function cycle() {
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
-        mca.assignIssue(r.identifier, r.agent);
-        await sleep(cfg.CAPS.verifyDelayMs);
+        mcaImpl.assignIssue(r.identifier, r.agent);
+        await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
-      mca.rerunIssue(r.identifier);
-      log('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
+      mcaImpl.rerunIssue(r.identifier);
+      logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
     } catch (e) {
-      log('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
+      logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
     }
   }
 
   // ---- zombie recovery ----
   // Board-wide scan feeds the STATUS passes, but zombie recovery DISPATCHES
-  // (rerun/assign), so restrict it to the aligned dispatch set (cfg.PROJECT_IDS) —
+  // (rerun/assign), so restrict it to the aligned dispatch set (cfgImpl.PROJECT_IDS) —
   // never fire a build run into an unscanned/unaligned project.
-  if (!NO_ZOMBIE) {
-    const inProgressDispatch = inProgress.filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
-    const zombies = core.detectZombies(inProgressDispatch, runsByIssue, cfg, now);
+  if (!noZombie) {
+    const inProgressDispatch = inProgress.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
+    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
     for (const z of zombies) {
-      if (assignedThisProcess >= MAX_ASSIGN) break;
+      if (assigned >= maxAssign) break;
       if (z.action === 'rerun') {
-        log('zombie', { ...z, applied: !DRY });
-        if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        logImpl('zombie', { ...z, applied: !dryRun });
+        if (!dryRun) { try { mcaImpl.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
-        if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
-        log('zombie', { ...z, agent, applied: !DRY });
-        if (!DRY) {
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
+        if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        logImpl('zombie', { ...z, agent, applied: !dryRun });
+        if (!dryRun) {
           try {
-            mca.assignIssue(z.identifier, agent);
-            assignedThisProcess++;
+            mcaImpl.assignIssue(z.identifier, agent);
+            assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
-          } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }
     }
   }
 
   // ---- route new todos ----
-  const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
-  const picks = core.selectAssignments(issues, cfg, inflight, {
+  const remaining = Math.max(0, maxAssign - assigned);
+  const picks = coreImpl.selectAssignments(issues, cfgImpl, inflight, {
     blockedRuntimes,
     exclude: cascaded,
-    maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
+    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining || cfgImpl.CAPS.perCycleTotal),
   });
 
   for (const p of picks) {
-    if (assignedThisProcess >= MAX_ASSIGN) break;
-    log('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !DRY });
-    if (DRY) continue;
+    if (assigned >= maxAssign) break;
+    logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
+    if (dryRun) continue;
     try {
-      mca.assignIssue(p.identifier, p.agent);
-      assignedThisProcess++;
+      mcaImpl.assignIssue(p.identifier, p.agent);
+      assigned++;
     } catch (e) {
       const msg = e.message || '';
-      log('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
+      logImpl('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
       // If a lane errors with a limit/quota, block that runtime for the rest of this cycle.
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
     }
     // verify a run started; force-enqueue if not (dead-zone fix)
-    await sleep(cfg.CAPS.verifyDelayMs);
-    const runs = mca.issueRuns(p.identifier);
+    await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+    const runs = mcaImpl.issueRuns(p.identifier);
     const started = runs.length > 0 && runs.some((r) => {
-      const c = core.classifyRun(r, Date.now());
+      const c = coreImpl.classifyRun(r, Date.now());
       return c.active || c.done || c.failed; // any run row means it dispatched
     });
     if (!started) {
-      log('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
-      try { mca.rerunIssue(p.identifier); } catch (e) { log('rerun_error', { identifier: p.identifier, error: e.message }); }
+      logImpl('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
+      try { mcaImpl.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
     } else {
-      const lr = core.latestRun(runs);
-      const c = lr ? core.classifyRun(lr, Date.now()) : {};
-      log('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+      const lr = coreImpl.latestRun(runs);
+      const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+      logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     }
   }
 
-  return { todo: todo.length, picked: picks.length };
+  return { todo: todo.length, picked: picks.length, assigned };
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -421,18 +440,25 @@ async function main() {
 
   log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS });
 
+  let totalAssigned = 0;
   do {
     try {
-      await cycle();
+      const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
+      const result = await cycle({ maxAssign: remaining });
+      totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
     }
-    if (assignedThisProcess >= MAX_ASSIGN) { log('max_assign_reached', { assigned: assignedThisProcess }); break; }
+    if (totalAssigned >= MAX_ASSIGN) { log('max_assign_reached', { assigned: totalAssigned }); break; }
     if (!ONCE) await sleep(cfg.CAPS.cycleMs);
   } while (!ONCE);
 
-  log('stop', { assigned: assignedThisProcess });
+  log('stop', { assigned: totalAssigned });
   releaseLock();
 }
 
-main();
+// Only run the live daemon loop when this file is executed directly (`node
+// auriga-router.mjs ...` / the `auriga-router` bin) — never when imported,
+// e.g. by tests that want `cycle()` against a mock Multica layer.
+const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) main();
