@@ -7,13 +7,17 @@ import path from 'node:path';
 const CLI = process.env.MULTICA_CLI || '/Users/dostal/.local/bin/multica';
 const PROFILE = process.env.MULTICA_PROFILE || 'dostal';
 
-// The three env vars must be UNSET (stale values 404). execFileSync inherits
-// process.env, so we delete them from a cloned env instead of `env -u`.
+// Local profile runs must not inherit stale Multica env vars, but agent-task
+// dry runs need the task-scoped mat_ token. Keep that token, drop everything
+// else that could shadow the profile.
 function cleanEnv() {
   const e = { ...process.env };
-  delete e.MULTICA_TOKEN;
-  delete e.MULTICA_PAT_TOKEN;
-  delete e.MULTICA_WORKSPACE_ID;
+  const hasTaskToken = typeof e.MULTICA_TOKEN === 'string' && e.MULTICA_TOKEN.startsWith('mat_');
+  if (!hasTaskToken) {
+    delete e.MULTICA_TOKEN;
+    delete e.MULTICA_PAT_TOKEN;
+    delete e.MULTICA_WORKSPACE_ID;
+  }
   return e;
 }
 
@@ -62,6 +66,20 @@ export function assignIssue(identifier, agentName) {
 
 export function rerunIssue(identifier) {
   return run(['issue', 'rerun', identifier, '--output', 'json']);
+}
+
+export function issueStatus(identifier, status) {
+  return run(['issue', 'status', identifier, status, '--output', 'json']);
+}
+
+export function issuePullRequests(identifier) {
+  try {
+    const res = run(['issue', 'pull-requests', identifier, '--output', 'json']);
+    return (res && res.pull_requests) || [];
+  } catch (e) {
+    process.stderr.write(`issuePullRequests(${identifier}) failed: ${e.message}\n`);
+    return [];
+  }
 }
 
 // Cross-workspace issue listing — unlike listIssues/listAllIssues above (which
