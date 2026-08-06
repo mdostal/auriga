@@ -249,3 +249,93 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   }
   return actions;
 }
+
+export function hasOpenPullRequest(prs = []) {
+  return prs.some((pr) => pr.state === 'open');
+}
+
+export function hasMergedPullRequest(prs = []) {
+  return prs.some((pr) => pr.state === 'merged' || pr.merged_at != null);
+}
+
+export function detectVerifiedDone(inReviewIssues, prsByIssue) {
+  const actions = [];
+  for (const i of inReviewIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    if (hasMergedPullRequest(prsByIssue[i.identifier] || [])) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        action: 'advance-done',
+        reason: 'pr-merged',
+      });
+    }
+  }
+  return actions;
+}
+
+export function computeReviewInflight(inReviewIssues, cfg) {
+  const squad = cfg.VERIFY_SQUAD;
+  if (!squad) return 0;
+  return inReviewIssues.filter((i) =>
+    (i.assignee_type === 'squad' && i.assignee_id === squad.id) ||
+    i.assignee_id === squad.id ||
+    i.assignee_id === squad.leaderAgentId
+  ).length;
+}
+
+export function selectReviewDispatch(inReviewIssues, runsByIssue, prsByIssue, cfg, opts = {}) {
+  const squad = cfg.VERIFY_SQUAD;
+  if (!squad) return [];
+
+  const now = opts.now ?? Date.now();
+  const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
+  const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const currentInflight = opts.reviewInflight ?? computeReviewInflight(inReviewIssues, cfg);
+  let projected = 0;
+  const actions = [];
+
+  for (const i of inReviewIssues) {
+    if (actions.length >= maxTotal) break;
+    if (isSmokeScratch(i.title)) continue;
+
+    const prs = prsByIssue[i.identifier] || [];
+    if (!hasOpenPullRequest(prs)) continue;
+
+    const assignedToVerify =
+      (i.assignee_type === 'squad' && i.assignee_id === squad.id) ||
+      i.assignee_id === squad.id ||
+      i.assignee_id === squad.leaderAgentId;
+
+    const runs = runsByIssue[i.identifier] || [];
+    if (assignedToVerify) {
+      if (hasActiveRun(runs, now, staleMs)) continue;
+      const lr = latestRun(runs);
+      const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
+      if (!stale) continue;
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        squad: squad.name,
+        action: 'rerun-review',
+        reason: 'review-stale',
+      });
+      continue;
+    }
+
+    if (currentInflight + projected >= squad.maxInflight) continue;
+    projected += 1;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      projectId: i.project_id,
+      squad: squad.name,
+      action: 'dispatch-review',
+      reason: 'open-pr',
+    });
+  }
+
+  return actions;
+}
