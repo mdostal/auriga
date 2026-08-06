@@ -1,0 +1,14 @@
+{
+  "name": "auriga",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Auriga Config-Expose API — read-only REST surface over router config, live lane state, and computed gaps.",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

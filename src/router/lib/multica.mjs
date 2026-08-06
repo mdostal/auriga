@@ -37,6 +37,12 @@ export function listIssues(projectId) {
   return (res && res.issues) || [];
 }
 
+// All projects in the workspace (used by /api/gaps to diff against cfg.PROJECT_IDS).
+export function listAllProjects() {
+  const res = run(['project', 'list', '--output', 'json']);
+  return Array.isArray(res) ? res : [];
+}
+
 export function listAllIssues(projectIds) {
   const all = [];
   for (const p of projectIds) {
