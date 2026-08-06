@@ -91,6 +91,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function cycle() {
   const now = Date.now();
   const issues = mca.listAllIssues(cfg.PROJECT_IDS);
+  const reviewIssues = mca.listAllIssues(cfg.REVIEW_PROJECT_IDS || cfg.PROJECT_IDS);
   const allAgents = liveAgentMap();
   const allAgentIds = core.agentIdSet(allAgents);
   const agentNameById = Object.fromEntries(Object.entries(allAgents).map(([name, a]) => [a.id, name]));
@@ -160,6 +161,43 @@ async function cycle() {
       const lr = core.latestRun(runs);
       const c = lr ? core.classifyRun(lr, Date.now()) : {};
       log('assigned_idle_verify_ok', { identifier: a.identifier, agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+    }
+  }
+
+  // ---- BACK-HALF: in_review PR verification / ship dispatch ----
+  // The verify-team-squad leader (auriga-review) reviews/tests the PR branch,
+  // then merges to dev + marks done on pass, or comments and loops the story
+  // back to in_progress on fail. The router only dispatches and self-heals.
+  const inReview = reviewIssues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
+  const prsByIssue = {};
+  const reviewRunsByIssue = {};
+  for (const i of inReview) {
+    prsByIssue[i.identifier] = mca.issuePullRequests(i.identifier);
+    reviewRunsByIssue[i.identifier] = mca.issueRuns(i.identifier);
+  }
+
+  const verified = core.detectVerifiedDone(inReview, prsByIssue);
+  for (const v of verified) {
+    log('advance', { identifier: v.identifier, to: 'done', reason: v.reason, applied: !DRY });
+    if (!DRY) {
+      try { mca.issueStatus(v.identifier, 'done'); } catch (e) { log('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+    }
+  }
+
+  const reviewInflight = core.computeReviewInflight(inReview, cfg);
+  const reviewPicks = core.selectReviewDispatch(inReview, reviewRunsByIssue, prsByIssue, cfg, { now, reviewInflight });
+  for (const r of reviewPicks) {
+    log('review', { identifier: r.identifier, squad: r.squad, action: r.action, reason: r.reason, applied: !DRY });
+    if (DRY) continue;
+    try {
+      if (r.action === 'dispatch-review') {
+        mca.assignIssue(r.identifier, r.squad);
+        await sleep(cfg.CAPS.verifyDelayMs);
+      }
+      mca.rerunIssue(r.identifier);
+      log('review_dispatched', { identifier: r.identifier, squad: r.squad });
+    } catch (e) {
+      log('review_error', { identifier: r.identifier, squad: r.squad, error: e.message });
     }
   }
 

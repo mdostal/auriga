@@ -36,6 +36,12 @@ export function listIssues(projectId) {
   return (res && res.issues) || [];
 }
 
+// All projects in the workspace (used by /api/gaps to diff against cfg.PROJECT_IDS).
+export function listAllProjects() {
+  const res = run(['project', 'list', '--output', 'json']);
+  return Array.isArray(res) ? res : [];
+}
+
 export function listAllIssues(projectIds) {
   const all = [];
   for (const p of projectIds) {
@@ -73,7 +79,21 @@ export function rerunIssue(identifier) {
 }
 
 export function startIssue(identifier) {
-  return run(['issue', 'status', identifier, 'in_progress', '--output', 'json']);
+  return issueStatus(identifier, 'in_progress');
+}
+
+export function issueStatus(identifier, status) {
+  return run(['issue', 'status', identifier, status, '--output', 'json']);
+}
+
+export function issuePullRequests(identifier) {
+  try {
+    const res = run(['issue', 'pull-requests', identifier, '--output', 'json']);
+    return (res && res.pull_requests) || [];
+  } catch (e) {
+    process.stderr.write(`issuePullRequests(${identifier}) failed: ${e.message}\n`);
+    return [];
+  }
 }
 
 // Cross-workspace issue listing — unlike listIssues/listAllIssues above (which
