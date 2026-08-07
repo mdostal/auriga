@@ -37,6 +37,43 @@ nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
 (`~/Documents/work/dostal/code/auriga/src/router`) and `NODE` to the mise
 node 24 install. Override via env if needed.
 
+### Reboot survival (launchd)
+
+`supervisor.sh` alone only survives as long as the shell/session that
+launched it. To keep the router alive across logout AND reboot, install it as
+a per-user launchd LaunchAgent:
+
+```sh
+scripts/launchd/install.sh      # installs + loads com.mdostal.auriga-supervisor
+scripts/launchd/uninstall.sh    # stops + removes it
+```
+
+`install.sh` fills in `NODE`/`DIR`/`HOME` for the current machine (override
+via env, same as `supervisor.sh`) from
+`scripts/launchd/com.mdostal.auriga-supervisor.plist.template` and installs
+the result to `~/Library/LaunchAgents/`, with `RunAtLoad` + `KeepAlive` set.
+Check status with `launchctl print gui/$(id -u)/com.mdostal.auriga-supervisor`;
+launchd-level stdout/stderr land in `/tmp/auriga-supervisor-launchd.log`
+(the router's own logs are unaffected — see Files/paths below).
+
+## Testing
+
+`cycle()` (one full scan -> route -> verify pass) is exported from
+`auriga-router.mjs` and accepts an options bag (`mca`, `cfg`, `core`, `log`,
+`sleep`, `dryRun`, `noZombie`, `maxAssign`, `now`) so tests can drive it
+end-to-end against a **mock Multica layer** instead of the live `multica`/`gh`
+CLI — see `test/support/mock-mca.mjs` and `test/router-cycle.e2e.test.mjs`.
+Every dependency defaults to the live singleton, so `main()` (the actual
+daemon loop) calls `cycle()` with no behavior change; `main()` itself only
+runs when this file is executed directly (`isMainModule` guard), never when
+imported by a test.
+
+```sh
+npm test           # from this directory: node --test test/*.test.mjs
+# or from the repo root:
+npm test           # node --test src/router/test/*.test.mjs
+```
+
 ## Human-todo filter (priority-1)
 
 Issues labeled `human-todo`, or carrying metadata `waiting_on: <human name>`
@@ -55,10 +92,14 @@ Excluded issues aren't just dropped — run
 
 ## Files / paths
 
-- `auriga-router.mjs` — entrypoint / scan loop.
+- `auriga-router.mjs` — entrypoint / scan loop; exports `cycle()`.
 - `lib/` — `config.mjs`, `core.mjs`, `multica.mjs`.
-- `test/core.test.mjs` — `npm test`.
+- `test/*.test.mjs` — `npm test`; `test/support/mock-mca.mjs` is the mock
+  Multica layer `test/router-cycle.e2e.test.mjs` drives `cycle()` against.
+- `scripts/launchd/` — `install.sh` / `uninstall.sh` +
+  `com.mdostal.auriga-supervisor.plist.template` for reboot-survival.
 - Pidfiles / logs (in `/tmp`, single-instance safety):
   - `/tmp/auriga-router.pid`, `/tmp/auriga-router.log`, `/tmp/auriga-router.jsonl`
   - `/tmp/auriga-supervisor.pid`, `/tmp/auriga-supervisor.log`
+  - `/tmp/auriga-supervisor-launchd.log` (launchd's own stdout/stderr capture)
 - Overridable: `AURIGA_PIDFILE`, `AURIGA_LOG`.
