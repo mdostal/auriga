@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Auriga Config-Expose API — read-only REST surface over router config, live lane state, and computed gaps.",
+  "bin": {
+    "resume-judge": "./src/tools/resume-judge.ts"
+  },
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test"
+    "test": "node --test",
+    "build": "node --check src/tools/resume-judge.ts && node --check src/tools/index.ts && node --check src/skills/taxonomy.ts"
   },
   "dependencies": {
     "express": "^4.21.2"
