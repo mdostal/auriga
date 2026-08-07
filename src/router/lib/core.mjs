@@ -249,3 +249,147 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   }
   return actions;
 }
+
+export function hasOpenPullRequest(prs = []) {
+  return prs.some((pr) => pr.state === 'open');
+}
+
+export function hasMergedPullRequest(prs = []) {
+  return prs.some((pr) => pr.state === 'merged' || pr.merged_at != null);
+}
+
+export function detectVerifiedDone(inReviewIssues, prsByIssue) {
+  const actions = [];
+  for (const i of inReviewIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    if (hasMergedPullRequest(prsByIssue[i.identifier] || [])) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        action: 'advance-done',
+        reason: 'pr-merged',
+      });
+    }
+  }
+  return actions;
+}
+
+export function computeReviewInflight(inReviewIssues, cfg) {
+  const squad = cfg.VERIFY_SQUAD;
+  if (!squad) return 0;
+  return inReviewIssues.filter((i) =>
+    (i.assignee_type === 'squad' && i.assignee_id === squad.id) ||
+    i.assignee_id === squad.id ||
+    i.assignee_id === squad.leaderAgentId
+  ).length;
+}
+
+export function selectReviewDispatch(inReviewIssues, runsByIssue, prsByIssue, cfg, opts = {}) {
+  const squad = cfg.VERIFY_SQUAD;
+  if (!squad) return [];
+
+  const now = opts.now ?? Date.now();
+  const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
+  const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const currentInflight = opts.reviewInflight ?? computeReviewInflight(inReviewIssues, cfg);
+  let projected = 0;
+  const actions = [];
+
+  for (const i of inReviewIssues) {
+    if (actions.length >= maxTotal) break;
+    if (isSmokeScratch(i.title)) continue;
+
+    const prs = prsByIssue[i.identifier] || [];
+    if (!hasOpenPullRequest(prs)) continue;
+
+    const assignedToVerify =
+      (i.assignee_type === 'squad' && i.assignee_id === squad.id) ||
+      i.assignee_id === squad.id ||
+      i.assignee_id === squad.leaderAgentId;
+
+    const runs = runsByIssue[i.identifier] || [];
+    if (assignedToVerify) {
+      if (hasActiveRun(runs, now, staleMs)) continue;
+      const lr = latestRun(runs);
+      const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
+      if (!stale) continue;
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        squad: squad.name,
+        action: 'rerun-review',
+        reason: 'review-stale',
+      });
+      continue;
+    }
+
+    if (currentInflight + projected >= squad.maxInflight) continue;
+    projected += 1;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      projectId: i.project_id,
+      squad: squad.name,
+      action: 'dispatch-review',
+      reason: 'open-pr',
+    });
+  }
+
+  return actions;
+}
+
+// ---- PAN-7492 self-heal: recover assigned-but-idle stories (added to dev) ----
+
+export function agentIdSet(agents = {}) {
+  return new Set(Object.values(agents).map((a) => a && a.id).filter(Boolean));
+}
+
+// Detect assigned `todo` issues that should have dispatched already but are
+// still idle. These do not count as capacity, so recovery is a separate bounded
+// pass instead of part of route selection.
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now()) {
+  const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  const actions = [];
+  for (const i of todoIssues) {
+    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+
+    const touchedAt = i.updated_at || i.created_at;
+    const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
+    if (idleAgeMs < staleMs) continue;
+
+    const runs = runsByIssue[i.identifier] || [];
+    if (hasActiveRun(runs, now, staleMs)) continue;
+    const lr = latestRun(runs);
+    const classified = lr ? classifyRun(lr, now) : null;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      assigneeId: i.assignee_id,
+      projectId: i.project_id,
+      lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+      idleAgeMs,
+      action: 'start',
+      reason: !lr ? 'assigned-todo-no-runs' : (classified.failed ? 'assigned-todo-last-run-failed' : 'assigned-todo-stale'),
+    });
+  }
+  return actions;
+}
+
+export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
+  const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
+  const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.assignedIdlePerAgent ?? 1;
+  const perAgent = {};
+  const selected = [];
+  for (const action of [...actions].sort((a, b) => b.idleAgeMs - a.idleAgeMs)) {
+    if (selected.length >= maxTotal) break;
+    if ((perAgent[action.assigneeId] || 0) >= maxPerAgent) continue;
+    perAgent[action.assigneeId] = (perAgent[action.assigneeId] || 0) + 1;
+    selected.push(action);
+  }
+  return selected;
+}

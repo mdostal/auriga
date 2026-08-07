@@ -46,6 +46,21 @@ closer paths preferred. For example, a task at
 If the issue has no `tree_path`, or no tree-attached agent has capacity, routing
 falls back to the existing project lane / default lane behavior.
 
+## Back-half verification
+
+The router also scans `in_review` stories in `REVIEW_PROJECT_IDS` for linked
+PRs. A merged PR advances the story to `done`. An open PR dispatches
+`verify-team-squad` (leader: `auriga-review`) by assigning the issue to the
+squad and forcing a rerun. The squad leader is responsible for running
+`/hive:review` and `/hive:test` on the PR branch, then merging to `dev` and
+marking the story done on pass, or commenting required changes and returning
+the story to `in_progress` on fail.
+
+Squad assignment is the idempotency marker. A story already assigned to
+`verify-team-squad` is not re-dispatched while its review run is fresh; stale or
+failed review runs are re-enqueued after the zombie window. This keeps the
+auriga-review lane fed without repeatedly waking an active review.
+
 ## Bulk human-todo extraction (one-off triage sweep)
 
 `scripts/export-human-queue.mjs` above only exports what the *live router*
