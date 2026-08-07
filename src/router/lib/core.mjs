@@ -242,6 +242,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
       issueId: i.id,
       projectId: i.project_id,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+      assigneeId: i.assignee_id || null,
       hasAssignee: !!i.assignee_id,
       action: i.assignee_id ? 'rerun' : 'assign',
       reason: !lr ? 'no-runs' : (classifyRun(lr, now).failed ? 'last-run-failed' : 'run-stale'),

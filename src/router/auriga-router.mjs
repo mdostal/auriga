@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import * as mca from './lib/multica.mjs';
+import { probeClaudeAuth } from './lib/claude-auth-status.mjs';
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -86,10 +87,24 @@ function log(event, data) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const runtimeForAgentId = (agentId) =>
+  Object.values(cfg.AGENTS).find((a) => a.id === agentId)?.runtime || null;
 
 // ---- one cycle -------------------------------------------------------------
 async function cycle() {
   const now = Date.now();
+  const blockedRuntimes = new Set();
+  if (Object.values(cfg.AGENTS).some((a) => a.runtime === 'claude')) {
+    const auth = probeClaudeAuth();
+    if (auth.status === 'auth_required') blockedRuntimes.add('claude');
+    log('claude_auth_status', {
+      status: auth.status,
+      checkedAt: auth.checked_at,
+      blocked: blockedRuntimes.has('claude'),
+      ...(auth.error ? { error: auth.error } : {}),
+    });
+  }
+
   const issues = mca.listAllIssues(cfg.PROJECT_IDS);
   const allAgents = liveAgentMap();
   const allAgentIds = core.agentIdSet(allAgents);
@@ -117,8 +132,6 @@ async function cycle() {
     runtimeInflight,
     assignedQueued,
   });
-
-  const blockedRuntimes = new Set();
 
   // ---- assigned-todo self-heal (PAN-7492) ----
   const assignedTodoIssues = workspaceTodoIssues
@@ -206,12 +219,21 @@ async function cycle() {
     for (const z of zombies) {
       if (assignedThisProcess >= MAX_ASSIGN) break;
       if (z.action === 'rerun') {
+        const runtime = runtimeForAgentId(z.assigneeId);
+        if (runtime && blockedRuntimes.has(runtime)) {
+          log('zombie_skip', { ...z, runtime, reason: 'runtime-blocked' });
+          continue;
+        }
         log('zombie', { ...z, applied: !DRY });
         if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
         const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} });
         if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        if (blockedRuntimes.has(cfg.AGENTS[agent].runtime)) {
+          log('zombie_skip', { ...z, agent, runtime: cfg.AGENTS[agent].runtime, reason: 'runtime-blocked' });
+          continue;
+        }
         log('zombie', { ...z, agent, applied: !DRY });
         if (!DRY) {
           try {
