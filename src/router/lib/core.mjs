@@ -37,6 +37,77 @@ export function humanTodoReason(issue) {
   return labels.includes(HUMAN_TODO_LABEL) ? 'label' : 'waiting_on';
 }
 
+function extractStoryKey(str = '') {
+  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-\d{1,3})(?![0-9])/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Short epic-scoped key from a story title's leading "[key-...]" bracket.
+export function storyKey(issue = {}) {
+  return extractStoryKey(issue.title || '');
+}
+
+// Short epic-scoped key from a dependency slug.
+export function slugKey(slug = '') {
+  return extractStoryKey(slug);
+}
+
+const HIVE_PHASE_TOKENS = new Set([
+  'research', 'implement', 'implementation', 'test', 'test-spec', 'tests',
+  'review', 'plan', 'design', 'integrate', 'integration', 'spec', 'build',
+]);
+
+export function descStoryDeps(issue = {}) {
+  const desc = issue.description || '';
+  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|\r?\n(?:[ \t]*-[ \t]*[^\n]+\r?\n?)+)/i);
+  let raw = [];
+  if (m) {
+    const body = m[2];
+    if (body.trimStart().startsWith('[')) {
+      raw = body.trim().replace(/^\[|\]$/g, '').split(',');
+    } else {
+      raw = body.split(/\r?\n/).map((l) => l.replace(/^[ \t]*-[ \t]*/, ''));
+    }
+  }
+  return raw
+    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean)
+    .filter((s) => !HIVE_PHASE_TOKENS.has(s.toLowerCase()));
+}
+
+export function descStoryId(issue = {}) {
+  const desc = issue.description || '';
+  const m = desc.match(/(^|\n)\s*id:\s*([a-z0-9][a-z0-9_-]*)/i);
+  if (m) return m[2].trim().toLowerCase();
+  const title = issue.title || '';
+  const titleMatch = title.match(/^\s*\[\s*([a-z0-9][a-z0-9_-]*)\s*\]/i);
+  return titleMatch ? titleMatch[1].trim().toLowerCase() : null;
+}
+
+export function descDepsSatisfied(issue, allIssues = []) {
+  const slugs = descStoryDeps(issue);
+  if (!slugs.length) return true;
+  const siblings = allIssues.filter((s) => (
+    s.parent_issue_id &&
+    s.parent_issue_id === issue.parent_issue_id &&
+    s.id !== issue.id
+  ));
+  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
+
+  for (const slug of slugs) {
+    const slugLower = slug.toLowerCase();
+    let dep = siblings.find((s) => descStoryId(s) === slugLower);
+    if (!dep) {
+      const key = slugKey(slug);
+      if (!key) return false;
+      dep = siblings.find((s) => storyKey(s) === key);
+      if (!dep) continue;
+    }
+    if (!terminal((dep.status || '').toLowerCase())) return false;
+  }
+  return true;
+}
+
 // Classify a single run object.
 export function classifyRun(run, now = Date.now()) {
   const status = (run.status || '').toLowerCase();
