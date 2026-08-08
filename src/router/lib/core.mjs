@@ -793,10 +793,26 @@ export function allDepsSatisfied(issue, statusById, allIssues = []) {
 // 2026-07-31) lets the pass resolve DESCRIPTION-declared slug deps against siblings,
 // not just metadata ticket-id deps — the m-02-depends-on-m-01 case, where the dep
 // lived only in the description and the child never unblocked though its dep was done.
+// An agent that deliberately parks a story sets metadata.blocked_reason (a
+// human-needed note, e.g. "target_repo is wrong, needs a human"). That is NOT a
+// plan-time dependency block: its DECLARED deps may all be `done`, yet the story
+// must NOT be auto-unblocked or re-dispatched. Auto-unblocking it resurrects the
+// story every cycle — the agent re-blocks it, the router re-unblocks + cascade-
+// dispatches it, cancelling the just-finished run: the 2-minute cancel-thrash
+// (PAN-7771, whose own blocked_reason literally reads "Something keeps resetting
+// this issue from blocked to todo every ~2min, producing 30+ duplicate runs").
+// Treat a non-empty blocked_reason as a hard human gate on BOTH the unblock pass
+// and the cascade selector.
+export function isAgentParked(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  return typeof r === 'string' && r.trim() !== '';
+}
+
 export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue; // agent parked it for a human — never auto-unblock (idempotent-dispatch guard)
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -1116,6 +1132,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     const st = (i.status || '').toLowerCase();
     if (st !== 'todo' && st !== 'blocked') continue;
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue; // agent parked it for a human — never cascade-redispatch (idempotent-dispatch guard)
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue;

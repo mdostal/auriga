@@ -203,11 +203,24 @@ async function cycle() {
       if (cascadeFired >= cfg.CAPS.perCycleCascade) break;
       if (assignedThisProcess >= MAX_ASSIGN) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
-      // Idempotency 1: never re-fire a story that already has an active run.
-      let activeRun = false;
-      try { activeRun = mca.issueRuns(c.identifier).some((r) => core.classifyRun(r, Date.now()).active); }
+      // Idempotency 1: never re-fire a story that already has an active run OR that
+      // ran within the re-dispatch cooldown. A run that just COMPLETED (even a build
+      // run that finished by setting the story back to blocked) counts as "already
+      // attempted" — re-firing it here cancels the fresh/just-finished run and starts
+      // the ~2-minute cancel-thrash (dispatch->cancel->complete->cancel forever,
+      // PAN-7771). Treat BOTH in-flight and recently-finished as "started"; fetch the
+      // runs once and reuse.
+      let runs = [];
+      try { runs = mca.issueRuns(c.identifier); }
       catch (e) { log('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
-      if (activeRun) { log('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      const nowT = Date.now();
+      if (runs.some((r) => core.classifyRun(r, nowT).active)) { log('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      const lastRun = core.latestRun(runs);
+      if (lastRun) {
+        const runAgeMs = core.classifyRun(lastRun, nowT).ageMs;
+        const cooldown = cfg.CAPS.redispatchCooldownMs || (15 * 60 * 1000);
+        if (runAgeMs < cooldown) { log('cascade_skip', { identifier: c.identifier, reason: 'recent-run', ageMs: runAgeMs }); continue; }
+      }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses.
       const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');

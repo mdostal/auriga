@@ -125,9 +125,23 @@ export const PROJECT_LANE = {
   [CADEX]: ['auriga-build', 'mnemosyne-dev', 'votum-dev'], // full hive lane — CADEX-first, use idle capacity
 };
 
-// Fallback lane for every other project: spread across the two Codex agents.
+// Grok build lane — the registered Multica agent `auriga-build-grok` (opencode
+// runtime, model xai/grok-4.3, id c4c688a4-...). Added as a THIRD non-hive fallback
+// lane so build work can spread onto Grok instead of contending the two Codex lanes.
+// Given its OWN capacity bucket ('grok') so it never fights heimdall's opencode cap.
+// NOT a HIVE_LANE: opencode has no plugin-hive install, exactly like codex, so it
+// must not receive /hive:execute stories (they self-block) — non-hive fallback only.
+AGENTS['auriga-build-grok'] = {
+  id: 'c4c688a4-04d9-458d-8e16-6e8df89b2807',
+  runtime: 'grok', // own capacity bucket (physical Multica runtime is opencode/xai/grok-4.3)
+  maxInflight: 2,
+  repo: 'mdostal/auriga',
+};
+RUNTIME_CAP['grok'] = 2;
+
+// Fallback lane for every other project: spread across the two Codex agents + Grok.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
-export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
+export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex', 'auriga-build-grok'];
 
 // Capability-aware override: any story detected as hive-authored (isHiveStory in
 // lib/core.mjs — build/implementation/classic-methodology tagged, e.g. a Minerva-planned
@@ -164,6 +178,7 @@ export const CAPS = {
   perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
   perCycleCascade: 5, // CASCADE: at most N completion->dependent enqueues per cycle (bounded self-drain, never a mass fire)
+  redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago. A just-completed run (even one that set the story back to blocked) is "already attempted"; re-firing it cancels the fresh run = the 2-min cancel-thrash (PAN-7771).
 };
 
 // ============================================================================
