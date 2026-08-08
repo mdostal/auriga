@@ -61,3 +61,18 @@ The JSON output shape is:
   }
 }
 ```
+
+## Content File Repository
+
+Draft content persistence uses `FileRepository` from `src/repository`. Each
+content item is stored as a separate JSON document under:
+
+```text
+.content/
+`-- content/
+    `-- {id}.json
+```
+
+The repository writes files atomically by writing a temporary file in the same
+directory and then renaming it into place. Content IDs are limited to
+filesystem-safe letters, numbers, dots, underscores, and hyphens.
