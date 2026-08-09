@@ -37,6 +37,35 @@ export function listIssues(projectId) {
   return (res && res.issues) || [];
 }
 
+export function getIssue(identifier) {
+  return run(['issue', 'get', identifier, '--output', 'json']);
+}
+
+function flattenIssueChildren(res) {
+  if (Array.isArray(res)) return res;
+  if (!res || typeof res !== 'object') return [];
+
+  const children = [];
+  if (Array.isArray(res.unstaged)) children.push(...res.unstaged);
+  if (Array.isArray(res.stages)) {
+    for (const stage of res.stages) {
+      if (Array.isArray(stage)) {
+        children.push(...stage);
+      } else if (Array.isArray(stage.issues)) {
+        children.push(...stage.issues);
+      } else if (Array.isArray(stage.children)) {
+        children.push(...stage.children);
+      }
+    }
+  }
+  return children;
+}
+
+export function issueChildren(identifier) {
+  const res = run(['issue', 'children', identifier, '--output', 'json']);
+  return flattenIssueChildren(res);
+}
+
 // All projects in the workspace (used by /api/gaps to diff against cfg.PROJECT_IDS).
 export function listAllProjects() {
   const res = run(['project', 'list', '--output', 'json']);
@@ -76,6 +105,33 @@ export function rerunIssue(identifier) {
 
 export function issueStatus(identifier, status) {
   return run(['issue', 'status', identifier, status, '--output', 'json']);
+}
+
+export function createIssue({ title, description, projectId, status = 'todo' }) {
+  const tmp = path.join(os.tmpdir(), `auriga-create-issue-${process.pid}-${Math.random().toString(36).slice(2)}.md`);
+  fs.writeFileSync(tmp, description || '');
+  try {
+    return run([
+      'issue',
+      'create',
+      '--title',
+      title,
+      '--description-file',
+      tmp,
+      '--project',
+      projectId,
+      '--status',
+      status,
+      '--output',
+      'json',
+    ]);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+export function setIssueMetadata(identifier, key, value) {
+  return run(['issue', 'metadata', 'set', identifier, '--key', key, '--value', value, '--type', 'string'], { json: false });
 }
 
 export function issuePullRequests(identifier) {
