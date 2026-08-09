@@ -116,6 +116,29 @@ export const HUMAN_NAMES = ['mathew', 'dostal'];
 // this workspace currently has exactly one human member.
 export const HUMAN_OPERATOR_MEMBER_ID = '6506b1e5-08da-452c-81d9-d32e2ca31950'; // dostalmathew, owner
 
+// ---- Model selection routing (src/router/lib/model-selection.mjs) ----
+
+// Task type -> preferred model name (must match a name in the model
+// registry, see src/auriga/model-registry.ts). "default" is used for any
+// task type not listed here.
+export const MODEL_PREFERENCES = {
+  'code-generation': 'codex',
+  reasoning: 'claude-opus',
+  'long-context': 'gemini-2.0',
+  vision: 'claude-opus',
+  'fast-response': 'claude-sonnet',
+  default: 'claude-sonnet',
+};
+
+// Model name -> ordered (linear, not parallel best-of-N) list of fallback
+// models to try when the preferred model's health check fails.
+export const MODEL_FALLBACK_CHAINS = {
+  codex: ['claude-sonnet', 'gemini-2.0', 'claude-opus'],
+  'claude-opus': ['claude-sonnet', 'gemini-2.0', 'codex'],
+  'gemini-2.0': ['claude-sonnet', 'codex', 'claude-opus'],
+  'claude-sonnet': ['gemini-2.0', 'codex', 'claude-opus'],
+};
+
 // Batch / cadence caps.
 export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip
