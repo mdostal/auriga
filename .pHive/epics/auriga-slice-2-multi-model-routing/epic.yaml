@@ -1,0 +1,63 @@
+name: auriga-slice-2-multi-model-routing
+title: "Auriga Slice-2: Multi-Model Routing Infrastructure"
+target_codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: []
+  roster: []
+  per_tag_reasoning: {}
+  confidence: 1.0
+  gate_decisions: {}
+
+stories:
+  - id: s2-model-registry
+    title: Create model registry with capability profiles
+    complexity: low
+    depends_on: []
+
+  - id: s2-dispatch-adapter-interface
+    title: Define dispatch adapter interface and base implementation
+    complexity: low
+    depends_on: []
+
+  - id: s2-claude-adapter
+    title: Implement Claude dispatch adapter
+    complexity: medium
+    depends_on: [s2-dispatch-adapter-interface]
+
+  - id: s2-codex-adapter
+    title: Implement Codex dispatch adapter
+    complexity: medium
+    depends_on: [s2-dispatch-adapter-interface]
+
+  - id: s2-gemini-adapter
+    title: Implement Gemini dispatch adapter
+    complexity: medium
+    depends_on: [s2-dispatch-adapter-interface]
+
+  - id: s2-routing-strategy
+    title: Implement model selection routing strategy
+    complexity: high
+    depends_on: [s2-model-registry]
+
+  - id: s2-router-integration
+    title: Integrate model selection into router dispatch flow
+    complexity: high
+    depends_on: [s2-routing-strategy, s2-claude-adapter, s2-codex-adapter, s2-gemini-adapter]
+
+  - id: s2-cost-tracking
+    title: Add cost tracking and observability for multi-model dispatch
+    complexity: medium
+    depends_on: [s2-router-integration]
+
+  - id: s2-end-to-end-validation
+    title: End-to-end validation — multi-model dispatch produces working results
+    complexity: high
+    depends_on: [s2-cost-tracking]

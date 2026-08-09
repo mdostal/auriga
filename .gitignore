@@ -2,3 +2,8 @@ node_modules/
 *.bak
 *.log
 .DS_Store
+
+# Hive epic directories
+.pHive/epics/*
+!.pHive/epics/auriga-slice-2-multi-model-routing/
+!.pHive/epics/auriga-slice-2-multi-model-routing/**
