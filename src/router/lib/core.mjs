@@ -338,7 +338,9 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue) {
       actions.push({
         identifier: i.identifier,
         issueId: i.id,
+        parentIssueId: i.parent_issue_id || null,
         projectId: i.project_id,
+        title: i.title,
         action: 'advance-done',
         reason: 'pr-merged',
       });
