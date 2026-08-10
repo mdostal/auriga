@@ -71,6 +71,7 @@ const CONSUS = '282343e2-b741-4438-bc80-b93c34819a96';
 const HEIMDALL = '8cb0298a-8a45-45c2-8d09-bc219e2d8a82';
 const AURIGA = 'd78a9f5d-8792-45e8-89e0-bd7b916564ca';
 const MINERVA = '6327fdaf-789e-4290-ab41-1421957b55c6';
+const PANTHEON_CORE = 'd8ecfab4-79bd-4290-8127-290885f01f38';
 
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
@@ -82,11 +83,71 @@ export const PROJECT_LANE = {
 // Fallback lane for every other project: spread across the two Codex agents.
 export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
 
+// Tree path -> attached agent lane names or IDs. When an issue carries
+// `tree_path`, the router checks the exact path and each ancestor path before
+// falling back to PROJECT_LANE / DEFAULT_LANE.
+export const TREE_AGENT_ATTACHMENTS = {};
+
+// Back-half verification scans include Pantheon Core without broadening the
+// front-half todo dispatch pool. Minerva-planned Pantheon stories can sit in
+// in_review here while the aligned-only build router remains conservative.
+export const REVIEW_PROJECT_IDS = [...new Set([...PROJECT_IDS, PANTHEON_CORE])];
+
+// Registered Multica squad. Squad assignment routes to its leader,
+// auriga-review (c5beb33c-2a6d-4f78-960a-73966f184506), which owns the
+// /hive:review + /hive:test + merge/loop-back decision.
+export const VERIFY_SQUAD = {
+  id: '93d90a37-63e7-4307-9ae3-09db0c0b9bd2',
+  name: 'verify-team-squad',
+  leaderAgentId: 'c5beb33c-2a6d-4f78-960a-73966f184506',
+  maxInflight: 1,
+};
+
+// Known human names for the `waiting_on: <human>` priority-1 dispatch filter
+// (see isHumanTodo in lib/core.mjs). Matched case-insensitively, substring OK
+// (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
+// Add a name here when a new human-owned ticket needs to route to the human
+// queue (scripts/export-human-queue.mjs) instead of an agent lane.
+export const HUMAN_NAMES = ['mathew', 'dostal'];
+
+// Workspace member to @mention when a human-todo needs the operator's
+// attention (see scripts/bulk-extract-human-todos.mjs notifyOperator).
+// Resolved via `multica workspace member list --output json` (user_id field);
+// this workspace currently has exactly one human member.
+export const HUMAN_OPERATOR_MEMBER_ID = '6506b1e5-08da-452c-81d9-d32e2ca31950'; // dostalmathew, owner
+
+// ---- Model selection routing (src/router/lib/model-selection.mjs) ----
+
+// Task type -> preferred model name (must match a name in the model
+// registry, see src/auriga/model-registry.ts). "default" is used for any
+// task type not listed here.
+export const MODEL_PREFERENCES = {
+  'code-generation': 'codex',
+  reasoning: 'claude-opus',
+  'long-context': 'gemini-2.0',
+  vision: 'claude-opus',
+  'fast-response': 'claude-sonnet',
+  default: 'claude-sonnet',
+};
+
+// Model name -> ordered (linear, not parallel best-of-N) list of fallback
+// models to try when the preferred model's health check fails.
+export const MODEL_FALLBACK_CHAINS = {
+  codex: ['claude-sonnet', 'gemini-2.0', 'claude-opus'],
+  'claude-opus': ['claude-sonnet', 'gemini-2.0', 'codex'],
+  'gemini-2.0': ['claude-sonnet', 'codex', 'claude-opus'],
+  'claude-sonnet': ['gemini-2.0', 'codex', 'claude-opus'],
+};
+
 // Batch / cadence caps.
 export const CAPS = {
   perCyclePerAgent: 2, // never mass-flip
   perCycleTotal: 5,
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
+  assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
+  assignedIdlePerCycle: 5,
+  assignedIdlePerAgent: 1,
   verifyDelayMs: 6000, // wait after assign before checking a run started
+  perCycleReview: 1, // at most one verify-squad dispatch per cycle
 };

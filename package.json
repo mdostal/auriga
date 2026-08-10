@@ -1,0 +1,18 @@
+{
+  "name": "auriga",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Auriga Config-Expose API — read-only REST surface over router config, live lane state, and computed gaps.",
+  "bin": {
+    "resume-judge": "./src/tools/resume-judge.ts"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test",
+    "build": "node --check src/auriga/registry.ts && node --check src/auriga/assessor.ts && node --check src/auriga/hooks.ts && node --check src/auriga/model-registry.ts && node --check src/router/auriga-router.mjs && node --check src/router/lib/multica.mjs && node --check src/tools/resume-judge.ts && node --check src/tools/index.ts && node --check src/skills/taxonomy.ts && node --check src/domain/Content.ts && node --check src/domain/ContentState.ts && node --check src/domain/ContentType.ts && node --check src/domain/index.ts && node --check src/repository/FileRepository.ts && node --check src/repository/IContentRepository.ts && node --check src/repository/index.ts && node --check src/api/ContentAPI.ts && node --check src/api/index.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
