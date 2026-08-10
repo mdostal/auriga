@@ -21,6 +21,18 @@ export const AGENTS = {
     maxInflight: 3,
     repo: 'mdostal/pantheon-orchestrator',
   },
+  'auriga-build-codex': {
+    id: '8538dabc-078e-44db-8707-fef4cd26615b',
+    runtime: 'codex',
+    maxInflight: 5,
+    repo: 'mdostal/auriga',
+  },
+  'auriga-build-grok': {
+    id: 'c4c688a4-04d9-458d-8e16-6e8df89b2807',
+    runtime: 'opencode',
+    maxInflight: 4,
+    repo: 'mdostal/auriga',
+  },
   'heimdall-dev-codex': {
     id: 'e60c0630-761c-4106-aa39-bb3803336e50',
     runtime: 'codex', // shares runtime a86c890c with auriga-dev
@@ -76,12 +88,12 @@ const PANTHEON_CORE = 'd8ecfab4-79bd-4290-8127-290885f01f38';
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
   [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
-  [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
-  [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
+  [AURIGA]: ['auriga-dev', 'auriga-build-codex', 'auriga-build-grok'], // aligned repo (Codex/Grok builds)
+  [MINERVA]: ['auriga-dev', 'auriga-build-codex', 'auriga-build-grok'], // nearest lanes
 };
 
-// Fallback lane for every other project: spread across the two Codex agents.
-export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
+// Fallback lane for every other project: spread across the available agents.
+export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex', 'auriga-build-codex', 'auriga-build-grok'];
 
 // Tree path -> attached agent lane names or IDs. When an issue carries
 // `tree_path`, the router checks the exact path and each ancestor path before
