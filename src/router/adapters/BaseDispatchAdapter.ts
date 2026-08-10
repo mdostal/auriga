@@ -1,8 +1,11 @@
 import type { IDispatchAdapter, DispatchRequest, DispatchResponse } from './IDispatchAdapter.ts';
+import { modelRegistry } from '../../auriga/model-registry.ts';
+import { emitMetric } from '../lib/metrics.mjs';
 
 export interface AdapterConfig {
   maxAttempts?: number;
   timeoutMs?: number;
+  costWarningThreshold?: number;
   [key: string]: any;
 }
 
@@ -35,9 +38,35 @@ export abstract class BaseDispatchAdapter implements IDispatchAdapter {
       try {
         const result = await this._dispatchWithTimeout(request);
         
+        // Calculate cost if not provided by the specific adapter
+        let cost = result.cost;
+        if (cost === undefined) {
+          const profile = modelRegistry.hasModel(result.model) ? modelRegistry.getModel(result.model) : null;
+          // Approximate using inputPerToken since we don't have separate input/output token counts in DispatchResponse yet
+          const perTokenPrice = profile ? profile.cost.inputPerToken : 0;
+          cost = result.tokens * perTokenPrice;
+        }
+
+        result.cost = cost;
+
+        // Check for threshold
+        const threshold = this.config.costWarningThreshold ?? 0.5; // Default $0.50 warning threshold
+        if (cost > threshold) {
+          console.warn(`[BaseDispatchAdapter] WARNING: Dispatch cost ($${cost.toFixed(4)}) exceeds threshold ($${threshold}) for model ${result.model}`);
+        }
+
         // Log telemetry
-        console.log(`[BaseDispatchAdapter] Success - Model: ${result.model}, Latency: ${result.latency}ms, Tokens: ${result.tokens}`);
+        console.log(`[BaseDispatchAdapter] Success - Model: ${result.model}, Latency: ${result.latency}ms, Tokens: ${result.tokens}, Cost: $${cost.toFixed(6)}`);
         
+        emitMetric({
+          model: result.model,
+          latency: result.latency,
+          tokens: result.tokens,
+          cost: cost,
+          taskType: request.taskType || 'default',
+          fallbackChain: request.fallbackChain || []
+        });
+
         return result;
       } catch (err: any) {
         lastErr = err;
