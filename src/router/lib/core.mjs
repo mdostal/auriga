@@ -2,6 +2,11 @@
 // Everything here is deterministic and unit-tested with mocked inputs.
 
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
+import {
+  assignmentFingerprint,
+  assignmentFingerprintMatches,
+  isRouterManagedAssignment,
+} from './fingerprint.mjs';
 
 const ACTIVE_RUN_STATUSES = new Set([
   'running', 'in_progress', 'in progress', 'queued', 'pending', 'dispatched', 'started', 'assigned',
@@ -343,6 +348,33 @@ export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, proje
   return treeAgent || chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
 }
 
+function agentNameForAssignee(assigneeId, agents) {
+  if (!assigneeId) return null;
+  const found = Object.entries(agents).find(([, agent]) => agent.id === assigneeId);
+  return found ? found[0] : null;
+}
+
+export function assignmentDecision(issue, targetAgent, cfg, opts = {}) {
+  if (!issue.assignee_id) {
+    return { action: 'assign', reason: 'unassigned' };
+  }
+
+  const currentAgent = agentNameForAssignee(issue.assignee_id, cfg.AGENTS);
+  if (currentAgent === targetAgent) {
+    return { action: 'noop', reason: 'already-assigned-target', currentAgent };
+  }
+
+  if (!isRouterManagedAssignment(issue)) {
+    return { action: 'noop', reason: 'manual-assignment', currentAgent };
+  }
+
+  if (currentAgent && assignmentFingerprintMatches(issue, currentAgent, cfg, opts)) {
+    return { action: 'noop', reason: 'unchanged-router-assignment', currentAgent };
+  }
+
+  return { action: 'assign', reason: 'changed-router-assignment', currentAgent };
+}
+
 // Select this cycle's assignments from the board.
 // Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
 // Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
@@ -362,14 +394,15 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
   const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
 
-  // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set,
-  // NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the human queue instead via
-  // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never dispatch a
-  // decomposed story whose dependency stories aren't done yet — see depsSatisfied).
+  // Candidate pool: unassigned or router-managed assigned, status todo, not smoke/scratch,
+  // project in scan set, not already handled by cascade this cycle, NOT a human-todo
+  // (priority-1 rule — see isHumanTodo; routed to the human queue instead via
+  // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never
+  // dispatch a decomposed story whose dependency stories aren't done yet — see depsSatisfied).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
     .filter((i) => !exclude.has(i.identifier))
-    .filter((i) => !i.assignee_id)
+    .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
     .filter((i) => !isHumanTodo(i, cfg))
@@ -419,6 +452,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     if (!agent) continue;
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
+    const decision = assignmentDecision(issue, agent, cfg, opts);
+    if (decision.action === 'noop') continue;
     if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
 
     // commit projection
@@ -433,6 +468,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
       agent,
       runtime,
+      assignmentFingerprint: assignmentFingerprint(issue, agent, cfg, opts),
+      assignmentReason: decision.reason,
     });
   }
   return chosen;

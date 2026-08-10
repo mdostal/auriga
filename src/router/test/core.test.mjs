@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../lib/core.mjs';
+import { assignmentMetadata } from '../lib/fingerprint.mjs';
 import * as liveCfg from '../lib/config.mjs';
 
 // Minimal config fixture mirroring lib/config.mjs shape.
@@ -169,6 +170,41 @@ test('selection ignores smoke/scratch and assigned/backlog issues', () => {
   ];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   assert.deepEqual(picks.map((p) => p.identifier), ['a2']);
+});
+
+test('idempotent dispatch preserves manual assignments in the same routing cycle', () => {
+  const issues = [
+    story('m1', 'JANUS', 1, 'EPIC1', 'HC'), // default lane would prefer auriga-dev first
+    story('m2', 'JANUS', 2, 'EPIC1'),
+  ];
+  const picks = core.selectAssignments(issues, CFG, {}, { now: NOW, windowMs: 60_000 });
+  assert.deepEqual(picks.map((p) => p.identifier), ['m2']);
+  assert.equal(picks[0].agent, 'auriga-dev');
+});
+
+test('idempotent dispatch no-ops unchanged router-managed assignments', () => {
+  const base = story('r1', 'JANUS', 1, 'EPIC1', 'HC');
+  const tracked = {
+    ...base,
+    metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
+  assert.deepEqual(picks, []);
+});
+
+test('idempotent dispatch permits reassignment when router-managed story content changes', () => {
+  const base = story('r2', 'JANUS', 1, 'EPIC1', 'HC');
+  const tracked = {
+    ...base,
+    metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
+    description: 'scope changed after the previous dispatch',
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'r2');
+  assert.equal(picks[0].agent, 'auriga-dev');
+  assert.equal(picks[0].assignmentReason, 'changed-router-assignment');
+  assert.match(picks[0].assignmentFingerprint, /^[a-f0-9]{64}$/);
 });
 
 test('isHumanTodo: matches the human-todo label regardless of case', () => {

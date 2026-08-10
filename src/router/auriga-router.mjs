@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
+import { ASSIGNMENT_AGENT_KEY, ASSIGNMENT_FINGERPRINT_KEY, assignmentFingerprint } from './lib/fingerprint.mjs';
 import * as mca from './lib/multica.mjs';
 import { probeClaudeAuth } from './lib/claude-auth-status.mjs';
 import { runCompletionHook } from '../auriga/hooks.ts';
@@ -90,6 +91,16 @@ function log(event, data) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const runtimeForAgentId = (agentId) =>
   Object.values(cfg.AGENTS).find((a) => a.id === agentId)?.runtime || null;
+
+function stampAssignment(identifier, agent, fingerprint) {
+  if (!fingerprint) return;
+  try {
+    mca.setIssueMetadata(identifier, ASSIGNMENT_FINGERPRINT_KEY, fingerprint);
+    mca.setIssueMetadata(identifier, ASSIGNMENT_AGENT_KEY, agent);
+  } catch (e) {
+    log('assignment_fingerprint_error', { identifier, agent, error: e.message });
+  }
+}
 
 // ---- one cycle -------------------------------------------------------------
 async function cycle() {
@@ -492,6 +503,7 @@ async function cycle() {
         if (!DRY) {
           try {
             mca.assignIssue(z.identifier, agent);
+            stampAssignment(z.identifier, agent, assignmentFingerprint(inProgressByIdentifier[z.identifier] || z, agent, cfg));
             assignedThisProcess++;
             inflight[agent] = (inflight[agent] || 0) + 1;
           } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); }
@@ -514,6 +526,7 @@ async function cycle() {
     if (DRY) continue;
     try {
       mca.assignIssue(p.identifier, p.agent);
+      stampAssignment(p.identifier, p.agent, p.assignmentFingerprint);
       assignedThisProcess++;
     } catch (e) {
       const msg = e.message || '';
