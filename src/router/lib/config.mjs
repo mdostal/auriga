@@ -21,6 +21,18 @@ export const AGENTS = {
     maxInflight: 3,
     repo: 'mdostal/pantheon-orchestrator',
   },
+  'auriga-build-codex': {
+    id: '8538dabc-078e-44db-8707-fef4cd26615b',
+    runtime: 'codex',
+    maxInflight: 5,
+    repo: 'mdostal/auriga',
+  },
+  'auriga-build-grok': {
+    id: 'c4c688a4-04d9-458d-8e16-6e8df89b2807',
+    runtime: 'grok', // own capacity bucket (physical Multica runtime is opencode/xai/grok-4.3)
+    maxInflight: 2,
+    repo: 'mdostal/auriga',
+  },
   'heimdall-dev-codex': {
     id: 'e60c0630-761c-4106-aa39-bb3803336e50',
     runtime: 'codex', // shares runtime a86c890c with auriga-dev
@@ -68,6 +80,7 @@ export const RUNTIME_CAP = {
   claude: 2,
   opencode: 3,
   codex: 4,
+  grok: 2,
 };
 
 // Project UUID -> title (for logs/lane names).
@@ -110,8 +123,8 @@ const CADEX = 'a0b04ced-5ad6-4249-bb1a-115b88c532d7';
 export const PROJECT_LANE = {
   [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
   [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
-  [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
-  [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
+  [AURIGA]: ['auriga-dev', 'auriga-build-codex', 'auriga-build-grok'], // aligned repo (Codex/Grok builds)
+  [MINERVA]: ['auriga-dev', 'auriga-build-codex', 'auriga-build-grok'], // nearest lanes
   // Pantheon Core is the dogfood seed drop (Consus ideabox) AND where Minerva now files the
   // decomposed child stories of those seeds (a seed dropped here yields stories here — see
   // Minerva's fileStoriesToMultica project resolution). Seeds themselves still route to
@@ -125,23 +138,9 @@ export const PROJECT_LANE = {
   [CADEX]: ['auriga-build', 'mnemosyne-dev', 'votum-dev'], // full hive lane — CADEX-first, use idle capacity
 };
 
-// Grok build lane — the registered Multica agent `auriga-build-grok` (opencode
-// runtime, model xai/grok-4.3, id c4c688a4-...). Added as a THIRD non-hive fallback
-// lane so build work can spread onto Grok instead of contending the two Codex lanes.
-// Given its OWN capacity bucket ('grok') so it never fights heimdall's opencode cap.
-// NOT a HIVE_LANE: opencode has no plugin-hive install, exactly like codex, so it
-// must not receive /hive:execute stories (they self-block) — non-hive fallback only.
-AGENTS['auriga-build-grok'] = {
-  id: 'c4c688a4-04d9-458d-8e16-6e8df89b2807',
-  runtime: 'grok', // own capacity bucket (physical Multica runtime is opencode/xai/grok-4.3)
-  maxInflight: 2,
-  repo: 'mdostal/auriga',
-};
-RUNTIME_CAP['grok'] = 2;
-
-// Fallback lane for every other project: spread across the two Codex agents + Grok.
+// Fallback lane for every other project: spread across the Codex agents + Grok.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
-export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex', 'auriga-build-grok'];
+export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex', 'auriga-build-codex', 'auriga-build-grok'];
 
 // Capability-aware override: any story detected as hive-authored (isHiveStory in
 // lib/core.mjs — build/implementation/classic-methodology tagged, e.g. a Minerva-planned
