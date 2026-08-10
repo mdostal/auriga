@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../lib/core.mjs';
+import * as liveCfg from '../lib/config.mjs';
 
 // Minimal config fixture mirroring lib/config.mjs shape.
 const CFG = {
@@ -9,36 +10,52 @@ const CFG = {
     'heimdall-dev': { id: 'H', runtime: 'opencode', maxInflight: 3 },
     'auriga-dev': { id: 'A', runtime: 'codex', maxInflight: 3 },
     'heimdall-dev-codex': { id: 'HC', runtime: 'codex', maxInflight: 3 },
-    'firefly-root': { id: 'FR', runtime: 'codex', maxInflight: 3 },
-    'firefly-api': { id: 'FA', runtime: 'codex', maxInflight: 3 },
+    'auriga-build': { id: 'AB', runtime: 'claude', maxInflight: 2 },
+    'mnemosyne-dev': { id: 'MN', runtime: 'claude', maxInflight: 2 },
+    'votum-dev': { id: 'VT', runtime: 'claude', maxInflight: 2 },
+    // Planning lane fixture mirroring lib/config.mjs's minerva-dev entry:
+    // deliberately absent from RUNTIME_CAP below (own uncapped runtime bucket).
+    'minerva-dev': { id: 'M', runtime: 'claude-planning', maxInflight: 3 },
+    // BACK-HALF review/ship lane fixture (mirrors config.mjs auriga-review):
+    // own capacity bucket, maxInflight 1 (one review at a time).
+    'auriga-review': { id: 'RV', runtime: 'claude-review', maxInflight: 1 },
   },
-  RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4 },
+  RUNTIME_CAP: { claude: 2, opencode: 3, codex: 4, 'claude-review': 1 },
+  REVIEW_LANE: ['auriga-review'],
   PROJECT_LANE: {
     CONSUS: ['consus-dev'],
     HEIMDALL: ['heimdall-dev', 'heimdall-dev-codex'],
     AURIGA: ['auriga-dev'],
     MINERVA: ['auriga-dev'],
+    PCORE: ['auriga-build'], // Pantheon Core: decomposed non-seed stories -> claude+hive build lane
   },
   DEFAULT_LANE: ['auriga-dev', 'heimdall-dev-codex'],
-  PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS'],
-  REVIEW_PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
-  PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus' },
-  TREE_AGENT_ATTACHMENTS: {
-    'firefly-events': ['firefly-root'],
-    'firefly-events/events/api': ['FA'],
-  },
-  VERIFY_SQUAD: {
-    id: 'VS',
-    name: 'verify-team-squad',
-    leaderAgentId: 'RV',
-    maxInflight: 1,
-  },
+  HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
+  PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
+  PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus', PCORE: 'Pantheon Core' },
   CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10, perCycleReview: 1 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
-const todo = (id, project, num, assignee = null, title = 'work') =>
-  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title });
+const todo = (id, project, num, assignee = null, title = 'work', extra = {}) =>
+  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title, ...extra });
+
+// A description shaped like a real Minerva-planned plugin-hive story.
+const HIVE_DESCRIPTION = `id: some-story
+methodology: classic
+steps:
+  - id: research
+    agent: researcher
+  - id: implement
+    agent: developer
+`;
+
+// Like todo(), but sets parent_issue_id so the fixture represents a planned
+// story under an epic rather than a top-level seed (see isSeed). Used for the
+// pre-existing build-lane routing tests, which predate the seed/minerva-dev
+// routing split and mean to exercise chooseAgentForProject, not isSeed.
+const story = (id, project, num, parentId, assignee = null, title = 'work') =>
+  ({ id, identifier: id, project_id: project, number: num, status: 'todo', assignee_id: assignee, title, parent_issue_id: parentId });
 
 test('isSmokeScratch matches smoke/scratch/verification tickets only', () => {
   assert.ok(core.isSmokeScratch('SMOKE: dispatch nurse test'));
@@ -54,6 +71,11 @@ test('classifyRun distinguishes active/done/failed', () => {
   assert.equal(core.classifyRun({ status: 'running', completed_at: null }, now).active, true);
   assert.equal(core.classifyRun({ status: 'failed', error: 'boom' }, now).failed, true);
   assert.equal(core.classifyRun({ status: 'completed', error: 'boom' }, now).failed, true);
+});
+
+test('live config uses raised throughput caps', () => {
+  assert.equal(liveCfg.CAPS.perCycleTotal, 15);
+  assert.equal(liveCfg.CAPS.perCyclePerAgent, 4);
 });
 
 test('computeInflight counts ONLY assigned+running (not assigned-todo) — P0 deadlock fix', () => {
@@ -100,7 +122,7 @@ test('agentHasCapacity respects per-agent AND per-runtime caps', () => {
 });
 
 test('routing: aligned lanes go to their agent; Consus to claude', () => {
-  const issues = [todo('c1', 'CONSUS', 1), todo('a1', 'AURIGA', 2), todo('m1', 'MINERVA', 3)];
+  const issues = [story('c1', 'CONSUS', 1, 'EPIC1'), story('a1', 'AURIGA', 2, 'EPIC1'), story('m1', 'MINERVA', 3, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
   assert.equal(byId['c1'], 'consus-dev');
@@ -109,37 +131,15 @@ test('routing: aligned lanes go to their agent; Consus to claude', () => {
 });
 
 test('routing: default lane spreads across the two codex agents', () => {
-  const issues = [todo('j1', 'JANUS', 1), todo('j2', 'JANUS', 2)];
+  const issues = [story('j1', 'JANUS', 1, 'EPIC1'), story('j2', 'JANUS', 2, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, {}, {});
   const agents = picks.map((p) => p.agent).sort();
   assert.deepEqual(agents, ['auriga-dev', 'heimdall-dev-codex']); // load-balanced
 });
 
-test('tree-aware routing: exact tree node attachment overrides project lane', () => {
-  const issues = [{ ...todo('ff1', 'AURIGA', 1), tree_path: 'firefly-events/events/api' }];
-  const picks = core.selectAssignments(issues, CFG, {}, {});
-  assert.equal(picks[0].agent, 'firefly-api');
-});
-
-test('tree-aware routing: ancestor attachment is eligible for descendant task path', () => {
-  const cfg = {
-    ...CFG,
-    TREE_AGENT_ATTACHMENTS: { 'firefly-events': ['firefly-root'] },
-  };
-  const issues = [{ ...todo('ff2', 'AURIGA', 1), tree_path: 'firefly-events/events/api' }];
-  const picks = core.selectAssignments(issues, cfg, {}, {});
-  assert.equal(picks[0].agent, 'firefly-root');
-});
-
-test('tree-aware routing: task without tree_path uses existing project lane', () => {
-  const issues = [todo('a1', 'AURIGA', 1)];
-  const picks = core.selectAssignments(issues, CFG, {}, {});
-  assert.equal(picks[0].agent, 'auriga-dev');
-});
-
 test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
   // 10 Auriga todos, only auriga-dev is the lane. perAgent cycle cap = 2.
-  const issues = Array.from({ length: 10 }, (_, i) => todo('a' + i, 'AURIGA', i));
+  const issues = Array.from({ length: 10 }, (_, i) => story('a' + i, 'AURIGA', i, 'EPIC1'));
   const picks = core.selectAssignments(issues, CFG, {}, {});
   assert.ok(picks.length <= CFG.CAPS.perCycleTotal);
   const aurigaCount = picks.filter((p) => p.agent === 'auriga-dev').length;
@@ -148,14 +148,14 @@ test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
 
 test('runtime cap gates the whole codex lane in one cycle', () => {
   // Many default-lane (codex) todos; codex runtime cap 4, both agents empty.
-  const issues = Array.from({ length: 10 }, (_, i) => todo('j' + i, 'JANUS', i));
+  const issues = Array.from({ length: 10 }, (_, i) => story('j' + i, 'JANUS', i, 'EPIC1'));
   const picks = core.selectAssignments(issues, CFG, {}, { maxTotal: 20, maxPerAgent: 20 });
   // Both codex agents share cap 4 -> at most 4 codex assignments.
   assert.ok(picks.length <= 4, `got ${picks.length}`);
 });
 
 test('blockedRuntimes skips a rate-limited lane', () => {
-  const issues = [todo('a1', 'AURIGA', 1)];
+  const issues = [story('a1', 'AURIGA', 1, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, {}, { blockedRuntimes: new Set(['codex']) });
   assert.equal(picks.length, 0);
 });
@@ -165,7 +165,7 @@ test('selection ignores smoke/scratch and assigned/backlog issues', () => {
     todo('s1', 'AURIGA', 1, null, 'SMOKE: dispatch test'),
     todo('a1', 'AURIGA', 2, 'A'), // already assigned
     { id: 'b1', identifier: 'b1', project_id: 'AURIGA', number: 3, status: 'backlog', assignee_id: null, title: 'work' },
-    todo('a2', 'AURIGA', 4),
+    story('a2', 'AURIGA', 4, 'EPIC1'),
   ];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
   assert.deepEqual(picks.map((p) => p.identifier), ['a2']);
@@ -220,6 +220,47 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
   assert.equal(byId['z3'], undefined); // healthy, active run
 });
 
+test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok' },
+    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running' },
+    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run' },
+    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs' },
+    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me' },
+  ];
+  const runs = {
+    r1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    r2: [{ status: 'running', completed_at: null, created_at: new Date(now).toISOString() }],
+    r3: [{ status: 'failed', error: 'boom', completed_at: new Date(now).toISOString() }],
+    r4: [],
+    r5: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+  };
+  const actions = core.detectRunCompletions(inProgress, runs, now);
+  assert.deepEqual(actions.map((a) => a.identifier), ['r1']);
+  assert.equal(actions[0].action, 'advance-in-review');
+});
+
+test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
+  const inReview = [
+    { id: 'v1', identifier: 'v1', project_id: 'AURIGA', status: 'in_review', title: 'merged via state' },
+    { id: 'v2', identifier: 'v2', project_id: 'AURIGA', status: 'in_review', title: 'merged via merged_at' },
+    { id: 'v3', identifier: 'v3', project_id: 'AURIGA', status: 'in_review', title: 'still open' },
+    { id: 'v4', identifier: 'v4', project_id: 'AURIGA', status: 'in_review', title: 'no PRs' },
+    { id: 'v5', identifier: 'v5', project_id: 'AURIGA', status: 'in_review', title: 'SMOKE: ignore me' },
+  ];
+  const prs = {
+    v1: [{ state: 'merged', merged_at: null }],
+    v2: [{ state: 'open', merged_at: '2026-07-28T00:00:00Z' }],
+    v3: [{ state: 'open', merged_at: null }],
+    v4: [],
+    v5: [{ state: 'merged', merged_at: '2026-07-28T00:00:00Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs);
+  assert.deepEqual(actions.map((a) => a.identifier).sort(), ['v1', 'v2']);
+  assert.ok(actions.every((a) => a.action === 'advance-done'));
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
@@ -239,87 +280,565 @@ test('detectZombies: stale-but-old run triggers recovery, fresh done does not', 
   assert.equal(byId['z5'], undefined);
 });
 
-// ---- BACK-HALF: verify-squad review / ship dispatch -----------------------
+test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {
+  assert.ok(core.isHiveStory({ description: HIVE_DESCRIPTION }));
+  assert.ok(!core.isHiveStory({ description: 'Just fix the login bug, no special format here.' }));
+  assert.ok(!core.isHiveStory({}));
+});
+
+test('isHiveStory detects capability labels (forward-compat, no description needed)', () => {
+  assert.ok(core.isHiveStory({ labels: ['build'] }));
+  assert.ok(core.isHiveStory({ labels: ['implementation'] }));
+  assert.ok(core.isHiveStory({ labels: ['classic-methodology'] }));
+  assert.ok(!core.isHiveStory({ labels: ['bug'] }));
+});
+
+test('routing: a hive-tagged story in Auriga (PROJECT_LANE -> codex) still lands on HIVE_LANE, never codex', () => {
+  const issues = [todo('h1', 'AURIGA', 1, null, 'hive story', { description: HIVE_DESCRIPTION })];
+  const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
+  assert.equal(picks.length, 1);
+  assert.ok(CFG.HIVE_LANE.includes(picks[0].agent), `expected a HIVE_LANE agent, got ${picks[0].agent}`);
+  assert.ok(!['auriga-dev', 'heimdall-dev-codex', 'heimdall-dev'].includes(picks[0].agent));
+});
+
+test('routing: a non-hive story with no PROJECT_LANE entry still falls back to DEFAULT_LANE (regression)', () => {
+  // A planned story (has a parent) so it is NOT a seed — the seed/minerva-dev
+  // split (PAN-6646) routes unmarked top-level childless todos to the planning
+  // lane, so this DEFAULT_LANE fallback regression must use a non-seed story.
+  const issues = [story('j1', 'JANUS', 1, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.ok(CFG.DEFAULT_LANE.includes(picks[0].agent));
+});
+
+test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even for aligned codex projects', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForProject('AURIGA', CFG, {}, {}, empty, true);
+  assert.ok(CFG.HIVE_LANE.includes(agent));
+});
+
+test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'z6', identifier: 'z6', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled hive story', description: HIVE_DESCRIPTION },
+  ];
+  const z = core.detectZombies(inProgress, { z6: [] }, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
+  assert.equal(byId['z6'].isHive, true);
+});
+
+// --- isSeed (PAN-6646 planning-lane routing) -------------------------------
+
+test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
+  assert.equal(core.isSeed({ id: 'x1', labels: ['idea'], parent_issue_id: 'p1' }, []), true);
+  assert.equal(core.isSeed({ id: 'x2', labels: ['needs-plan'] }, []), true);
+});
+
+test("isSeed: 'consus-idea' label (Consus ideabox) is an explicit seed even with a parent", () => {
+  assert.equal(core.isSeed({ id: 'ci1', labels: ['consus-idea'], parent_issue_id: 'epic1' }, []), true);
+  assert.equal(core.isSeed({ id: 'ci2', labels: [{ id: 'l', name: 'consus-idea' }] }, []), true);
+});
+
+test('isSeed: real API label shape (array of {name,...} objects, not strings) is still detected', () => {
+  // multica issue list/get return labels as objects, e.g.
+  // [{ id, name: 'idea', color, ... }] — not ['idea']. A child issue (has a
+  // parent) explicitly labeled 'idea' must still be seed-classified: the
+  // label leg has to override the parent/children heuristic even against the
+  // real object shape, not just the string-array test fixture shape.
+  const issue = {
+    id: 'x7',
+    parent_issue_id: 'epic1',
+    labels: [{ id: 'l1', name: 'idea', color: '#22c55e' }],
+  };
+  assert.equal(core.isSeed(issue, []), true);
+});
+
+test('isSeed: unmarked, top-level, and childless is a seed', () => {
+  const issue = { id: 'x3' }; // no parent_issue_id, no labels, no children in the empty set
+  assert.equal(core.isSeed(issue, []), true);
+});
+
+test('isSeed: has a parent_issue_id is not a seed', () => {
+  const issue = { id: 'x4', parent_issue_id: 'epic1' };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test('isSeed: top-level but has a child in allIssues is not a seed', () => {
+  const issue = { id: 'x5' };
+  const allIssues = [{ id: 'x6', parent_issue_id: 'x5' }];
+  assert.equal(core.isSeed(issue, allIssues), false);
+});
+
+// --- selectAssignments seed routing (PAN-6646) ------------------------------
+
+test('routing: issue labeled idea routes to minerva-dev, never a build agent', () => {
+  const issue = { ...todo('seed1', 'AURIGA', 1), labels: ['idea'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: issue labeled needs-plan routes to minerva-dev', () => {
+  const issue = { ...todo('seed2', 'AURIGA', 1), labels: ['needs-plan'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: unmarked, top-level, childless issue routes to minerva-dev', () => {
+  const issue = todo('seed3', 'AURIGA', 1); // no parent_issue_id, no children -> seed
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+test('routing: issue with a parent_issue_id is not seed-classified, uses the normal build lane', () => {
+  const issue = story('story1', 'AURIGA', 1, 'epic1');
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
+});
+
+test('routing: top-level issue with a child in the scanned set is not seed-classified', () => {
+  const parent = todo('parent1', 'AURIGA', 1); // no parent_issue_id itself
+  const child = story('child1', 'AURIGA', 2, 'parent1');
+  const picks = core.selectAssignments([parent, child], CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['parent1'], 'auriga-dev'); // has a child -> not a seed -> normal build lane
+  assert.equal(byId['child1'], 'auriga-dev');  // has a parent -> not a seed -> normal build lane
+});
+
+test('routing: a decomposed non-seed story in Pantheon Core routes to the build lane, not codex', () => {
+  // The full-loop close: a seed dropped in Pantheon Core is planned by Minerva, which files the
+  // child stories back INTO Pantheon Core. Those non-seed stories must reach auriga-build.
+  const epicParent = todo('pc-epic', 'PCORE', 1); // has a child below -> not a seed
+  const childStory = story('pc-story', 'PCORE', 2, 'pc-epic'); // non-hive-shaped decomposed story
+  const picks = core.selectAssignments([epicParent, childStory], CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['pc-story'], 'auriga-build'); // build lane, never DEFAULT_LANE codex
+});
+
+test('depsSatisfied: gates a story on its depends_on metadata (only done/cancelled unblock)', () => {
+  const statusById = new Map([['dep-done', 'done'], ['dep-open', 'in_progress'], ['dep-cxl', 'cancelled']]);
+  assert.equal(core.depsSatisfied({ metadata: {} }, statusById), true); // no deps
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: '' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-done' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-cxl' } }, statusById), true);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-open' } }, statusById), false);
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'dep-done,dep-open' } }, statusById), false);
+  // A dependency we can't see (not in the scanned set) must NOT block (no deadlock).
+  assert.equal(core.depsSatisfied({ metadata: { depends_on: 'ghost' } }, statusById), true);
+});
+
+test('routing: selectAssignments withholds a story whose dep isn\'t done, dispatches once it is', () => {
+  // s2 depends_on s1 (carried as the resolved issue id in metadata). While s1 is todo, only s1
+  // dispatches; when s1 is done, s2 becomes eligible.
+  const s1 = story('s1id', 'AURIGA', 1, 'epicX');
+  const s2 = { ...story('s2id', 'AURIGA', 2, 'epicX'), metadata: { depends_on: 's1id' } };
+  let picks = core.selectAssignments([s1, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['s1id']); // s2 blocked by unfinished s1
+
+  const s1done = { ...s1, status: 'done' };
+  picks = core.selectAssignments([s1done, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['s2id']); // s1 done -> s2 unblocked
+});
+
+test('routing: seed skipped when minerva-dev has no capacity, never falls back to a build agent', () => {
+  const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['idea'] };
+  // minerva-dev's maxInflight is 3 in the CFG fixture; exhaust it directly via inflight.
+  const inflight = { 'minerva-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {});
+  assert.equal(picks.length, 0); // skipped this cycle, not routed anywhere
+  assert.ok(!picks.some((p) => p.agent !== 'minerva-dev')); // never falls back to a build agent
+});
+
+// ---- BACK-HALF: review / ship dispatch ----------------------------------
 
 const NOW = 1_700_000_000_000;
+// An in_review issue with a target_repo line (build-lane output shape).
 const inReview = (id, num, assignee = null, extra = {}) => ({
-  id,
-  identifier: id,
-  project_id: 'PCORE',
-  number: num,
-  status: 'in_review',
-  assignee_id: assignee,
-  assignee_type: assignee ? (assignee === 'VS' ? 'squad' : 'agent') : null,
-  title: 'work',
-  ...extra,
+  id, identifier: id, project_id: 'PCORE', number: num, status: 'in_review',
+  assignee_id: assignee, title: 'work', description: 'target_repo: mdostal/cron-maker\n', ...extra,
 });
-const openPr = { state: 'open', merged_at: null, checks_conclusion: 'passed', head_ref_name: 'feat/PAN-1', base_ref_name: 'dev' };
-const mergedPr = { state: 'merged', merged_at: '2026-08-05T00:00:00Z' };
 const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOString() };
 const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
 const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
 
-test('detectVerifiedDone: merged PR advances in_review story to done', () => {
-  const issues = [
-    inReview('PAN-1', 1),
-    inReview('PAN-2', 2),
-    inReview('PAN-3', 3, null, { title: 'SMOKE: ignore me' }),
-  ];
-  const actions = core.detectVerifiedDone(issues, {
-    'PAN-1': [mergedPr],
-    'PAN-2': [openPr],
-    'PAN-3': [mergedPr],
-  });
-  assert.deepEqual(actions.map((a) => a.identifier), ['PAN-1']);
-  assert.equal(actions[0].action, 'advance-done');
+test('reviewEligible: gates strictly on a real open PR (seeds without a PR are skipped)', () => {
+  assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
+  assert.ok(!core.hasTargetRepo({ description: 'just a design note' }));
+  // reviewEligible now REQUIRES a real open PR (2nd arg). No PR -> NOT eligible, even
+  // for a build/target_repo/hive-shaped story: that is exactly the parent-seed / no-PR
+  // case the review path used to false-block.
+  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }, true));
+  assert.ok(!core.reviewEligible({ description: 'target_repo: mdostal/x' }, false));
+  assert.ok(!core.reviewEligible({ description: HIVE_DESCRIPTION }, false));
+  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }, false));
 });
 
-test('selectReviewDispatch: in_review story with an open PR dispatches to verify-team-squad', () => {
-  const issue = inReview('PAN-4', 4);
-  const picks = core.selectReviewDispatch([issue], { 'PAN-4': [] }, { 'PAN-4': [openPr] }, CFG, { now: NOW });
+test('selectReviewDispatch: an in_review story with a build signal dispatches to the review lane', () => {
+  const i = inReview('PAN-1', 1); // unassigned, eligible
+  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-1']) });
   assert.equal(picks.length, 1);
-  assert.equal(picks[0].squad, 'verify-team-squad');
+  assert.equal(picks[0].agent, 'auriga-review');
   assert.equal(picks[0].action, 'dispatch-review');
 });
 
-test('selectReviewDispatch: in_review story without open PR is skipped', () => {
-  const issue = inReview('PAN-5', 5);
-  const picks = core.selectReviewDispatch([issue], { 'PAN-5': [] }, { 'PAN-5': [] }, CFG, { now: NOW });
+test('selectReviewDispatch: ineligible in_review stories (no build signal) are never dispatched', () => {
+  const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc' };
+  const picks = core.selectReviewDispatch([doc], { D1: [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 0);
 });
 
-test('selectReviewDispatch: active verify-squad review is idempotent', () => {
-  const issue = inReview('PAN-6', 6, 'VS');
-  const picks = core.selectReviewDispatch([issue], { 'PAN-6': [freshRun] }, { 'PAN-6': [openPr] }, CFG, { now: NOW });
+test('selectReviewDispatch: a story already under active review is NOT re-dispatched (idempotent)', () => {
+  const i = inReview('PAN-2', 2, 'RV'); // assigned to review agent
+  const picks = core.selectReviewDispatch([i], { 'PAN-2': [freshRun] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(picks.length, 0);
 });
 
-test('selectReviewDispatch: recently finished verify run gets time to merge or loop back', () => {
-  const issue = inReview('PAN-7', 7, 'VS');
-  const picks = core.selectReviewDispatch([issue], { 'PAN-7': [doneFresh] }, { 'PAN-7': [openPr] }, CFG, { now: NOW });
+test('selectReviewDispatch: reviewer finished recently but story still in_review -> give it time, no re-fire', () => {
+  const i = inReview('PAN-3', 3, 'RV');
+  const picks = core.selectReviewDispatch([i], { 'PAN-3': [doneFresh] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(picks.length, 0);
 });
 
-test('selectReviewDispatch: stale verify-squad run reruns the review lane', () => {
-  const issue = inReview('PAN-8', 8, 'VS');
-  const picks = core.selectReviewDispatch([issue], { 'PAN-8': [doneStale] }, { 'PAN-8': [openPr] }, CFG, { now: NOW });
+test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via rerun-review', () => {
+  const i = inReview('PAN-4', 4, 'RV');
+  const picks = core.selectReviewDispatch([i], { 'PAN-4': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].action, 'rerun-review');
+  assert.equal(picks[0].agent, 'auriga-review');
 });
 
-test('selectReviewDispatch: respects verify squad capacity and per-cycle cap', () => {
-  const a = inReview('PAN-9', 9);
-  const b = inReview('PAN-10', 10);
-  let picks = core.selectReviewDispatch([a, b], { 'PAN-9': [], 'PAN-10': [] }, { 'PAN-9': [openPr], 'PAN-10': [openPr] }, CFG, { now: NOW });
+test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
+  const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
+  // Two eligible unassigned stories, perCycleReview=1 -> only one dispatched this cycle.
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-5', 'PAN-6']) });
   assert.equal(picks.length, 1);
-
-  picks = core.selectReviewDispatch([a], { 'PAN-9': [] }, { 'PAN-9': [openPr] }, CFG, { now: NOW, reviewInflight: 1 });
-  assert.equal(picks.length, 0);
+  // Lane already full (one review in flight) -> nothing new dispatched.
+  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW, openPrIds: new Set(['PAN-5']) });
+  assert.equal(full.length, 0);
 });
 
-test('computeReviewInflight: counts issues held by the verify squad or its leader', () => {
-  const squadHeld = inReview('PAN-11', 11, 'VS');
-  const leaderHeld = inReview('PAN-12', 12, 'RV', { assignee_type: 'agent' });
-  const other = inReview('PAN-13', 13, 'A', { assignee_type: 'agent' });
-  assert.equal(core.computeReviewInflight([squadHeld, leaderHeld, other], CFG), 2);
+test('computeReviewInflight: counts in_review issues held by review agents', () => {
+  const held = inReview('PAN-7', 7, 'RV');
+  const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
+  const counts = core.computeReviewInflight([held, other], CFG);
+  assert.equal(counts['auriga-review'], 1);
+});
+
+test('chooseReviewAgent: returns null when the lane is at capacity', () => {
+  assert.equal(core.chooseReviewAgent(CFG, {}, {}), 'auriga-review');
+  assert.equal(core.chooseReviewAgent(CFG, { 'auriga-review': 1 }, {}), null);
+});
+
+// ---- BACK-HALF: PR-eligibility + broad PR matching (2026-07-31 fix) --------
+
+test('prReferencesIssue: matches ticket id in head branch, title, or body (case-insensitive)', () => {
+  assert.ok(core.prReferencesIssue({ headRefName: 'feat/pan-6667-triage-seeds' }, 'PAN-6667'));
+  assert.ok(core.prReferencesIssue({ title: 'PAN-6667: do the thing' }, 'PAN-6667'));
+  assert.ok(core.prReferencesIssue({ body: 'closes PAN-6667' }, 'PAN-6667'));
+  assert.ok(!core.prReferencesIssue({ headRefName: 'feat/other', title: 'unrelated' }, 'PAN-6667'));
+  assert.ok(!core.prReferencesIssue({ headRefName: 'x' }, ''));
+});
+
+test('hasOpenPrForIssue: true only for an OPEN PR that references the id', () => {
+  const prs = [
+    { state: 'OPEN', headRefName: 'feat/pan-6962', title: 'PAN-6962: loader' },
+    { state: 'MERGED', headRefName: 'feat/pan-1', title: 'PAN-1' },
+  ];
+  assert.ok(core.hasOpenPrForIssue('PAN-6962', prs));
+  assert.ok(!core.hasOpenPrForIssue('PAN-1', prs));      // referenced PR is merged, not open
+  assert.ok(!core.hasOpenPrForIssue('PAN-9999', prs));   // no PR references it
+});
+
+test('normalizeRepoSlug: normalizes slug / url / github.com / ssh; junk -> null', () => {
+  assert.equal(core.normalizeRepoSlug('mdostal/cron-maker'), 'mdostal/cron-maker');
+  assert.equal(core.normalizeRepoSlug('github.com/mdostal/consus'), 'mdostal/consus');
+  assert.equal(core.normalizeRepoSlug('https://github.com/mdostal/auriga.git'), 'mdostal/auriga');
+  assert.equal(core.normalizeRepoSlug('git@github.com:mdostal/heimdall.git'), 'mdostal/heimdall');
+  assert.equal(core.normalizeRepoSlug('/Users/dostal/minerva-verify/target'), null);
+  assert.equal(core.normalizeRepoSlug(''), null);
+});
+
+test('targetRepoValue: metadata wins, else the description target_repo line', () => {
+  assert.equal(core.targetRepoValue({ metadata: { target_repo: 'mdostal/cron-maker' } }), 'mdostal/cron-maker');
+  assert.equal(core.targetRepoValue({ description: 'x\ntarget_repo: github.com/mdostal/consus\ny' }), 'github.com/mdostal/consus');
+  assert.equal(core.targetRepoValue({ description: 'no repo here' }), null);
+});
+
+test('selectReviewDispatch: an eligible-shaped in_review story WITHOUT a PR is NOT dispatched (seed guard)', () => {
+  const seed = inReview('PAN-SEED', 42); // has target_repo shape but no open PR
+  const picks = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+  const picks2 = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW, openPrIds: new Set() });
+  assert.equal(picks2.length, 0);
+});
+
+test('selectReviewDispatch: dispatches a story once its id is in openPrIds (real PR found)', () => {
+  const s = inReview('PAN-6962', 43);
+  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-6962']) });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+// ---- blocked -> todo auto-unblock (PAN-6662) --------------------------------
+test('detectUnblocks: blocked story with satisfied declared deps -> unblock', () => {
+  const statusById = new Map([['dep1', 'done'], ['dep2', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const acts = core.detectUnblocks([b], statusById);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  assert.equal(acts[0].identifier, 'PAN-1');
+});
+
+test('detectUnblocks: an unsatisfied declared dep keeps the story blocked', () => {
+  const statusById = new Map([['dep1', 'done'], ['dep2', 'in_progress']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 0);
+});
+
+test('detectUnblocks: blocked story with NO declared deps is left untouched', () => {
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', metadata: {} };
+  assert.equal(core.detectUnblocks([b], new Map()).length, 0);
+});
+
+test('detectUnblocks: smoke/scratch blocked story ignored even with satisfied deps', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'SMOKE test', metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 0);
+});
+
+test('detectUnblocks: cancelled dep counts as satisfied (terminal)', () => {
+  const statusById = new Map([['dep1', 'cancelled']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 1);
+});
+
+// ---- parent roll-up (all children terminal -> parent done) ------------------
+test('detectParentDone: parent rolls up once every child is done', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  const acts = core.detectParentDone(issues);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'PAN-P');
+  assert.equal(acts[0].action, 'advance-parent-done');
+});
+
+test('detectParentDone: a not-yet-done child keeps the parent open', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'in_progress', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: an already-done parent is not re-emitted', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'done', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+// ============================================================================
+// Loop-integrity fixes (2026-07-31): story-key matching, description-declared
+// dep resolution, false-done demotion, hive-lane zombie reroute.
+// ============================================================================
+
+test('storyKey extracts the short epic key from a [key-NN-...] title', () => {
+  assert.equal(core.storyKey({ title: '[m-02-file-layer-implementation] Implement file layer' }), 'm-02');
+  assert.equal(core.storyKey({ title: '[cm-07-e2e-integration] End-to-end' }), 'cm-07');
+  assert.equal(core.storyKey({ title: '[hf-01-data-persistence-layer] SQLite' }), 'hf-01');
+  assert.equal(core.storyKey({ title: 'No bracket here' }), null);
+});
+
+test('slugKey reduces a full dep slug to its short key', () => {
+  assert.equal(core.slugKey('m-01-core-recall-interface'), 'm-01');
+  assert.equal(core.slugKey('research'), null);
+});
+
+test('descStoryDeps reads the story-level depends_on and drops hive phase tokens', () => {
+  const dep = { description: 'id: m-02\ndepends_on: [m-01-core-recall-interface]\nsteps:\n  - id: research\n    depends_on: [research]\n' };
+  assert.deepEqual(core.descStoryDeps(dep), ['m-01-core-recall-interface']);
+  const root = { description: 'id: m-01\ndepends_on: []\nsteps:\n' };
+  assert.deepEqual(core.descStoryDeps(root), []);
+  const none = { description: 'no deps at all' };
+  assert.deepEqual(core.descStoryDeps(none), []);
+});
+
+test('prMatchesStory matches on PAN id OR the short story key (slug-branched PRs)', () => {
+  const m01 = { identifier: 'PAN-6439', title: '[m-01-core-recall-interface] recall iface' };
+  assert.ok(core.prMatchesStory({ headRefName: 'feat/m-01-service' }, m01)); // slug-branch, no PAN id
+  const s = { identifier: 'PAN-6952', title: '[s1-project-scaffold] scaffold' };
+  assert.ok(core.prMatchesStory({ headRefName: 'feat/PAN-6952' }, s)); // PAN id (uppercase)
+  // must NOT match a longer-numbered key (m-01 vs m-010)
+  assert.ok(!core.prMatchesStory({ headRefName: 'feat/m-010-other' }, m01));
+  assert.ok(!core.prMatchesStory({ headRefName: 'docs/oss-launch' }, m01));
+});
+
+test('descDepsSatisfied resolves slug deps against siblings by short key', () => {
+  const parent = 'P';
+  const m01done = { id: 'a', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };
+  const m01todo = { ...m01done, status: 'todo' };
+  const m02 = { id: 'b', title: '[m-02-file-layer] y', status: 'blocked', parent_issue_id: parent, description: 'depends_on: [m-01-core-recall-interface]\n' };
+  assert.equal(core.descDepsSatisfied(m02, [m02, m01done]), true);
+  assert.equal(core.descDepsSatisfied(m02, [m02, m01todo]), false);
+  // unresolved dep (no sibling) -> does not block (anti-deadlock)
+  assert.equal(core.descDepsSatisfied(m02, [m02]), true);
+});
+
+// Regression (PAN-6664, 2026-07-31): the "p1-<name>" epic convention has NO short
+// "prefix-NN" key — the whole slug is the id — so storyKey/slugKey both return
+// null for it and the short-key lookup above silently skipped every dep, making
+// descDepsSatisfied vacuously true regardless of the real dependency's status.
+// This produced a live blocked->todo->blocked loop on PAN-6664 every router cycle.
+test('descStoryId reads the story-level `id:` front-matter slug', () => {
+  const s = { description: 'id: p1-triage-bulk-reassign\nepic: p1-dispatch-throughput\ntitle: x\ndepends_on: [p1-router-capability-routing]\n' };
+  assert.equal(core.descStoryId(s), 'p1-triage-bulk-reassign');
+  assert.equal(core.descStoryId({ description: 'no id line here' }), null);
+});
+
+test('descDepsSatisfied resolves "p1-<name>" slug deps by exact `id:` match, not short key', () => {
+  const parent = 'P';
+  // slugKey/storyKey both return null for this convention (epic tag "p1" mixes a
+  // letter and a digit before the hyphen) — confirms the short-key path can't help here.
+  assert.equal(core.slugKey('p1-router-capability-routing'), null);
+  assert.equal(core.storyKey({ title: '[p1-router-capability-routing] Fix capability-aware routing' }), null);
+
+  const capRoutingDone = {
+    id: 'a', status: 'done', parent_issue_id: parent,
+    title: '[p1-router-capability-routing] Fix capability-aware routing for hive stories',
+    description: 'id: p1-router-capability-routing\ndepends_on: []\n',
+  };
+  const stateMachineBlocked = {
+    id: 'c', status: 'blocked', parent_issue_id: parent,
+    title: '[p1-state-machine-transitions] Implement pure-code state-machine transitions',
+    description: 'id: p1-state-machine-transitions\ndepends_on: []\n',
+  };
+  const bulkReassign = {
+    id: 'b', status: 'blocked', parent_issue_id: parent,
+    title: '[p1-triage-bulk-reassign] Bulk reassign codex-self-blocked stories',
+    description: 'id: p1-triage-bulk-reassign\ndepends_on: [p1-router-capability-routing, p1-state-machine-transitions]\n',
+  };
+  // one dep done, one still blocked -> must NOT be satisfied
+  assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineBlocked]), false);
+  // both deps done -> satisfied
+  const stateMachineDone = { ...stateMachineBlocked, status: 'done' };
+  assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineDone]), true);
+});
+
+test('detectUnblocks fires on a blocked story whose DESCRIPTION dep (not metadata) is done', () => {
+  const parent = 'P';
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };
+  const m02 = { id: 'b', identifier: 'PAN-6440', project_id: 'MEM', title: '[m-02-file-layer] y', status: 'blocked', parent_issue_id: parent, metadata: {}, description: 'depends_on: [m-01-core-recall-interface]\n' };
+  const all = [m01, m02];
+  const statusById = new Map(all.map((i) => [i.id, i.status]));
+  const acts = core.detectUnblocks([m02], statusById, all);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'PAN-6440');
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  // if the dep is not done, it stays blocked
+  const m01todo = { ...m01, status: 'todo' };
+  const all2 = [m01todo, m02];
+  const s2 = new Map(all2.map((i) => [i.id, i.status]));
+  assert.equal(core.detectUnblocks([m02], s2, all2).length, 0);
+});
+
+test('detectFalseDone demotes a done story that still has an OPEN matching PR', () => {
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done' };
+  const openPrs = [{ headRefName: 'feat/m-01-service', state: 'open', url: 'u' }];
+  const acts = core.detectFalseDone([m01], openPrs);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  // a merged PR (not open) does NOT demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-service', state: 'merged', merged_at: 'x' }]).length, 0);
+  // no PR at all -> leave the done story alone (may be a legit non-code task)
+  assert.equal(core.detectFalseDone([m01], []).length, 0);
+});
+
+test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => {
+  assert.ok(core.isHiveCapableAssignee('AB', CFG));  // auriga-build
+  assert.ok(core.isHiveCapableAssignee('RV', CFG));  // auriga-review
+  assert.ok(!core.isHiveCapableAssignee('A', CFG));  // auriga-dev (codex)
+  assert.ok(!core.isHiveCapableAssignee('HC', CFG)); // heimdall-dev-codex
+  assert.ok(!core.isHiveCapableAssignee(null, CFG));
+});
+
+test('detectZombies reroutes a hive story stuck on a codex lane instead of rerunning it', () => {
+  const stale = Date.now() - (60 * 60 * 1000); // 1h old
+  const hiveOnCodex = { id: 'z1', identifier: 'PAN-z1', project_id: 'MEM', title: '[m-05-x] y', status: 'in_progress', assignee_id: 'A', description: HIVE_DESCRIPTION };
+  const runs = { 'PAN-z1': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
+  const acts = core.detectZombies([hiveOnCodex], runs, CFG, Date.now());
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'assign'); // reroute, NOT rerun
+  assert.equal(acts[0].reason, 'hive-on-noncapable-lane');
+  // a non-hive story on codex is a normal rerun
+  const plainOnCodex = { id: 'z2', identifier: 'PAN-z2', project_id: 'AURIGA', title: 'plain task', status: 'in_progress', assignee_id: 'A' };
+  const runs2 = { 'PAN-z2': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
+  const a2 = core.detectZombies([plainOnCodex], runs2, CFG, Date.now());
+  assert.equal(a2[0].action, 'rerun');
+});
+
+test('prIdentityMatchesStory ignores body mentions (branch/title only)', () => {
+  const s = { identifier: 'PAN-6659', title: '[p1-router-human-filter] x' };
+  // body merely references the ticket -> NOT this PR's identity
+  assert.ok(!core.prIdentityMatchesStory({ headRefName: 'feat/other', title: 'unrelated', body: 'builds on PAN-6659' }, s));
+  // branch carrying the id IS identity
+  assert.ok(core.prIdentityMatchesStory({ headRefName: 'feat/pan-6659-router', title: 'x' }, s));
+});
+
+test('detectFalseDone does not demote on a body-only mention or a wrong-repo PR', () => {
+  const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', metadata: { target_repo: 'mdostal/mnemosyne' } };
+  // right key but WRONG repo -> no demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-thing', state: 'open', _repo: 'mdostal/other' }]).length, 0);
+  // body-only mention -> no demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/z', title: 'z', body: 'PAN-6439 referenced', state: 'open', _repo: 'mdostal/mnemosyne' }]).length, 0);
+  // right key AND right repo (branch identity) -> demote
+  assert.equal(core.detectFalseDone([m01], [{ headRefName: 'feat/m-01-service', state: 'open', _repo: 'mdostal/mnemosyne', url: 'https://github.com/mdostal/mnemosyne/pull/1' }]).length, 1);
+});
+
+test('repoFromPrUrl parses owner/repo from a PR url', () => {
+  assert.equal(core.repoFromPrUrl({ url: 'https://github.com/mdostal/mnemosyne/pull/1' }), 'mdostal/mnemosyne');
+  assert.equal(core.repoFromPrUrl({}), null);
+});
+
+
+test('detectFalseDone never demotes a done story whose OWN recorded PR is merged (generic-key collision guard)', () => {
+  // PAN-6952 regression: story keyed "s1" whose OWN PR (logic-loops#1) is MERGED.
+  const s1 = {
+    id: 's', identifier: 'PAN-6952', project_id: 'LL',
+    title: '[s1-project-scaffold] Scaffold TypeScript project with npm dependencies',
+    status: 'done', metadata: { pr_url: 'https://github.com/mdostal/logic-loops/pull/1' },
+  };
+  // an UNRELATED open PR that merely says "S1 ..." in its title -> must NOT demote.
+  const unrelated = {
+    headRefName: 'agent/fractional-cto/f5876a10',
+    title: 'docs: S1 pipeline-contract CBA (DOS-1198/DOS-1206)',
+    state: 'open', _repo: 'mdostal/dostal-swarm',
+    url: 'https://github.com/mdostal/dostal-swarm/pull/96',
+  };
+  assert.equal(core.detectFalseDone([s1], [unrelated]).length, 0);
+  // own PR merged (absent from open set) -> genuinely done -> no demote.
+  assert.equal(core.detectFalseDone([s1], []).length, 0);
+  // but if the story's OWN PR is the one still open -> genuine false-done -> demote.
+  const ownOpen = {
+    headRefName: 'feat/PAN-6952', title: 'PAN-6952: Scaffold', state: 'open',
+    _repo: 'mdostal/logic-loops', url: 'https://github.com/mdostal/logic-loops/pull/1',
+  };
+  const acts = core.detectFalseDone([s1], [ownOpen]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  assert.equal(acts[0].prUrl, 'https://github.com/mdostal/logic-loops/pull/1');
+});
+
+test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
+  assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
+  assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
+  assert.equal(core.ownPrUrl({}), null);
 });

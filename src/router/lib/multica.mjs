@@ -32,9 +32,37 @@ function run(args, { json = true } = {}) {
   return out.trim() ? JSON.parse(out) : null;
 }
 
-export function listIssues(projectId) {
-  const res = run(['issue', 'list', '--project', projectId, '--output', 'json']);
-  return (res && res.issues) || [];
+// `multica issue list` caps at --limit (default 50) issues per call. Projects with
+// more than a page of issues (Pantheon Core — the seed-flood project) were therefore
+// only PARTIALLY scanned: every status pass silently missed the tail of the board
+// (PAN-6952 and dozens of others were invisible, so they never advanced). Paginate
+// with --offset until a short page is returned so we get EVERY issue in the project.
+export function listIssues(projectId, pageSize = 200) {
+  const all = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const res = run(['issue', 'list', '--project', projectId, '--output', 'json',
+      '--limit', String(pageSize), '--offset', String(offset)]);
+    const page = (res && res.issues) || [];
+    for (const i of page) all.push(i);
+    if (page.length < pageSize) break; // last (short) page
+    if (offset > 100000) break;         // hard safety stop
+  }
+  return all;
+}
+
+// Every project id in the workspace. Used by the board-wide STATUS passes (unblock,
+// parent-rollup, false-done, verified-done) which must see the whole board — the
+// blocked/done lies live in projects the build DISPATCH set deliberately excludes.
+// Returns [] on any error so the caller falls back to the static PROJECT_IDS.
+export function listAllProjectIds() {
+  try {
+    const res = run(['project', 'list', '--output', 'json']);
+    const ps = Array.isArray(res) ? res : (res && res.projects) || [];
+    return ps.map((p) => p && p.id).filter(Boolean);
+  } catch (e) {
+    process.stderr.write('listAllProjectIds failed: ' + e.message + '\n');
+    return [];
+  }
 }
 
 export function getIssue(identifier) {
@@ -144,25 +172,82 @@ export function issuePullRequests(identifier) {
   }
 }
 
+const GH = process.env.GH_CLI || 'gh';
+
+// Open PRs for a repo via gh, as [{number,title,headRefName,baseRefName,body,url,state}].
+// Used by the review lane to discover a story's real open PR: Multica's issue<->PR
+// linkage is empty in practice, and the feat/<id> branch convention is too narrow.
+export function ghOpenPrs(repo) {
+  try {
+    const out = execFileSync(GH, [
+      'pr', 'list', '--repo', repo, '--state', 'open',
+      '--json', 'number,title,headRefName,baseRefName,body,url,state', '--limit', '100',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    process.stderr.write('ghOpenPrs(' + repo + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}
+
+// Every repo slug for an owner via `gh repo list`, as ['owner/name', ...]. Lets the
+// review lane sweep ALL of the owner's repos for open PRs — not just a hardcoded
+// subset (logic-loops PR#1 sat forever because its repo was not in the static list).
+// Returns [] on any error so the caller falls back to REVIEW_SEARCH_REPOS.
+export function ghListRepos(owner, limit = 300) {
+  try {
+    const out = execFileSync(GH, [
+      'repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
+  } catch (e) {
+    process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}
+
+// Remove an issue's current assignee. Used by the blocked->todo auto-unblock pass
+// so a freshly-unblocked story re-enters build routing as an UNASSIGNED candidate
+// (selectAssignments only considers unassigned todos), instead of keeping its
+// stale plan-time assignee which would exclude it from the candidate pool.
+export function unassignIssue(identifier) {
+  return run(['issue', 'assign', identifier, '--unassign', '--output', 'json']);
+}
+
+// All PRs (any state) for a repo, as [{number,title,headRefName,baseRefName,body,url,state,mergedAt}].
+// Used by the blocked->todo unblock guard: a story that already has an OPEN or
+// MERGED PR referencing it has progressed past build (in review / shipped) and
+// must NOT be re-dispatched — even though a stale/failed run from earlier churn
+// would (wrongly) make a runs-based guard skip it.
+export function ghPrs(repo, state = 'all') {
+  try {
+    const out = execFileSync(GH, [
+      'pr', 'list', '--repo', repo, '--state', state,
+      '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100',
+    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+    const arr = out.trim() ? JSON.parse(out) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
+    return [];
+  }
+}
+
 // Cross-workspace issue listing — unlike listIssues/listAllIssues above (which
-// are scoped to the router's deliberately-narrow cfg.PROJECT_IDS "aligned"
-// projects), this queries the whole workspace board across every project.
-// Used by scripts/bulk-extract-human-todos.mjs, which must sweep the full
-// board, not just the 3 aligned projects the live router dispatches into.
+// are scoped to configured projects), this queries the whole workspace board.
 export function listWorkspaceIssues({ status, limit = 50, offset = 0 } = {}) {
   const args = ['issue', 'list', '--output', 'json', '--limit', String(limit), '--offset', String(offset)];
   if (status) args.push('--status', status);
   return run(args) || {};
 }
 
-// Page through the whole workspace (optionally filtered by status) until
-// has_more is false (or a page comes back empty), returning the concatenated
-// issues array. Guards against a pathological infinite loop with a hard cap.
 export function listAllWorkspaceIssues(status) {
   const all = [];
   const limit = 50;
   let offset = 0;
-  const MAX_PAGES = 1000; // safety valve — 50k issues; a real workspace won't hit this
+  const MAX_PAGES = 1000;
   for (let page = 0; page < MAX_PAGES; page++) {
     const res = listWorkspaceIssues({ status, limit, offset });
     const issues = (res && res.issues) || [];
@@ -173,34 +258,22 @@ export function listAllWorkspaceIssues(status) {
   return all;
 }
 
-let humanTodoLabelId; // memoized — resolved once per process
+let humanTodoLabelId;
 
-// `multica issue label add <issue-id> <label-id>` takes the label's workspace
-// UUID as a positional arg, not a name, so resolve+cache it via `label list`
-// rather than hardcoding an ID that could drift across workspaces.
 function resolveHumanTodoLabelId() {
   if (humanTodoLabelId) return humanTodoLabelId;
   const labels = run(['label', 'list', '--output', 'json']) || [];
   const match = labels.find((l) => (l.name || '').toLowerCase() === 'human-todo');
-  if (!match) throw new Error("label 'human-todo' not found in workspace — create it with `multica label create` first");
+  if (!match) throw new Error("label 'human-todo' not found in workspace");
   humanTodoLabelId = match.id;
   return humanTodoLabelId;
 }
 
-// Positively exclude an issue from any future agent dispatch scan by tagging
-// it with the human-todo label, regardless of which project's router config
-// has landed (isHumanTodo in lib/core.mjs checks for exactly this label).
 export function attachHumanTodoLabel(identifier) {
   const labelId = resolveHumanTodoLabelId();
   return run(['issue', 'label', 'add', identifier, labelId], { json: false });
 }
 
-// Post a comment via a temp file + --content-file, never inline --content:
-// inline content lets the shell mangle backticks/`$()`/quotes in the body
-// before the CLI ever sees them (same rule build/review agents follow for
-// issue comments). Used by scripts/bulk-extract-human-todos.mjs to notify
-// the human operator with a real Multica mention (not just console/file
-// output, which a human has to remember to go look at).
 export function postComment(identifier, body) {
   const tmp = path.join(os.tmpdir(), `auriga-comment-${identifier}-${process.pid}-${Math.random().toString(36).slice(2)}.md`);
   fs.writeFileSync(tmp, body);
@@ -208,6 +281,17 @@ export function postComment(identifier, body) {
     return run(['issue', 'comment', 'add', identifier, '--content-file', tmp], { json: false });
   } finally {
     fs.rmSync(tmp, { force: true });
+  }
+}
+
+// Post a comment onto a Multica issue. Best-effort: a comment failure must never
+// abort a review dispatch.
+export function issueComment(identifier, body) {
+  try {
+    return postComment(identifier, body);
+  } catch (e) {
+    process.stderr.write(`issueComment(${identifier}) failed: ${e.message}\n`);
+    return null;
   }
 }
 
