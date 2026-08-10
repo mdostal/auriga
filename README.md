@@ -1,78 +1,110 @@
 # Auriga
 
-Auriga is a **Pantheon plugin** — the routing / dispatch god. It lives in its
-own repo (`mdostal/auriga`) and is bound into the framework by Pantheon
-(`mdostal/pantheon-v2`). Every plugin owns its own repo; Pantheon is the
-framework that binds plugins together.
+**The router god of [Pantheon](https://github.com/mdostal/pantheon-v2).** Auriga senses board
+state and dispatches each unit of work to the right lane and agent — the PM/router of the
+Pantheon SDLC pipeline.
 
-> Note: `mdostal/pantheon-orchestrator` is **LEGACY**. Auriga code that used to
-> live there has been moved here.
+## What & why
 
-## Layout
+A swarm of agents building software needs a single thing deciding *who* does *what* and *when* —
+otherwise tickets pile up unassigned, hive-authored stories get routed to runtimes that can't run
+them, and a single overloaded runtime collapses throughput to zero. Auriga is that decision layer.
 
-- `src/router/` — the **auto-router**: the running decide+assign layer that
-  self-drains the Multica board by routing unassigned todos to Pantheon swarm
-  agents. This is the process that runs live on the hive. See
-  `src/router/README.md`.
-- `src/engine/` — the **routing engine** (`auriga/` module recovered from
-  `pantheon-orchestrator`): board-state consumer, adapters (Multica / DB),
-  escalation, cross-instance lock, observability counters, verifier pool. Lives
-  on the `feat/routing-engine` branch until integrated with the router.
+It runs as a standalone service (its own repo, its own process) so the routing policy — lane maps,
+capability rules, capacity caps, human-vs-agent filtering — can evolve, be tested, and be swapped
+independently of the agents it dispatches to. Auriga only ever **assigns** and **re-runs** work and
+advances issue status from verifiable board facts; it never deletes or cancels. The routing decisions
+themselves are pure, deterministic, and unit-tested against mocked board state.
 
-## Role
+## Architecture
 
-Auriga = the PM/router of the Pantheon pipeline: it senses board state and
-routes/dispatches work to the right lane and agents.
+```mermaid
+flowchart TB
+    subgraph board["Multica board (substrate)"]
+        todos["unassigned todos"]
+        inprog["in_progress"]
+        inrev["in_review"]
+    end
 
-## Job-Hunt Toolkit: Resume Judge
+    subgraph auriga["Auriga router (this repo)"]
+        direction TB
+        scan["scan cycle\n(auriga-router.mjs)"]
+        subgraph core["core.mjs — pure decision logic (unit-tested)"]
+            filt["filter pool\nsmoke/scratch · human-todo · project scope"]
+            hive["isHiveStory?\ncapability detection"]
+            cap["capacity gate\nper-agent · per-runtime · per-cycle caps"]
+            sel["selectAssignments"]
+            sm["state-machine\ncompletions · verified-done · zombies"]
+        end
+        lock["single-instance pidfile lock"]
+    end
 
-The resume judge evaluates a resume against a job description and emits
-dashboard-ready JSON with skill gaps, positioning opportunities, market-cluster
-fit, and ideal-market setup prompts.
+    subgraph lanes["Agent lanes (dispatch targets)"]
+        claudehive["HIVE_LANE\nClaude + plugin-hive\n(execute/review/test)"]
+        codex["Codex / Opencode lanes\n(non-hive stories)"]
+    end
+
+    todos --> scan --> filt --> hive --> cap --> sel
+    inprog --> sm
+    inrev --> sm
+    sel -->|hive story| claudehive
+    sel -->|other| codex
+    sm -->|run done| inrev
+    sm -->|PR merged| board
+    lock -.guards.- scan
+```
+
+**Internally**, each cycle the router: scans the configured Multica projects → recovers zombies
+(stale/failed in-progress issues) → advances issue status from board facts alone (a done run →
+`in_review`; a *merged* PR → `done`) → selects a small batch of unassigned todos → routes each by
+capability and project lane, respecting caps → assigns and verifies a run actually started
+(re-running to force-enqueue if not) → logs → sleeps. A pidfile keeps exactly one router alive.
+
+**In Pantheon**, Auriga sits between the board and the agents. Work is planned upstream (Minerva),
+lands on the Multica board, and Auriga drains it to the swarm.
+
+## How it fits
+
+Auriga is one plugin god bound into the [pantheon-v2](https://github.com/mdostal/pantheon-v2) host —
+every god owns its own repo. It routes work across the
+[Multica](https://github.com/firefly-events/multica) board (the ticket/state substrate) and dispatches
+hive-authored stories to lanes running [plugin-hive](https://firefly-events.github.io/plugin-hive/)
+(the `/hive:execute · review · test` SDLC workflow) — Codex/Opencode lanes have no plugin-hive install,
+so capability-aware routing keeps those stories on Claude+hive lanes.
+
+Sibling gods it works alongside: **Minerva** (planning — produces the stories Auriga routes),
+**Heimdall** (lane gateway / token routing), **Hellsing** (zombie/worker reaping), **Consus**
+(ideation → sign-off), and **Argus** (observability).
+
+## Quickstart
+
+The live router lives in [`src/router/`](src/router/) (Node 24+, no dependencies):
 
 ```sh
-npm test
-npm run build
-node src/tools/resume-judge.ts --resume ./resume.md --job ./job.md --profile ./APPLICATION-KIT.md
+cd src/router
+
+npm test           # run the pure-logic unit suite (node --test)
+
+npm run dry        # one cycle, compute + log decisions, assign NOTHING (--once --dry-run)
+npm run once       # one real cycle then exit (--once)
+
+# supervised: keep exactly ONE detached router alive, restart on death
+nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
 ```
 
-`--profile` is optional. Use it for a canonical proof bank or positioning file
-when one exists; the judge only derives ideal-market recommendations from the
-resume/profile text provided at runtime.
+Flags on `auriga-router.mjs`: `--once`, `--dry-run`, `--max-assign N`, `--no-zombie`.
+Env overrides: `AURIGA_PER_CYCLE_TOTAL`, `AURIGA_PER_CYCLE_PER_AGENT`, `AURIGA_CYCLE_MS`,
+`AURIGA_PIDFILE`, `AURIGA_LOG`. Lane maps, agent IDs, and caps live in
+[`src/router/lib/config.mjs`](src/router/lib/config.mjs). See
+[`src/router/README.md`](src/router/README.md) for state-machine and human-queue details.
 
-The JSON output shape is:
+## Status
 
-```json
-{
-  "summary": {
-    "fit_score": 0,
-    "matched_required_skills": 0,
-    "total_required_skills": 0,
-    "strongest_market_cluster": null
-  },
-  "skill_gaps": [],
-  "positioning_opportunities": [],
-  "market_clusters": [],
-  "ideal_market_profile": {
-    "strongest_clusters": [],
-    "differentiators": [],
-    "target_role_keywords": [],
-    "setup_questions": []
-  }
-}
-```
+**WIP — live on the hive.** The `src/router/` auto-router runs live, draining the aligned Multica
+projects with 26 passing unit tests; capability-aware routing and pure-code state-machine transitions
+are merged on `main`. The richer TypeScript routing **engine** (board-state consumer, adapters,
+escalation, verifier pool) lives on the `feat/routing-engine` branch and is not yet integrated with
+the running router. See [VISION.md](VISION.md) for the trajectory and where to jump in.
 
-## Content File Repository
-
-Draft content persistence uses `FileRepository` from `src/repository`. Each
-content item is stored as a separate JSON document under:
-
-```text
-.content/
-`-- content/
-    `-- {id}.json
-```
-
-The repository writes files atomically by writing a temporary file in the same
-directory and then renaming it into place. Content IDs are limited to
-filesystem-safe letters, numbers, dots, underscores, and hyphens.
+> Note: `mdostal/pantheon-orchestrator` is **LEGACY** — Auriga code that used to live there has been
+> moved into this repo.
