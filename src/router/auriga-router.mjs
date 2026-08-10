@@ -21,6 +21,7 @@ import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import * as mca from './lib/multica.mjs';
 import { probeClaudeAuth } from './lib/claude-auth-status.mjs';
+import { runCompletionHook } from '../auriga/hooks.ts';
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -189,7 +190,36 @@ async function cycle() {
   for (const v of verified) {
     log('advance', { identifier: v.identifier, to: 'done', reason: v.reason, applied: !DRY });
     if (!DRY) {
-      try { mca.issueStatus(v.identifier, 'done'); } catch (e) { log('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+      try {
+        mca.issueStatus(v.identifier, 'done');
+      } catch (e) {
+        log('advance_error', { identifier: v.identifier, to: 'done', error: e.message });
+        continue;
+      }
+
+      try {
+        const result = runCompletionHook(
+          {
+            id: v.issueId,
+            identifier: v.identifier,
+            title: v.title,
+            status: 'done',
+            project_id: v.projectId,
+            parent_issue_id: v.parentIssueId,
+          },
+          {
+            getIssue: mca.getIssue,
+            listChildren: mca.issueChildren,
+            listProjectIssues: mca.listIssues,
+            createIssue: mca.createIssue,
+            setIssueMetadata: mca.setIssueMetadata,
+          },
+          cfg.PROJECT_NAMES,
+        );
+        log('completion_hook', { identifier: v.identifier, ...result });
+      } catch (e) {
+        log('completion_hook_error', { identifier: v.identifier, error: e.message });
+      }
     }
   }
 

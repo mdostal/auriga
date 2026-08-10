@@ -1,0 +1,96 @@
+id: s2-routing-strategy
+epic: auriga-slice-2-multi-model-routing
+title: Implement model selection routing strategy
+status: pending
+complexity: high
+methodology: classic
+
+description: |
+  Build the routing strategy layer that decides which model backend to use for
+  each task. This is the decision engine that maps task characteristics (type,
+  complexity, lane) to model selection, with fallback chains for reliability.
+
+acceptance_criteria:
+  - "Given a task with type=code-generation, when selecting model, then prefer Codex over Claude"
+  - "Given a task with type=reasoning, when selecting model, then prefer Claude Opus over Gemini"
+  - "Given primary model unavailable (health check fails), when selecting, then use next in fallback chain"
+  - "Given lane override MODEL=gemini, when selecting, then use Gemini regardless of task type"
+  - "Given all models in chain unavailable, when selecting, then throw NoAvailableModelError"
+
+steps:
+  - id: research
+    description: Review existing router selection logic in src/router/lib/core.mjs
+    agent: researcher
+  - id: implement
+    description: Create src/router/lib/model-selection.mjs with strategy rules and fallback logic
+    agent: developer
+    depends_on: [research, s2-model-registry]
+  - id: test
+    description: Write tests covering task type routing, lane overrides, fallback chains, all-down scenario
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review routing strategy correctness and fallback behavior
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: JavaScript (mjs)
+    runtime: Node.js
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: Existing router selection logic to extend with model selection
+    - path: src/router/lib/config.mjs
+      purpose: Configuration surface for model preferences and fallback chains
+    - path: src/auriga/model-registry.ts
+      purpose: Model capability metadata for routing decisions
+
+files_to_modify:
+  - file: src/router/lib/model-selection.mjs
+    change: Create new module with selectModel() function implementing routing strategy
+  - file: src/router/lib/config.mjs
+    change: Add MODEL_PREFERENCES and MODEL_FALLBACK_CHAINS configuration
+
+code_examples:
+  - title: Selection logic structure
+    snippet: |
+      // model-selection.mjs exports this function
+      export function selectModel(task, laneOverride, modelRegistry) {
+        // 1. Lane override wins
+        if (laneOverride) return validateModel(laneOverride);
+
+        // 2. Task type affinity
+        const preferred = getPreferredModel(task.type);
+        if (modelRegistry.isAvailable(preferred)) return preferred;
+
+        // 3. Fallback chain
+        const chain = FALLBACK_CHAINS[preferred];
+        for (const fallback of chain) {
+          if (modelRegistry.isAvailable(fallback)) return fallback;
+        }
+
+        throw new NoAvailableModelError();
+      }
+
+design_decisions:
+  - decision: Lane overrides take precedence over task type affinity
+    rationale: Explicit operator intent should override heuristics
+  - decision: Fallback chain is linear (not parallel best-of-N)
+    rationale: Simpler, deterministic, lower cost than parallel dispatch
+  - decision: Health checks cached for 60s per model
+    rationale: Balance freshness vs overhead of constant health pings
+
+risks:
+  - severity: medium
+    description: Incorrect task type classification may route to suboptimal model
+    mitigation: Log all routing decisions for post-hoc analysis, tune affinity rules based on metrics
+
+depends_on: [s2-model-registry]
+
+parallel_allowed: false
