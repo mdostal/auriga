@@ -1238,16 +1238,46 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
   return actions;
 }
 
+// Select this cycle's assigned-idle recoveries — oldest-idle-first, bounded by
+// the SAME capacity math as fresh routing (per-agent maxInflight, per-runtime
+// cap, blocked/rate-limited runtimes) instead of a flat 1-per-agent throttle.
+// A flat cap of 1 is what turned this into a dead-zone: an agent with
+// maxInflight 3 and ten stuck items only ever recovered one per cycle,
+// indistinguishable from "nothing is happening."
+//
+// Returns { selected, skipped } — every non-selected action carries a
+// skipReason ('rate-limited' | 'at-capacity' | 'per-cycle-cap') so a stuck
+// item's cause is visible in the scan log instead of just its raw count.
 export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
-  const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.assignedIdlePerAgent ?? 1;
-  const perAgent = {};
+  const agents = opts.agents || cfg.AGENTS;
+  const agentNameById = opts.agentNameById || Object.fromEntries(
+    Object.entries(agents).map(([name, a]) => [a.id, name])
+  );
+  const blockedRuntimes = opts.blockedRuntimes || new Set();
+  const inflight = opts.inflight || {};
+  const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
+  const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
+  const projected = { perAgent: {}, perRuntime: {} };
+
   const selected = [];
+  const skipped = [];
   for (const action of [...actions].sort((a, b) => b.idleAgeMs - a.idleAgeMs)) {
-    if (selected.length >= maxTotal) break;
-    if ((perAgent[action.assigneeId] || 0) >= maxPerAgent) continue;
-    perAgent[action.assigneeId] = (perAgent[action.assigneeId] || 0) + 1;
-    selected.push(action);
+    const name = agentNameById[action.assigneeId];
+    const agent = name && agents[name];
+    if (!agent) { skipped.push({ ...action, skipReason: 'unknown-agent' }); continue; }
+    if (selected.length >= maxTotal) { skipped.push({ ...action, agent: name, skipReason: 'per-cycle-cap' }); continue; }
+    if (blockedRuntimes.has(agent.runtime)) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'rate-limited' });
+      continue;
+    }
+    if (!agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected)) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'at-capacity' });
+      continue;
+    }
+    projected.perAgent[name] = (projected.perAgent[name] || 0) + 1;
+    projected.perRuntime[agent.runtime] = (projected.perRuntime[agent.runtime] || 0) + 1;
+    selected.push({ ...action, agent: name, runtime: agent.runtime });
   }
-  return selected;
+  return { selected, skipped };
 }
