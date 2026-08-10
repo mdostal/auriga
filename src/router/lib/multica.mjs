@@ -211,13 +211,9 @@ export function postComment(identifier, body) {
   }
 }
 
-// ---- PAN-7492: agent list + start-issue helpers ----
+// ---- PAN-7492: agent list helper ----
 
 export function listAgents() {
   const res = run(['agent', 'list', '--output', 'json']);
   return Array.isArray(res) ? res : [];
-}
-
-export function startIssue(identifier) {
-  return run(['issue', 'status', identifier, 'in_progress', '--output', 'json']);
 }

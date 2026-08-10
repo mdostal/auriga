@@ -111,14 +111,25 @@ async function cycle() {
   const allAgentIds = core.agentIdSet(allAgents);
   const agentNameById = Object.fromEntries(Object.entries(allAgents).map(([name, a]) => [a.id, name]));
   let workspaceTodoIssues = [];
+  let workspaceInProgressIssues = [];
   try {
     workspaceTodoIssues = mca.listAllWorkspaceIssues('todo');
   } catch (e) {
-    log('assigned_idle_list_error', { error: e.message });
+    log('assigned_idle_list_error', { error: e.message, phase: 'todo' });
+  }
+  try {
+    workspaceInProgressIssues = mca.listAllWorkspaceIssues('in_progress');
+  } catch (e) {
+    log('assigned_idle_list_error', { error: e.message, phase: 'in_progress' });
   }
   const reviewIssues = mca.listAllIssues(cfg.REVIEW_PROJECT_IDS || cfg.PROJECT_IDS);
   const inflight = core.computeInflight(issues, cfg.AGENTS);
   const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
+  // Workspace-wide inflight (all live agents, not just the aligned-lane subset
+  // in cfg.AGENTS) — the self-heal pass below recovers stuck work for every
+  // agent on the board, so its capacity math must see every agent's real load.
+  const workspaceInflight = core.computeInflight(workspaceInProgressIssues, allAgents);
+  const workspaceRuntimeInflight = core.computeRuntimeInflight(workspaceInflight, allAgents);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
@@ -132,45 +143,58 @@ async function cycle() {
     inflight,
     runtimeInflight,
     assignedQueued,
+    assignedQueuedAll,
   });
 
-  // ---- assigned-todo self-heal (PAN-7492) ----
+  // ---- assigned-todo self-heal (PAN-7492 / PAN-8244) ----
   const assignedTodoIssues = workspaceTodoIssues
     .filter((i) => i.assignee_id && allAgentIds.has(i.assignee_id))
     .filter((i) => !core.isSmokeScratch(i.title))
     .filter((i) => !core.isHumanTodo(i, cfg));
   const assignedRuns = {};
   for (const i of assignedTodoIssues) assignedRuns[i.identifier] = mca.issueRuns(i.identifier);
-  const assignedIdle = core.limitAssignedIdleRecoveries(
+  const { selected: assignedIdle, skipped: assignedIdleSkipped } = core.limitAssignedIdleRecoveries(
     core.detectAssignedIdle(assignedTodoIssues, assignedRuns, cfg, allAgentIds, now),
     cfg,
-    { maxTotal: Math.min(cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)) }
+    {
+      agents: allAgents,
+      agentNameById,
+      inflight: workspaceInflight,
+      runtimeInflight: workspaceRuntimeInflight,
+      runtimeCap: cfg.RUNTIME_CAP,
+      blockedRuntimes,
+      maxTotal: Math.min(cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)),
+    }
   );
+  // Every non-recovered item carries a skipReason (rate-limited / at-capacity /
+  // per-cycle-cap) so a stuck assignedQueued count is explainable, not just a
+  // number that never moves.
+  for (const s of assignedIdleSkipped) {
+    log('assigned_idle_skip', { identifier: s.identifier, agent: s.agent || agentNameById[s.assigneeId] || s.assigneeId, runtime: s.runtime, skipReason: s.skipReason, idleAgeMs: s.idleAgeMs });
+  }
   for (const a of assignedIdle) {
     if (assignedThisProcess >= MAX_ASSIGN) break;
-    const agent = agentNameById[a.assigneeId] || a.assigneeId;
-    log('assigned_idle', { ...a, agent, applied: !DRY });
+    log('assigned_idle', { ...a, applied: !DRY });
     if (DRY) continue;
+    // `issue rerun` is the documented, deterministic way to re-enqueue an
+    // issue's current agent assignment — unlike flipping status to
+    // in_progress (which only enqueues on a backlog -> non-backlog
+    // transition server-side and is a no-op from todo), this always fires.
     try {
-      mca.startIssue(a.identifier);
+      mca.rerunIssue(a.identifier);
       assignedThisProcess++;
     } catch (e) {
-      log('assigned_idle_start_error', { identifier: a.identifier, agent, error: e.message });
+      log('assigned_idle_rerun_error', { identifier: a.identifier, agent: a.agent, error: e.message });
       continue;
     }
     await sleep(cfg.CAPS.verifyDelayMs);
     const runs = mca.issueRuns(a.identifier);
-    const started = runs.length > 0 && runs.some((r) => {
-      const c = core.classifyRun(r, Date.now());
-      return c.active || c.done || c.failed;
-    });
-    if (!started) {
-      log('assigned_idle_verify_no_run', { identifier: a.identifier, agent, action: 'rerun' });
-      try { mca.rerunIssue(a.identifier); } catch (e) { log('assigned_idle_rerun_error', { identifier: a.identifier, error: e.message }); }
+    const lr = core.latestRun(runs);
+    const c = lr ? core.classifyRun(lr, Date.now()) : null;
+    if (c && (c.active || c.done || c.failed)) {
+      log('assigned_idle_verify_ok', { identifier: a.identifier, agent: a.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     } else {
-      const lr = core.latestRun(runs);
-      const c = lr ? core.classifyRun(lr, Date.now()) : {};
-      log('assigned_idle_verify_ok', { identifier: a.identifier, agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+      log('assigned_idle_verify_no_run', { identifier: a.identifier, agent: a.agent });
     }
   }
 

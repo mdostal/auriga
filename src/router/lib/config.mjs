@@ -146,8 +146,7 @@ export const CAPS = {
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
   assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
-  assignedIdlePerCycle: 5,
-  assignedIdlePerAgent: 1,
+  assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
   verifyDelayMs: 6000, // wait after assign before checking a run started
   perCycleReview: 1, // at most one verify-squad dispatch per cycle
 };
