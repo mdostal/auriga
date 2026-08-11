@@ -100,6 +100,16 @@ export function listAllProjects() {
   return Array.isArray(res) ? res : [];
 }
 
+export function listAutopilots() {
+  const res = run(['autopilot', 'list', '--output', 'json']);
+  return (res && res.autopilots) || [];
+}
+
+export function autopilotRuns(identifier) {
+  const res = run(['autopilot', 'runs', identifier, '--output', 'json']);
+  return (res && res.runs) || [];
+}
+
 export function listAllIssues(projectIds) {
   const all = [];
   for (const p of projectIds) {

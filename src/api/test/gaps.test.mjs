@@ -24,10 +24,12 @@ const ISSUES = [
   { identifier: 'B-1', project_id: 'B', assignee_id: null, status: 'todo', title: 'missing target_repo entirely', description: 'just prose, no target_repo line', metadata: {} },
 ];
 
-function fakeMca({ projects = PROJECTS, issues = ISSUES } = {}) {
+function fakeMca({ projects = PROJECTS, issues = ISSUES, autopilots = [], runsByAutopilot = {} } = {}) {
   return {
     listAllProjects: () => projects,
     listAllIssues: () => issues,
+    listAutopilots: () => autopilots,
+    autopilotRuns: (id) => runsByAutopilot[id] || [],
   };
 }
 
@@ -71,6 +73,86 @@ test('GET /api/gaps reports idle lanes (no inflight, no queued)', async () => {
     const body = await res.json();
     // agent-a has an in_progress issue (inflight); agent-b has none at all.
     assert.deepEqual(body.idle_lanes, ['agent-b']);
+  });
+});
+
+test('GET /api/gaps reports paused scheduled autopilots with last-run diagnostics', async () => {
+  const app = express();
+  app.use(createGapsRouter(CFG, fakeMca({
+    autopilots: [
+      {
+        id: 'ap-swarm',
+        title: 'swarm-nurse self-heal',
+        status: 'paused',
+        trigger_kinds: ['schedule'],
+        last_run_at: '2026-08-11T15:00:00.000Z',
+        last_run_status: 'failed',
+        next_run_at: '2026-08-11T15:20:00.000Z',
+      },
+      {
+        id: 'ap-active',
+        title: 'healthy schedule',
+        status: 'active',
+        trigger_kinds: ['schedule'],
+        last_run_at: '2026-08-11T15:55:00.000Z',
+        last_run_status: 'completed',
+        next_run_at: '2026-08-11T16:20:00.000Z',
+      },
+    ],
+    runsByAutopilot: {
+      'ap-swarm': [
+        {
+          id: 'run-1',
+          status: 'failed',
+          triggered_at: '2026-08-11T15:00:00.000Z',
+          failure_reason: 'OAuth session expired',
+        },
+      ],
+    },
+  }), core, { now: () => Date.parse('2026-08-11T16:00:00.000Z') }));
+  await withServer(app, async (base) => {
+    const res = await fetch(`${base}/api/gaps`);
+    const body = await res.json();
+    assert.equal(body.autopilot_scheduler_gaps.length, 1);
+    assert.deepEqual(body.autopilot_scheduler_gaps[0], {
+      id: 'ap-swarm',
+      title: 'swarm-nurse self-heal',
+      status: 'paused',
+      reason: 'paused',
+      last_run_at: '2026-08-11T15:00:00.000Z',
+      last_run_status: 'failed',
+      last_run_age_ms: 60 * 60 * 1000,
+      next_run_at: '2026-08-11T15:20:00.000Z',
+      overdue_ms: 40 * 60 * 1000,
+      failure_reason: 'OAuth session expired',
+    });
+  });
+});
+
+test('GET /api/gaps reports active scheduled autopilots whose next run is overdue', async () => {
+  const app = express();
+  app.use(createGapsRouter(CFG, fakeMca({
+    autopilots: [
+      {
+        id: 'ap-overdue',
+        title: 'overdue active schedule',
+        status: 'active',
+        trigger_kinds: ['schedule'],
+        last_run_at: '2026-08-11T15:00:00.000Z',
+        last_run_status: 'completed',
+        next_run_at: '2026-08-11T15:55:00.000Z',
+      },
+    ],
+  }), core, {
+    now: () => Date.parse('2026-08-11T16:00:00.000Z'),
+    schedulerGapGraceMs: 2 * 60 * 1000,
+  }));
+  await withServer(app, async (base) => {
+    const res = await fetch(`${base}/api/gaps`);
+    const body = await res.json();
+    assert.equal(body.autopilot_scheduler_gaps.length, 1);
+    assert.equal(body.autopilot_scheduler_gaps[0].reason, 'overdue');
+    assert.equal(body.autopilot_scheduler_gaps[0].overdue_ms, 5 * 60 * 1000);
   });
 });
 
