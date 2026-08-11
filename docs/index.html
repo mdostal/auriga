@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Auriga — the router god of Pantheon</title>
+<meta name="description" content="Auriga senses Multica board state and dispatches each unit of work to the right lane and agent — the PM/router of the Pantheon SDLC pipeline." />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23f5a623%22/></svg>" />
+<link rel="stylesheet" href="assets/pantheon-theme.css" />
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap">
+    <div class="brand"><span class="mark"></span> AURIGA</div>
+    <nav class="links">
+      <a href="#what">What</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#pantheon">Pantheon</a>
+      <a href="#quickstart">Quickstart</a>
+      <a href="#support">Support</a>
+    </nav>
+    <a class="btn btn-ghost" href="https://github.com/mdostal/auriga">GitHub</a>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap">
+    <span class="eyebrow">Pantheon &middot; router god</span>
+    <h1>Auriga routes the swarm.</h1>
+    <p class="lead">
+      A swarm of agents building software needs one thing deciding <em>who</em> does <em>what</em>
+      and <em>when</em>. Auriga senses Multica board state and dispatches each unit of work to the
+      right lane and agent — pure, deterministic, unit-tested decisions; zero destructive actions.
+    </p>
+    <div class="ctas">
+      <a class="btn btn-primary" href="#quickstart">Get started</a>
+      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga">View on GitHub</a>
+    </div>
+    <div style="margin-top:28px;">
+      <span class="status-badge"><span class="status-dot"></span> WIP — live on the hive, 26+ passing unit tests</span>
+    </div>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <div class="kicker">What &amp; why</div>
+    <h2>The decision layer between the board and the swarm</h2>
+    <p class="intro">
+      Without a router, tickets pile up unassigned, hive-authored stories get routed to runtimes
+      that can't run them, and a single overloaded runtime collapses throughput to zero. Auriga
+      runs as a standalone service — its own repo, its own process — so routing policy can evolve,
+      be tested, and be swapped independently of the agents it dispatches to.
+    </p>
+    <div class="grid grid-3">
+      <div class="card">
+        <h3>Capability-aware</h3>
+        <p>Detects hive-authored stories (by label or the methodology/steps shape Minerva emits) and forces them onto Claude+plugin-hive lanes — Codex/Opencode lanes can't run them.</p>
+      </div>
+      <div class="card">
+        <h3>Capacity-disciplined</h3>
+        <p>Per-agent, per-runtime, and per-cycle caps mean the router never mass-flips the board or collapses a shared runtime under contention.</p>
+      </div>
+      <div class="card">
+        <h3>Safe by construction</h3>
+        <p>Only ever assigns and re-runs; never deletes or cancels. Board-fact-driven state transitions — a run finishing is never confused with a PR merging.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="kicker">Architecture</div>
+    <h2>Scan → decide → dispatch</h2>
+    <p class="intro">
+      Every cycle: scan configured Multica projects → recover zombies → advance issue status from
+      board facts alone → size and fire a review squad for anything in review → select a small
+      batch of unassigned todos → route by capability and project lane → assign and verify → log →
+      sleep. See <a href="https://github.com/mdostal/auriga/blob/main/docs/ARCHITECTURE.md">docs/ARCHITECTURE.md</a>
+      for the full breakdown.
+    </p>
+    <div class="diagram">
+      <pre class="mermaid">
+flowchart TB
+    subgraph board["Multica board (substrate)"]
+        todos["unassigned todos"]
+        inprog["in_progress"]
+        inrev["in_review / open PR"]
+    end
+    subgraph auriga["Auriga router"]
+        direction TB
+        scan["scan cycle"]
+        subgraph core["core.mjs — pure decision logic"]
+            filt["filter pool"]
+            hive["isHiveStory?"]
+            cap["capacity gate"]
+            sel["selectAssignments"]
+            sm["state-machine"]
+        end
+    end
+    subgraph lanes["Dispatch targets"]
+        claudehive["HIVE_LANE — Claude + plugin-hive"]
+        codex["Codex / Opencode lanes"]
+    end
+    todos --> scan --> filt --> hive --> cap --> sel
+    inprog --> sm
+    inrev --> sm
+    sel -->|hive story| claudehive
+    sel -->|other| codex
+    sm -->|run done| inrev
+    sm -->|PR merged| board
+      </pre>
+    </div>
+  </div>
+</section>
+
+<section id="pantheon">
+  <div class="wrap">
+    <div class="kicker">Role in Pantheon</div>
+    <h2>One god among many</h2>
+    <p class="intro">
+      Auriga is one plugin god bound into the <a href="https://github.com/mdostal/pantheon-v2">pantheon-v2</a>
+      host — every god owns its own repo. It routes work across the
+      <a href="https://github.com/firefly-events/multica">Multica</a> board and dispatches
+      hive-authored stories to lanes running
+      <a href="https://firefly-events.github.io/plugin-hive/">plugin-hive</a>.
+    </p>
+    <div class="pantheon-family">
+      <span>Minerva — planning</span>
+      <span>Heimdall — lane gateway / token routing</span>
+      <span>Hellsing — zombie/worker reaping</span>
+      <span>Consus — ideation → sign-off</span>
+      <span>Argus — observability</span>
+    </div>
+  </div>
+</section>
+
+<section id="quickstart">
+  <div class="wrap">
+    <div class="kicker">Quickstart</div>
+    <h2>Run it locally</h2>
+    <p class="intro">The live router lives in <code class="inline">src/router/</code> (Node 24+, no dependencies).</p>
+    <pre><code>git clone git@github.com:mdostal/auriga.git
+cd auriga/src/router
+
+npm test           # run the pure-logic unit suite (node --test)
+
+npm run dry        # one cycle, compute + log decisions, assign NOTHING
+npm run once       # one real cycle then exit
+
+# supervised: keep exactly ONE detached router alive, restart on death
+nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &</code></pre>
+    <p class="intro" style="margin-top:20px;">
+      Full docs: <a href="https://github.com/mdostal/auriga#readme">README</a> ·
+      <a href="https://github.com/mdostal/auriga/blob/main/docs/ARCHITECTURE.md">Architecture</a> ·
+      <a href="https://github.com/mdostal/auriga/blob/main/docs/VISION.md">Vision</a>
+    </p>
+  </div>
+</section>
+
+<section id="support">
+  <div class="wrap">
+    <div class="kicker">Open source</div>
+    <h2>MIT licensed, contributions welcome</h2>
+    <p class="intro">
+      Auriga is open source under the <a href="https://github.com/mdostal/auriga/blob/main/LICENSE">MIT license</a>.
+      Read <a href="https://github.com/mdostal/auriga/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>
+      for the dev loop and good-first-contribution ideas. If Auriga is useful to you, consider
+      supporting the project via the Sponsor / Buy Me a Coffee links on the repo.
+    </p>
+    <div class="ctas" style="justify-content:flex-start;">
+      <a class="btn btn-primary" href="https://github.com/mdostal/auriga">Star on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/sponsors/mdostal">Sponsor</a>
+      <a class="btn btn-ghost" href="https://www.buymeacoffee.com/mdostal">Buy me a coffee</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>Auriga — part of <a href="https://github.com/mdostal/pantheon-v2">Pantheon</a>.</div>
+    <div><a href="https://github.com/mdostal/auriga">GitHub</a> &middot; <a href="https://github.com/mdostal/auriga/blob/main/LICENSE">MIT License</a></div>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: "dark",
+    themeVariables: {
+      background: "#171b25",
+      primaryColor: "#1c2130",
+      primaryTextColor: "#e8e8ec",
+      primaryBorderColor: "#f5a623",
+      lineColor: "#666d80",
+      secondaryColor: "#14171f",
+      tertiaryColor: "#14171f"
+    }
+  });
+</script>
+</body>
+</html>
