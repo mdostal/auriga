@@ -256,6 +256,7 @@ export function computeRuntimeInflight(inflight, agents) {
 export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
   const a = agents[name];
   if (!a) return false;
+  if (a.available === false) return false;
   const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
   if (agentNow >= a.maxInflight) return false;
   const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
@@ -545,6 +546,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
       identifier: i.identifier,
       issueId: i.id,
       projectId: i.project_id,
+      assigneeId: i.assignee_id || null,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
       isHive,
@@ -701,6 +703,7 @@ export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
   const eligible = lane.filter((name) => {
     const a = cfg.AGENTS[name];
     if (!a) return false;
+    if (a.available === false) return false;
     const now = (reviewInflight[name] || 0) + (projected[name] || 0);
     return now < a.maxInflight;
   });
@@ -1267,6 +1270,10 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
     const name = agentNameById[action.assigneeId];
     const agent = name && agents[name];
     if (!agent) { skipped.push({ ...action, skipReason: 'unknown-agent' }); continue; }
+    if (agent.available === false) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, runtimeId: agent.runtimeId, skipReason: 'runtime-offline' });
+      continue;
+    }
     if (selected.length >= maxTotal) { skipped.push({ ...action, agent: name, skipReason: 'per-cycle-cap' }); continue; }
     if (blockedRuntimes.has(agent.runtime)) {
       skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'rate-limited' });
