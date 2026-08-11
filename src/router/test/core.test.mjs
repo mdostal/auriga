@@ -122,6 +122,14 @@ test('agentHasCapacity respects per-agent AND per-runtime caps', () => {
   assert.equal(core.agentHasCapacity('heimdall-dev', CFG.AGENTS, CFG.RUNTIME_CAP, {}, {}, empty), true);
 });
 
+test('agentHasCapacity refuses a runtime-unavailable agent', () => {
+  const agents = {
+    ...CFG.AGENTS,
+    'auriga-dev': { ...CFG.AGENTS['auriga-dev'], available: false, runtimeId: 'offline-runtime' },
+  };
+  assert.equal(core.agentHasCapacity('auriga-dev', agents, CFG.RUNTIME_CAP, {}, {}, { perAgent: {}, perRuntime: {} }), false);
+});
+
 test('routing: aligned lanes go to their agent; Consus to claude', () => {
   const issues = [story('c1', 'CONSUS', 1, 'EPIC1'), story('a1', 'AURIGA', 2, 'EPIC1'), story('m1', 'MINERVA', 3, 'EPIC1')];
   const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
@@ -254,6 +262,7 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
   assert.equal(byId['z1'], 'assign');
   assert.equal(byId['z2'], 'rerun');
   assert.equal(byId['z3'], undefined); // healthy, active run
+  assert.equal(z.find((a) => a.identifier === 'z2').assigneeId, 'A');
 });
 
 test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
@@ -554,6 +563,19 @@ test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', (
   // Lane already full (one review in flight) -> nothing new dispatched.
   const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW, openPrIds: new Set(['PAN-5']) });
   assert.equal(full.length, 0);
+});
+
+test('selectReviewDispatch: does not dispatch to an offline review runtime', () => {
+  const cfg = {
+    ...CFG,
+    AGENTS: {
+      ...CFG.AGENTS,
+      'auriga-review': { ...CFG.AGENTS['auriga-review'], available: false, runtimeId: 'offline-review-runtime' },
+    },
+  };
+  const i = inReview('PAN-RV-OFF', 9);
+  const picks = core.selectReviewDispatch([i], { 'PAN-RV-OFF': [] }, cfg, {}, { now: NOW, openPrIds: new Set(['PAN-RV-OFF']) });
+  assert.deepEqual(picks, []);
 });
 
 test('computeReviewInflight: counts in_review issues held by review agents', () => {

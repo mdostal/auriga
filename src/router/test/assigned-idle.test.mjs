@@ -118,6 +118,23 @@ test('AC4: a rate-limited runtime is reported with its own diagnostic reason, di
   assert.equal(result.skipped[0].skipReason, 'rate-limited');
 });
 
+test('AC4a: an offline runtime is reported distinctly from capacity and rate limits', () => {
+  const agents = {
+    ...CFG.AGENTS,
+    'auriga-dev': { ...CFG.AGENTS['auriga-dev'], available: false, runtimeId: 'offline-codex-runtime' },
+  };
+  const issues = [assignedTodo('PAN-1', 'A')];
+  const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(agents), NOW);
+  const result = core.limitAssignedIdleRecoveries(actions, CFG, {
+    agents,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(result.selected.length, 0);
+  assert.equal(result.skipped[0].skipReason, 'runtime-offline');
+  assert.equal(result.skipped[0].runtimeId, 'offline-codex-runtime');
+});
+
 test('AC4b: an item still within the stale window is a genuine queue, not a stuck dead-zone', () => {
   const issues = [assignedTodo('PAN-1', 'A', NOW - 30 * 1000)]; // 30s old, staleMs is 10min
   const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);

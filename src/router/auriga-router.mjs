@@ -43,21 +43,57 @@ if (process.env.AURIGA_CYCLE_MS) cfg.CAPS.cycleMs = parseInt(process.env.AURIGA_
 
 let assignedThisProcess = 0;
 
-function liveAgentMap() {
-  const agents = { ...cfg.AGENTS };
+function runtimeHealth() {
+  try {
+    const runtimes = mca.listRuntimes();
+    const offline = runtimes.filter((r) => r && r.status !== 'online');
+    return {
+      runtimes,
+      offlineRuntimeIds: new Set(offline.map((r) => r.id).filter(Boolean)),
+      offline,
+    };
+  } catch (e) {
+    log('runtime_list_error', { error: e.message });
+    return { runtimes: [], offlineRuntimeIds: new Set(), offline: [] };
+  }
+}
+
+function liveAgentMap(offlineRuntimeIds = new Set()) {
+  const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, a]) => [name, { ...a }]));
   try {
     for (const a of mca.listAgents()) {
       if (!a.id || !a.name) continue;
+      const configured = agents[a.name];
+      const runtimeId = a.runtime_id || configured?.runtimeId || null;
+      const offline = runtimeId && offlineRuntimeIds.has(runtimeId);
       agents[a.name] = {
         id: a.id,
-        runtime: a.runtime_id || agents[a.name]?.runtime || 'unknown',
-        maxInflight: a.max_concurrent_tasks || agents[a.name]?.maxInflight || 1,
+        runtime: configured?.runtime || a.provider || runtimeId || 'unknown',
+        runtimeId,
+        runtimeStatus: offline ? 'offline' : 'online',
+        available: !offline,
+        maxInflight: a.max_concurrent_tasks || configured?.maxInflight || 1,
+        repo: configured?.repo ?? null,
       };
     }
   } catch (e) {
     log('agent_list_error', { error: e.message });
   }
   return agents;
+}
+
+function dispatchConfig(agents) {
+  const effectiveAgents = {};
+  for (const [name, a] of Object.entries(cfg.AGENTS)) {
+    effectiveAgents[name] = { ...a };
+    if (agents[name]) {
+      effectiveAgents[name].runtimeId = agents[name].runtimeId;
+      effectiveAgents[name].runtimeStatus = agents[name].runtimeStatus;
+      effectiveAgents[name].available = agents[name].available;
+      effectiveAgents[name].maxInflight = agents[name].maxInflight || a.maxInflight;
+    }
+  }
+  return { ...cfg, AGENTS: effectiveAgents };
 }
 
 // ---- single-instance guard -------------------------------------------------
@@ -89,8 +125,11 @@ function log(event, data) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const runtimeForAgentId = (agentId) =>
-  Object.values(cfg.AGENTS).find((a) => a.id === agentId)?.runtime || null;
+const agentForAgentId = (agentId, agents = cfg.AGENTS) =>
+  Object.values(agents).find((a) => a.id === agentId) || null;
+
+const runtimeForAgentId = (agentId, agents = cfg.AGENTS) =>
+  agentForAgentId(agentId, agents)?.runtime || null;
 
 function stampAssignment(identifier, agent, fingerprint) {
   if (!fingerprint) return;
@@ -106,6 +145,18 @@ function stampAssignment(identifier, agent, fingerprint) {
 async function cycle() {
   const now = Date.now();
   const blockedRuntimes = new Set();
+  const rtHealth = runtimeHealth();
+  if (rtHealth.offline.length) {
+    log('runtime_offline', {
+      count: rtHealth.offline.length,
+      runtimes: rtHealth.offline.map((r) => ({
+        id: r.id,
+        name: r.name,
+        provider: r.provider,
+        lastSeenAt: r.last_seen_at,
+      })),
+    });
+  }
   if (Object.values(cfg.AGENTS).some((a) => a.runtime === 'claude')) {
     const auth = probeClaudeAuth();
     if (auth.status === 'auth_required') blockedRuntimes.add('claude');
@@ -122,7 +173,8 @@ async function cycle() {
   const discovered = mca.listAllProjectIds();
   const scanIds = [...new Set([...(discovered.length ? discovered : cfg.PROJECT_IDS), ...cfg.PROJECT_IDS])];
   const issues = mca.listAllIssues(scanIds);
-  const allAgents = liveAgentMap();
+  const allAgents = liveAgentMap(rtHealth.offlineRuntimeIds);
+  const routeCfg = dispatchConfig(allAgents);
   const allAgentIds = core.agentIdSet(allAgents);
   const agentNameById = Object.fromEntries(Object.entries(allAgents).map(([name, a]) => [a.id, name]));
   let workspaceTodoIssues = [];
@@ -137,8 +189,8 @@ async function cycle() {
   } catch (e) {
     log('assigned_idle_list_error', { error: e.message, phase: 'in_progress' });
   }
-  const inflight = core.computeInflight(issues, cfg.AGENTS);
-  const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);
+  const inflight = core.computeInflight(issues, routeCfg.AGENTS);
+  const runtimeInflight = core.computeRuntimeInflight(inflight, routeCfg.AGENTS);
   // Workspace-wide inflight (all live agents, not just the aligned-lane subset
   // in cfg.AGENTS) — the self-heal pass below recovers stuck work for every
   // agent on the board, so its capacity math must see every agent's real load.
@@ -147,7 +199,7 @@ async function cycle() {
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
-  const assignedQueued = core.computeAssignedQueued(issues, cfg.AGENTS);
+  const assignedQueued = core.computeAssignedQueued(issues, routeCfg.AGENTS);
   const assignedQueuedAll = core.computeAssignedQueued(workspaceTodoIssues, allAgents);
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
@@ -164,27 +216,27 @@ async function cycle() {
   const assignedTodoIssues = workspaceTodoIssues
     .filter((i) => i.assignee_id && allAgentIds.has(i.assignee_id))
     .filter((i) => !core.isSmokeScratch(i.title))
-    .filter((i) => !core.isHumanTodo(i, cfg));
+    .filter((i) => !core.isHumanTodo(i, routeCfg));
   const assignedRuns = {};
   for (const i of assignedTodoIssues) assignedRuns[i.identifier] = mca.issueRuns(i.identifier);
   const { selected: assignedIdle, skipped: assignedIdleSkipped } = core.limitAssignedIdleRecoveries(
-    core.detectAssignedIdle(assignedTodoIssues, assignedRuns, cfg, allAgentIds, now),
-    cfg,
+    core.detectAssignedIdle(assignedTodoIssues, assignedRuns, routeCfg, allAgentIds, now),
+    routeCfg,
     {
       agents: allAgents,
       agentNameById,
       inflight: workspaceInflight,
       runtimeInflight: workspaceRuntimeInflight,
-      runtimeCap: cfg.RUNTIME_CAP,
+      runtimeCap: routeCfg.RUNTIME_CAP,
       blockedRuntimes,
-      maxTotal: Math.min(cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)),
+      maxTotal: Math.min(routeCfg.CAPS.assignedIdlePerCycle ?? routeCfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)),
     }
   );
   // Every non-recovered item carries a skipReason (rate-limited / at-capacity /
   // per-cycle-cap) so a stuck assignedQueued count is explainable, not just a
   // number that never moves.
   for (const s of assignedIdleSkipped) {
-    log('assigned_idle_skip', { identifier: s.identifier, agent: s.agent || agentNameById[s.assigneeId] || s.assigneeId, runtime: s.runtime, skipReason: s.skipReason, idleAgeMs: s.idleAgeMs });
+    log('assigned_idle_skip', { identifier: s.identifier, agent: s.agent || agentNameById[s.assigneeId] || s.assigneeId, runtime: s.runtime, runtimeId: s.runtimeId, skipReason: s.skipReason, idleAgeMs: s.idleAgeMs });
   }
   for (const a of assignedIdle) {
     if (assignedThisProcess >= MAX_ASSIGN) break;
@@ -268,6 +320,7 @@ async function cycle() {
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
   const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
+  const inProgressByIdentifier = Object.fromEntries(inProgress.map((i) => [i.identifier, i]));
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = mca.issueRuns(i.identifier);
 
@@ -340,10 +393,10 @@ async function cycle() {
         .map((i) => i.id)
     );
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
-    const cascades = core.detectCascadeDispatch(issues, doneIds, statusById, cfg);
+    const cascades = core.detectCascadeDispatch(issues, doneIds, statusById, routeCfg);
     let cascadeFired = 0;
     for (const c of cascades) {
-      if (cascadeFired >= cfg.CAPS.perCycleCascade) break;
+      if (cascadeFired >= routeCfg.CAPS.perCycleCascade) break;
       if (assignedThisProcess >= MAX_ASSIGN) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run OR that
@@ -361,7 +414,7 @@ async function cycle() {
       const lastRun = core.latestRun(runs);
       if (lastRun) {
         const runAgeMs = core.classifyRun(lastRun, nowT).ageMs;
-        const cooldown = cfg.CAPS.redispatchCooldownMs || (15 * 60 * 1000);
+        const cooldown = routeCfg.CAPS.redispatchCooldownMs || (15 * 60 * 1000);
         if (runAgeMs < cooldown) { log('cascade_skip', { identifier: c.identifier, reason: 'recent-run', ageMs: runAgeMs }); continue; }
       }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
@@ -381,11 +434,11 @@ async function cycle() {
         if (c.status === 'blocked') mca.issueStatus(c.identifier, 'todo');
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
-        const agent = core.chooseAgentForProject(c.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
+        const agent = core.chooseAgentForProject(c.projectId, routeCfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
         if (agent) {
           mca.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
-          await sleep(cfg.CAPS.verifyDelayMs);
+          await sleep(routeCfg.CAPS.verifyDelayMs);
         }
         mca.rerunIssue(c.identifier);
         assignedThisProcess++;
@@ -455,8 +508,8 @@ async function cycle() {
     }
   }
 
-  const reviewInflight = core.computeReviewInflight(inReview, cfg);
-  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, cfg, reviewInflight, { now, openPrIds });
+  const reviewInflight = core.computeReviewInflight(inReview, routeCfg);
+  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, routeCfg, reviewInflight, { now, openPrIds });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
@@ -466,7 +519,7 @@ async function cycle() {
     // and runs each enabled perspective, truly verifying. See core.reviewSquadPlan +
     // agents/auriga-review.instructions.md.
     const issueObj = inReviewById.get(r.issueId) || { identifier: r.identifier };
-    const plan = core.reviewSquadPlan(issueObj, cfg);
+    const plan = core.reviewSquadPlan(issueObj, routeCfg);
     log('review', {
       identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason,
       squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !DRY,
@@ -489,7 +542,7 @@ async function cycle() {
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
         mca.assignIssue(r.identifier, r.agent);
-        await sleep(cfg.CAPS.verifyDelayMs);
+        await sleep(routeCfg.CAPS.verifyDelayMs);
       }
       mca.rerunIssue(r.identifier);
       log('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
@@ -503,31 +556,36 @@ async function cycle() {
   // (rerun/assign), so restrict it to the aligned dispatch set (cfg.PROJECT_IDS) —
   // never fire a build run into an unscanned/unaligned project.
   if (!NO_ZOMBIE) {
-    const inProgressDispatch = inProgress.filter((i) => cfg.PROJECT_IDS.includes(i.project_id));
-    const zombies = core.detectZombies(inProgressDispatch, runsByIssue, cfg, now);
+    const inProgressDispatch = inProgress.filter((i) => routeCfg.PROJECT_IDS.includes(i.project_id));
+    const zombies = core.detectZombies(inProgressDispatch, runsByIssue, routeCfg, now);
     for (const z of zombies) {
       if (assignedThisProcess >= MAX_ASSIGN) break;
       if (z.action === 'rerun') {
-        const runtime = runtimeForAgentId(z.assigneeId);
+        const currentAgent = agentForAgentId(z.assigneeId, allAgents);
+        const runtime = currentAgent?.runtime || runtimeForAgentId(z.assigneeId, routeCfg.AGENTS);
+        if (currentAgent?.available === false) {
+          log('zombie_skip', { ...z, runtime, runtimeId: currentAgent.runtimeId, reason: 'runtime-offline' });
+          continue;
+        }
         if (runtime && blockedRuntimes.has(runtime)) {
-          log('zombie_skip', { ...z, runtime, reason: 'runtime-blocked' });
+          log('zombie_skip', { ...z, runtime, runtimeId: currentAgent?.runtimeId, reason: 'runtime-blocked' });
           continue;
         }
         log('zombie', { ...z, applied: !DRY });
         if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = core.chooseAgentForProject(z.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
+        const agent = core.chooseAgentForProject(z.projectId, routeCfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
         if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
-        if (blockedRuntimes.has(cfg.AGENTS[agent].runtime)) {
-          log('zombie_skip', { ...z, agent, runtime: cfg.AGENTS[agent].runtime, reason: 'runtime-blocked' });
+        if (blockedRuntimes.has(routeCfg.AGENTS[agent].runtime)) {
+          log('zombie_skip', { ...z, agent, runtime: routeCfg.AGENTS[agent].runtime, runtimeId: routeCfg.AGENTS[agent].runtimeId, reason: 'runtime-blocked' });
           continue;
         }
         log('zombie', { ...z, agent, applied: !DRY });
         if (!DRY) {
           try {
             mca.assignIssue(z.identifier, agent);
-            stampAssignment(z.identifier, agent, assignmentFingerprint(inProgressByIdentifier[z.identifier] || z, agent, cfg));
+            stampAssignment(z.identifier, agent, assignmentFingerprint(inProgressByIdentifier[z.identifier] || z, agent, routeCfg));
             assignedThisProcess++;
             inflight[agent] = (inflight[agent] || 0) + 1;
           } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); }
@@ -538,10 +596,10 @@ async function cycle() {
 
   // ---- route new todos ----
   const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
-  const picks = core.selectAssignments(issues, cfg, inflight, {
+  const picks = core.selectAssignments(issues, routeCfg, inflight, {
     blockedRuntimes,
     exclude: cascaded,
-    maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
+    maxTotal: Math.min(routeCfg.CAPS.perCycleTotal, remaining || routeCfg.CAPS.perCycleTotal),
   });
 
   for (const p of picks) {
@@ -560,7 +618,7 @@ async function cycle() {
       continue;
     }
     // verify a run started; force-enqueue if not (dead-zone fix)
-    await sleep(cfg.CAPS.verifyDelayMs);
+    await sleep(routeCfg.CAPS.verifyDelayMs);
     const runs = mca.issueRuns(p.identifier);
     const started = runs.length > 0 && runs.some((r) => {
       const c = core.classifyRun(r, Date.now());

@@ -301,3 +301,8 @@ export function listAgents() {
   const res = run(['agent', 'list', '--output', 'json']);
   return Array.isArray(res) ? res : [];
 }
+
+export function listRuntimes() {
+  const res = run(['runtime', 'list', '--output', 'json']);
+  return Array.isArray(res) ? res : [];
+}
