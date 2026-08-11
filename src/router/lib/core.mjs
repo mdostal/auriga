@@ -1186,6 +1186,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
     if (st !== 'todo' && st !== 'blocked') continue;
+    if (i.assignee_id && st === 'todo') continue; // already assigned+queued (inflight)
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue; // agent parked it for a human — never cascade-redispatch (idempotent-dispatch guard)
     if (aligned.size && !aligned.has(i.project_id)) continue;
