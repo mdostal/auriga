@@ -11,11 +11,30 @@
 // See ../README.md for the fuller rationale.
 //
 // GitHub PR-discovery (was lib/multica.mjs's top-level ghOpenPrs/ghListRepos/
-// ghPrs exports) is folded INSIDE getIssuePullRequests as private helpers,
-// per this story's Open Question 1 resolution (design-discussion.md):
-// PR-lookup lives inside backlogAdapter, not a separate vcsAdapter — smaller
-// diff, avoids an undocumented third adapter kind. Nothing outside this file
-// calls ghOpenPrs/ghListRepos/ghPrs anymore.
+// ghPrs exports) is folded INSIDE this adapter as private helpers, per this
+// story's Open Question 1 resolution (design-discussion.md): PR-lookup lives
+// inside backlogAdapter, not a separate vcsAdapter — smaller diff, avoids an
+// undocumented third adapter kind. Nothing outside this file calls
+// ghOpenPrs/ghListRepos/ghPrs directly anymore.
+//
+// TWO PR-discovery surfaces, deliberately different shapes (see each
+// function's own doc comment for the full rationale — found by an
+// independent adversarial review of this epic's p2-router-cutover diff):
+//   - listCandidatePullRequests(): the raw, UNFILTERED board-wide gh scan
+//     (ghListRepos + per-repo ghPrs). auriga-router.mjs's cycle() calls this
+//     ONCE per cycle and reuses the result across every issue, applying
+//     lib/core.mjs's prMatchesStory/prIdentityMatchesStory itself — this is
+//     what the router's own live "does issue X have a matching PR" decisions
+//     use.
+//   - getIssuePullRequests(identifier): a per-identifier lookup (Multica
+//     native linkage + a narrower gh-based prMatchesIdentifier fallback),
+//     kept for the BacklogAdapter typedef contract and for standalone
+//     callers with no board-wide cache available. auriga-router.mjs's own
+//     call sites do NOT use this for matching decisions any more — re-running
+//     its internal full repo scan per issue per call site (no memoization)
+//     was an O(issues x repos) gh-subprocess explosion per cycle, and its
+//     narrower matching silently dropped slug-only-matching PRs before
+//     core.mjs's richer matchers ever ran.
 //
 // Status-enum note (mined from src/engine/adapters/multica/index.ts, commit
 // f4847ee, per research-brief.md §4): Multica's own vocabulary distinguishes
@@ -194,6 +213,20 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // branch name, or body. Deliberately self-contained (does not depend on
   // lib/core.mjs's richer prMatchesStory/prIdentityMatchesStory, which need a
   // full issue object with slug metadata this per-id method doesn't have).
+  //
+  // DELIBERATELY NARROWER than prMatchesStory/prIdentityMatchesStory: this
+  // only ever sees the raw identifier string, so it CANNOT match a PR whose
+  // branch/title carries only the story's short slug key (e.g. "m-01",
+  // branch feat/m-01-service) and never the literal "PAN-1234" text.
+  // getIssuePullRequests's gh-fallback below (and therefore this helper) is
+  // NOT used by auriga-router.mjs's own live call sites for that reason —
+  // see cycle()'s listCandidatePullRequests-backed matchedPrs() helper, which
+  // filters the full unfiltered board-wide scan with the real
+  // prMatchesStory/prIdentityMatchesStory logic instead. This helper (and the
+  // gh half of getIssuePullRequests) is kept only for a standalone
+  // per-identifier caller with no board-wide cache available (e.g. a test, or
+  // a future adapter consumer calling this method directly) — never reach
+  // for this from router-side matching logic.
   function prMatchesIdentifier(pr, identifier) {
     const needle = String(identifier || '').toLowerCase();
     if (!needle) return false;
@@ -201,13 +234,60 @@ export function createMulticaBacklogAdapter(cfg = {}) {
       .some((s) => String(s || '').toLowerCase().includes(needle));
   }
 
-  // Pull/merge requests linked to one issue (was issuePullRequests). Per this
-  // story's design decision, this INTERNALLY calls BOTH Multica's native
-  // `issue pull-requests` linkage AND gh-backed discovery (ghListRepos +
-  // ghPrs across the configured repo set), merged and de-duplicated by PR
-  // url — Multica's issue<->PR linkage is empty in practice (see
-  // auriga-router.mjs's own comment on why the router had to build a
-  // gh-based scan), so gh discovery is what actually finds a story's PR.
+  // The raw, UNFILTERED board-wide PR candidate scan (ghListRepos + per-repo
+  // ghPrs('all')) — was, per-issue, folded inside getIssuePullRequests before
+  // this fix; that meant every call re-ran this full repo scan (an
+  // O(issues x repos) explosion in live `gh` subprocess spawns per cycle) AND
+  // pre-filtered results through prMatchesIdentifier's raw-string-only
+  // heuristic BEFORE auriga-router.mjs's call sites ever got a chance to
+  // apply core.mjs's richer prMatchesStory/prIdentityMatchesStory — silently
+  // dropping any PR that matches only via a story's short slug key. This
+  // method does NO identity matching at all — that is deliberately the
+  // caller's job — so callers can (and cycle() does) apply the full-quality
+  // matcher. Callers should invoke this ONCE per cycle/scan and reuse the
+  // result across every issue, exactly like the pre-cutover router's own
+  // top-level ghListRepos/ghOpenPrs/ghPrs gather did. NOT part of the
+  // BacklogAdapter typedef contract (same "ported extra" status as
+  // listAllIssues above) — an adapter without a natural "board-wide PR scan"
+  // concept simply doesn't implement it; auriga-router.mjs's cycle() checks
+  // for its presence and falls back to getIssuePullRequests per-identifier
+  // when absent (e.g. stub/test adapters).
+  function listCandidatePullRequests() {
+    const repos = new Set([
+      ...(REVIEW_REPO_OWNER ? ghListRepos(REVIEW_REPO_OWNER) : []),
+      ...REVIEW_SEARCH_REPOS,
+    ]);
+    const all = [];
+    for (const repo of repos) {
+      for (const pr of ghPrs(repo, 'all')) {
+        pr._repo = repo;
+        all.push(pr);
+      }
+    }
+    return all;
+  }
+
+  // Pull/merge requests linked to one issue (was issuePullRequests). This
+  // INTERNALLY calls BOTH Multica's native `issue pull-requests` linkage AND
+  // a gh-backed discovery fallback (ghListRepos + ghPrs across the configured
+  // repo set, matched via the narrower prMatchesIdentifier heuristic above),
+  // merged and de-duplicated by PR url — Multica's issue<->PR linkage is
+  // empty in practice (see auriga-router.mjs's own comment on why the router
+  // had to build a gh-based scan), so gh discovery is what actually finds a
+  // story's PR in that fallback path.
+  //
+  // auriga-router.mjs's cycle() does NOT call this for its own "does issue X
+  // have a matching PR" decisions any more (see listCandidatePullRequests
+  // above): re-running this method's full repo scan per issue per call site,
+  // with zero memoization, was a real O(issues x repos) gh-subprocess
+  // explosion per cycle, and prMatchesIdentifier's raw-identifier-only gh
+  // fallback silently narrowed matches before core.mjs's richer
+  // prMatchesStory/prIdentityMatchesStory ever ran. This method is kept as a
+  // documented, DELIBERATELY NARROWER single-identifier lookup for a caller
+  // with no board-wide cache available (tests exercise it directly; a future
+  // adapter consumer may still want a one-off per-identifier lookup) — it is
+  // still part of the BacklogAdapter typedef contract.
+  //
   // Degrades gracefully: ANY single lookup failing (the multica CLI call,
   // one repo's gh lookup) never aborts the others; on total failure this
   // returns [], matching a "no PR yet" read rather than erroring the caller.
@@ -268,8 +348,10 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     setIssueStatus,
     commentOnIssue,
 
-    // ---- ported extra, NOT part of the BacklogAdapter contract (see the
-    // doc comment on listAllIssues above) ----
+    // ---- ported/adapter-specific extras, NOT part of the BacklogAdapter
+    // contract (see the doc comments on listAllIssues/
+    // listCandidatePullRequests above) ----
     listAllIssues,
+    listCandidatePullRequests,
   });
 }

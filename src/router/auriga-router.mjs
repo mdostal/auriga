@@ -133,6 +133,35 @@ export async function cycle(opts = {}) {
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
+  // ---- BOARD-WIDE PR candidate scan (ONCE per cycle) ----
+  // Restores the pre-cutover router's own top-level ghListRepos/ghOpenPrs/
+  // ghPrs gather (which ran once per cycle and was reused across every
+  // issue): backlog.listCandidatePullRequests(), when the adapter provides it
+  // (the real Multica adapter does; simpler test/stub adapters generally
+  // don't), does the raw repo-wide gh scan HERE, ONCE, and every call site
+  // below that needs "does issue X have a matching PR" filters this SAME
+  // cached, unfiltered list via matchedPrs() — using core.mjs's real
+  // prMatchesStory/prIdentityMatchesStory, never a narrower per-adapter
+  // heuristic. This fixes two regressions an independent review found in this
+  // epic's diff: (1) a PR matching only via a story's short slug key (not the
+  // raw ticket identifier) is found again, and (2) the repo-wide gh scan no
+  // longer re-runs per issue per call site (an O(issues x repos) subprocess
+  // explosion), it runs once per cycle like it always did pre-cutover.
+  let candidatePrs = null;
+  if (typeof backlog.listCandidatePullRequests === 'function') {
+    try { candidatePrs = backlog.listCandidatePullRequests(); }
+    catch (e) { logImpl('candidate_pr_scan_error', { error: e.message }); }
+  }
+  // Returns the PRs in `candidatePrs` matching `issueObj` via `matcher`
+  // (coreImpl.prMatchesStory or coreImpl.prIdentityMatchesStory). Falls back
+  // to backlog.getIssuePullRequests's own per-identifier lookup (filtered by
+  // the SAME rich matcher) only when the adapter has no board-wide scan —
+  // e.g. stub/mock adapters used by unit tests.
+  function matchedPrs(identifier, issueObj, matcher) {
+    if (candidatePrs) return candidatePrs.filter((pr) => matcher(pr, issueObj));
+    return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
+  }
+
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
   logImpl('scan', {
     total: issues.length,
@@ -168,10 +197,10 @@ export async function cycle(opts = {}) {
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       let hasPr = false;
       if (slug) {
-        // ghPrs(slug, 'all') is now internal to backlog.getIssuePullRequests —
-        // the router asks for the story's OWN identifier's PRs instead of a
-        // raw repo scan; the matching logic (prMatchesStory) is unchanged.
-        try { hasPr = backlog.getIssuePullRequests(u.identifier).some((pr) => coreImpl.prMatchesStory(pr, issueObj)); }
+        // Matches against the per-cycle cached board-wide PR scan (see
+        // matchedPrs above) via the real prMatchesStory — not a narrower
+        // per-adapter heuristic.
+        try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
         catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
       if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
@@ -216,7 +245,7 @@ export async function cycle(opts = {}) {
 
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
   const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier);
+  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
   const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: 'done', applied: !dryRun });
@@ -258,11 +287,12 @@ export async function cycle(opts = {}) {
       if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses,
-      // now via backlog.getIssuePullRequests (ghPrs is internal to the adapter).
+      // matched against the per-cycle cached board-wide PR scan (see matchedPrs
+      // above).
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       if (slug) {
         try {
-          if (backlog.getIssuePullRequests(c.identifier).some((pr) => coreImpl.prMatchesStory(pr, issueObj))) {
+          if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
             logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
             continue;
           }
@@ -302,26 +332,24 @@ export async function cycle(opts = {}) {
   const inReviewRuns = {};
   for (const i of inReview) inReviewRuns[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  // Per-story PR gather (shared by false-done + review dispatch). Multica's
-  // issue<->PR linkage is empty in practice, so backlog.getIssuePullRequests
-  // ITSELF falls back to gh discovery (across REVIEW_REPO_OWNER's repos +
-  // REVIEW_SEARCH_REPOS — see multica/backlog.mjs) — the router no longer
-  // does its own repo-discovery scan (ghListRepos/ghOpenPrs/ghPrs are now
-  // internal to the adapter). Matching stays slug-aware via core's
-  // prIdentityMatchesStory/detectFalseDone (matches the story's short key,
-  // e.g. m-01, not only the PAN id, so slug-branched PRs are still found).
+  // Per-story PR gather (shared by false-done + review dispatch), drawn from
+  // the SAME per-cycle cached board-wide scan (candidatePrs, gathered once
+  // near the top of cycle() — see matchedPrs above). Matching stays
+  // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
+  // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
+  // are still found).
   const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
 
   // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
   // parent/seed ticket that some unrelated PR merely references is never dispatched.
-  // getIssuePullRequests returns PRs of ANY state (unlike the old ghOpenPrs, which
-  // was open-only), so prIsOpen must now be checked explicitly here.
+  // The candidate scan returns PRs of ANY state (unlike the old ghOpenPrs, which
+  // was open-only), so prIsOpen must be checked explicitly here.
   const openPrIds = new Set();
   for (const i of inReview) {
     let prs = [];
-    try { prs = backlog.getIssuePullRequests(i.identifier); }
+    try { prs = matchedPrs(i.identifier, i, coreImpl.prIdentityMatchesStory); }
     catch (e) { logImpl('review_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
-    if (prs.some((pr) => coreImpl.prIsOpen(pr) && coreImpl.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
+    if (prs.some((pr) => coreImpl.prIsOpen(pr))) openPrIds.add(i.identifier);
   }
   if (inReview.length) logImpl('review_pr_scan', { checked: inReview.length, withPr: [...openPrIds] });
 
@@ -331,21 +359,30 @@ export async function cycle(opts = {}) {
   // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
   // story with no open PR is left alone (may be a legit non-code done task).
   {
-    // Union each done story's OWN PRs (per-identifier, via backlog.getIssuePullRequests)
-    // into one array — detectFalseDone itself applies the prIsOpen/ownPrUrl/repo-qualified
-    // matching per doneIssue, so passing mixed-state PRs here is correct (unchanged
-    // from when openPrsAll mixed states too, in practice, before this dedupe existed).
-    const donePrs = [];
-    const seenPr = new Set();
-    for (const i of doneIssues) {
-      let prs = [];
-      try { prs = backlog.getIssuePullRequests(i.identifier); }
-      catch (e) { logImpl('false_done_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
-      for (const pr of prs) {
-        const key = pr.url || pr.html_url || `${pr._repo || ''}#${pr.number}`;
-        if (seenPr.has(key)) continue;
-        seenPr.add(key);
-        donePrs.push(pr);
+    // detectFalseDone itself applies the prIsOpen/ownPrUrl/repo-qualified/
+    // prIdentityMatchesStory matching per doneIssue against a BOARD-WIDE
+    // candidate list (exactly like the pre-cutover router's own openPrsAll),
+    // so the full unfiltered candidatePrs scan is passed straight through
+    // when available. Only adapters with no board-wide scan (e.g. stub/test
+    // adapters) fall back to unioning each done issue's own per-identifier
+    // lookup, de-duplicated by PR url — the pre-fix per-issue gather shape,
+    // kept only as that fallback's approximation of a board-wide list.
+    let donePrs;
+    if (candidatePrs) {
+      donePrs = candidatePrs;
+    } else {
+      donePrs = [];
+      const seenPr = new Set();
+      for (const i of doneIssues) {
+        let prs = [];
+        try { prs = backlog.getIssuePullRequests(i.identifier); }
+        catch (e) { logImpl('false_done_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
+        for (const pr of prs) {
+          const key = pr.url || pr.html_url || `${pr._repo || ''}#${pr.number}`;
+          if (seenPr.has(key)) continue;
+          seenPr.add(key);
+          donePrs.push(pr);
+        }
       }
     }
     const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs);

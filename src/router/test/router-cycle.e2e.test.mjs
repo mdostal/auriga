@@ -183,3 +183,73 @@ test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within on
     assert.ok(count <= cap, `runtime ${runtime} got ${count} assignments > RUNTIME_CAP ${cap}`);
   }
 });
+
+// ---- regression coverage for an independent adversarial review's two findings
+// against this epic's diff: (1) a PR matching a story ONLY via its short slug
+// key (never the raw ticket identifier) was silently dropped before
+// core.mjs's prMatchesStory ever got a chance to find it, because
+// backlog.getIssuePullRequests pre-filtered with its own narrower
+// prMatchesIdentifier heuristic; (2) the repo-wide gh PR scan re-ran per
+// issue per call site instead of once per cycle(). Both fixed by
+// auriga-router.mjs's cycle() calling backlog.listCandidatePullRequests()
+// ONCE and filtering that cached, unfiltered list via coreImpl.prMatchesStory
+// itself.
+
+test('a PR matching ONLY via the story\'s short slug key (never the raw ticket identifier) is found via the cached board-wide scan + prMatchesStory', async () => {
+  const AURIGA = projectId('Auriga');
+  const story = makeIssue({
+    project_id: AURIGA,
+    title: '[m-01-core] Wire the recall interface',
+    status: 'in_review',
+  });
+  // Deliberately carries the story's short slug key ("m-01") in its branch,
+  // but NEVER the raw ticket identifier (e.g. "PAN-1042") anywhere in title/
+  // branch/body — the exact shape prMatchesIdentifier (the adapter's old,
+  // narrower per-identifier heuristic) cannot match, but prMatchesStory's
+  // short-key regex can.
+  const slugOnlyPr = {
+    number: 5,
+    title: 'feat: service wiring',
+    headRefName: 'feat/m-01-service',
+    body: '',
+    state: 'merged',
+    merged_at: new Date().toISOString(),
+    url: 'https://github.com/acme/widgets/pull/5',
+  };
+  const idNeedle = story.identifier.toLowerCase();
+  assert.ok(![slugOnlyPr.title, slugOnlyPr.headRefName, slugOnlyPr.body].some((s) => s.toLowerCase().includes(idNeedle)),
+    'fixture sanity: the PR must not literally contain the raw ticket identifier anywhere');
+
+  const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS);
+  let scanCalls = 0;
+  backlog.listCandidatePullRequests = () => { scanCalls++; return [slugOnlyPr]; };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const advanced = log.byEvent('advance').find((e) => e.identifier === story.identifier && e.to === 'done');
+  assert.ok(advanced, 'the slug-only-matching merged PR should have advanced the in_review story to done (detectVerifiedDone via prMatchesStory)');
+  assert.equal(scanCalls, 1, 'listCandidatePullRequests should have been called exactly once for this cycle');
+});
+
+test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(), not once per in_review/done issue', async () => {
+  const AURIGA = projectId('Auriga');
+  // 5 in_review + 5 done issues: every one of them independently needs a
+  // "does this issue have a matching PR" answer across several passes
+  // (verified-done, cascade guard, review-dispatch openPrIds, false-done).
+  // Pre-fix, backlog.getIssuePullRequests re-ran its own full repo scan on
+  // EVERY one of those lookups (O(issues) scans); post-fix, the scan must
+  // happen once, at the top of cycle(), and be reused for all of them.
+  const issues = [
+    ...Array.from({ length: 5 }, () => makeIssue({ project_id: AURIGA, status: 'in_review', parent_issue_id: 'fake-parent' })),
+    ...Array.from({ length: 5 }, () => makeIssue({ project_id: AURIGA, status: 'done', parent_issue_id: 'fake-parent' })),
+  ];
+  const { backlog, spawn } = createMockAdapters(issues, cfg.AGENTS);
+  let scanCalls = 0;
+  backlog.listCandidatePullRequests = () => { scanCalls++; return []; };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(scanCalls, 1, `expected the board-wide PR scan to run exactly once per cycle() regardless of issue count (10 issues), got ${scanCalls} calls`);
+});

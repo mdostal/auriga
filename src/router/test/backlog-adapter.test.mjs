@@ -298,3 +298,102 @@ test('getIssuePullRequests: with no reviewRepoOwner/reviewSearchRepos configured
   assert.deepEqual(backlog.getIssuePullRequests('PAN-1'), []);
   assert.ok(calls.every((c) => c.cmd === MULTICA_CLI));
 });
+
+// ---- getIssuePullRequests's COVERAGE GAP: a slug-only-matching PR is missed
+// by the narrower per-identifier prMatchesIdentifier heuristic. This is the
+// exact class of PR that core.mjs's prMatchesStory/prIdentityMatchesStory
+// (short story-key regex) CAN find but this method's own gh-fallback cannot
+// — the bug an independent review found in how auriga-router.mjs's call
+// sites used to layer prMatchesStory on TOP of this (already too-narrow)
+// method's output. This method itself is unchanged/still narrower by design
+// (see its doc comment); auriga-router.mjs's live call sites now bypass it in
+// favor of listCandidatePullRequests() + prMatchesStory (see
+// router-cycle.e2e.test.mjs's "slug-only-matching PR" test for the real fix
+// verified end-to-end). This test documents/pins the gap this method itself
+// still has, so nothing ever again mistakes it for a full-quality matcher.
+test('getIssuePullRequests: a PR matching ONLY via a short story-key (never the raw identifier) is NOT found — the narrower prMatchesIdentifier heuristic misses it', async (t) => {
+  makeExecMock(t, {
+    multica: (args) => {
+      if (args[0] === 'issue' && args[1] === 'pull-requests') return { pull_requests: [] };
+      throw new Error('unexpected multica args ' + args.join(' '));
+    },
+    gh: (args) => {
+      if (args[0] === 'repo' && args[1] === 'list') return [{ nameWithOwner: 'acme/widgets' }];
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return [
+          // Branch/title carry ONLY the story's short slug key "m-01" —
+          // never the raw ticket identifier "PAN-1234".
+          { number: 5, title: 'feat: service wiring', headRefName: 'feat/m-01-service',
+            baseRefName: 'dev', body: '', url: 'https://github.com/acme/widgets/pull/5', state: 'OPEN', mergedAt: null },
+        ];
+      }
+      throw new Error('unexpected gh args ' + args.join(' '));
+    },
+  });
+
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI, reviewRepoOwner: 'acme' });
+
+  assert.deepEqual(backlog.getIssuePullRequests('PAN-1234'), [], 'the raw-identifier-only heuristic must miss a slug-only-matching PR (documents the gap; router call sites no longer rely on this method for matching)');
+});
+
+// ---- listCandidatePullRequests: the raw, UNFILTERED board-wide scan that
+// auriga-router.mjs's cycle() now calls ONCE per cycle and reuses across
+// every issue, applying core.mjs's own prMatchesStory/prIdentityMatchesStory
+// itself (see router-cycle.e2e.test.mjs). No identity matching happens here
+// AT ALL — that is deliberately the caller's job.
+
+test('listCandidatePullRequests: returns every PR from every discovered + search repo, UNFILTERED (no identity matching)', async (t) => {
+  const calls = makeExecMock(t, {
+    gh: (args) => {
+      if (args[0] === 'repo' && args[1] === 'list') return [{ nameWithOwner: 'acme/widgets' }];
+      if (args[0] === 'pr' && args[1] === 'list') {
+        const repo = args[args.indexOf('--repo') + 1];
+        if (repo === 'acme/widgets') {
+          return [
+            { number: 7, title: 'feat: PAN-1234 widget', headRefName: 'feat/PAN-1234-widget',
+              body: '', url: 'https://github.com/acme/widgets/pull/7', state: 'OPEN', mergedAt: null },
+            // Deliberately unrelated to any story — proves this method does
+            // NOT filter by identity (getIssuePullRequests would have
+            // dropped this one; listCandidatePullRequests must not).
+            { number: 8, title: 'chore: unrelated cleanup', headRefName: 'chore/cleanup',
+              body: '', url: 'https://github.com/acme/widgets/pull/8', state: 'OPEN', mergedAt: null },
+          ];
+        }
+        if (repo === 'acme/extra') {
+          return [{ number: 1, title: 'from search repo', headRefName: 'feat/x',
+            body: '', url: 'https://github.com/acme/extra/pull/1', state: 'OPEN', mergedAt: null }];
+        }
+        return [];
+      }
+      throw new Error('unexpected gh args ' + args.join(' '));
+    },
+  });
+
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({
+    cli: MULTICA_CLI, ghCli: GH_CLI, reviewRepoOwner: 'acme', reviewSearchRepos: ['acme/extra'],
+  });
+
+  const prs = backlog.listCandidatePullRequests();
+  const numbers = prs.map((p) => p.number).sort();
+  assert.deepEqual(numbers, [1, 7, 8], 'every PR from every repo is returned unfiltered, including the unrelated one');
+  assert.ok(prs.every((p) => typeof p._repo === 'string' && p._repo.length > 0), 'every returned PR is tagged with its source repo');
+
+  assert.ok(calls.every((c) => c.cmd === GH_CLI), 'listCandidatePullRequests never calls the multica CLI (gh-only)');
+});
+
+test('listCandidatePullRequests: degrades to [] (never throws) when gh repo-discovery fails', async (t) => {
+  makeExecMock(t, { gh: () => { throw new Error('gh: down'); } });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI, reviewRepoOwner: 'acme' });
+  assert.deepEqual(backlog.listCandidatePullRequests(), []);
+});
+
+test('listCandidatePullRequests: with no reviewRepoOwner/reviewSearchRepos configured, returns [] without calling gh', async (t) => {
+  const calls = makeExecMock(t, { gh: () => { throw new Error('gh should never be called with no repos configured'); } });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.deepEqual(backlog.listCandidatePullRequests(), []);
+  assert.equal(calls.length, 0);
+});
