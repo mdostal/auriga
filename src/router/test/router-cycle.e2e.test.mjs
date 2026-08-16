@@ -1,13 +1,25 @@
 // Loop-level integration tests: drive the REAL auriga-router.mjs cycle()
-// against a MOCK Multica layer (test/support/mock-mca.mjs) — no live
-// `multica`/`gh` CLI calls. Uses the real lib/config.mjs + lib/core.mjs so
-// these tests exercise the actual routing tables and decision logic, not a
-// re-description of them.
+// against MOCK backlog+spawn adapters (the two-adapter analog of the old
+// single mock-mca.mjs layer) — no live `multica`/`gh` CLI calls. Uses the
+// real lib/config.mjs + lib/core.mjs so these tests exercise the actual
+// routing tables and decision logic, not a re-description of them.
+//
+// p2-router-cutover: cycle() now takes opts.backlog/opts.spawn (typed
+// adapter instances) instead of opts.mca — see auriga-router.mjs. The mock
+// below is the two-adapter split of test/support/mock-mca.mjs's single
+// object: backlog and spawn share ONE in-memory board + runs map (via
+// closures), because spawn.assignIssue/rerunIssue synthesizing an active run
+// must be observable through backlog.getIssueRuns — exactly the same
+// "assign implies a run appears" behavior the old single-mca mock provided.
+// The ASSERTED SCENARIOS below (which routing decisions happen) are
+// UNCHANGED from before the cutover — only how the mock is constructed and
+// how calls are recorded (`calls.assign` instead of `mca.calls.assign`)
+// changed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cycle } from '../auriga-router.mjs';
 import * as cfg from '../lib/config.mjs';
-import { createMockMca, createLogSink } from './support/mock-mca.mjs';
+import { createLogSink } from './support/mock-mca.mjs';
 
 const NOOP_SLEEP = async () => {};
 
@@ -35,17 +47,73 @@ function makeIssue(overrides = {}) {
   };
 }
 
+// Mock BacklogAdapter + SpawnAdapter sharing one in-memory board + runs map.
+// spawn.assignIssue()/rerunIssue() also synthesize an active run for the
+// assigned identifier — this stands in for "the platform started a run",
+// which is what cycle()'s post-assign verify step (backlog.getIssueRuns) is
+// checking for. Without it every assignment would fall through to
+// verify_no_run -> rerun, which is real router behavior but not what these
+// dispatch-shape tests are exercising (mirrors mock-mca.mjs's own doc
+// comment on this exact synthesis).
+function createMockAdapters(boardIssues, agents) {
+  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
+  const runsByIdentifier = {};
+  const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
+
+  const backlog = {
+    listAllProjectIds: () => [],
+    listAllIssues: (projectIds) => boardIssues.filter((i) => projectIds.includes(i.project_id)),
+    getIssueRuns: (identifier) => runsByIdentifier[identifier] || [],
+    getIssuePullRequests: () => [],
+    setIssueStatus: (identifier, status) => {
+      calls.status.push({ identifier, status });
+      const issue = findIssue(identifier);
+      if (issue) issue.status = status;
+    },
+    commentOnIssue: (identifier, body) => {
+      calls.comment.push({ identifier, body });
+    },
+  };
+
+  const spawn = {
+    assignIssue: (identifier, agentName) => {
+      calls.assign.push({ identifier, agentName });
+      const issue = findIssue(identifier);
+      if (issue) issue.assignee_id = agents[agentName] && agents[agentName].id;
+      runsByIdentifier[identifier] = [
+        ...(runsByIdentifier[identifier] || []),
+        { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
+      ];
+    },
+    rerunIssue: (identifier) => {
+      calls.rerun.push({ identifier });
+      runsByIdentifier[identifier] = [
+        ...(runsByIdentifier[identifier] || []),
+        { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
+      ];
+    },
+    unassignIssue: (identifier) => {
+      calls.unassign.push({ identifier });
+      const issue = findIssue(identifier);
+      if (issue) issue.assignee_id = null;
+    },
+    describeLanes: () => ({}),
+  };
+
+  return { backlog, spawn, calls, boardIssues, runsByIdentifier };
+}
+
 test('AC1: a hive-tagged todo dispatches to a HIVE_LANE agent (never codex/opencode) and verifies in-progress', async () => {
   const AURIGA = projectId('Auriga'); // default (non-hive) lane here is codex-only auriga-dev
   const hiveStory = makeIssue({ project_id: AURIGA, labels: ['build'] }); // 'build' is a HIVE_LABEL
-  const mca = createMockMca([hiveStory], cfg.AGENTS);
+  const { backlog, spawn, calls } = createMockAdapters([hiveStory], cfg.AGENTS);
   const log = createLogSink();
 
-  const result = await cycle({ mca, cfg, log, sleep: NOOP_SLEEP });
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(result.assigned, 1);
-  assert.equal(mca.calls.assign.length, 1);
-  const [assignment] = mca.calls.assign;
+  assert.equal(calls.assign.length, 1);
+  const [assignment] = calls.assign;
   assert.equal(assignment.identifier, hiveStory.identifier);
   assert.ok(cfg.HIVE_LANE.includes(assignment.agentName), `expected a HIVE_LANE agent, got ${assignment.agentName}`);
   const codexOrOpencode = new Set(['auriga-dev', 'heimdall-dev-codex', 'heimdall-dev']);
@@ -63,13 +131,13 @@ test('AC2: a Pantheon Core [idea] seed routes to minerva-dev; its decomposed non
   const PANTHEON_CORE = projectId('Pantheon Core');
   const seedIssue = makeIssue({ project_id: PANTHEON_CORE, labels: ['idea'], parent_issue_id: null });
   const childStory = makeIssue({ project_id: PANTHEON_CORE, parent_issue_id: seedIssue.id });
-  const mca = createMockMca([seedIssue, childStory], cfg.AGENTS);
+  const { backlog, spawn, calls } = createMockAdapters([seedIssue, childStory], cfg.AGENTS);
   const log = createLogSink();
 
-  const result = await cycle({ mca, cfg, log, sleep: NOOP_SLEEP });
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(result.assigned, 2);
-  const byIdentifier = Object.fromEntries(mca.calls.assign.map((a) => [a.identifier, a.agentName]));
+  const byIdentifier = Object.fromEntries(calls.assign.map((a) => [a.identifier, a.agentName]));
   assert.equal(byIdentifier[seedIssue.identifier], 'minerva-dev');
   assert.equal(byIdentifier[childStory.identifier], 'auriga-build');
 });
@@ -90,19 +158,19 @@ test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within on
   ];
   assert.equal(issues.length, 12); // more candidates than perCycleTotal, so the cap is actually exercised
 
-  const mca = createMockMca(issues, cfg.AGENTS);
+  const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
   const log = createLogSink();
 
-  const result = await cycle({ mca, cfg, log, sleep: NOOP_SLEEP });
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
 
   assert.ok(result.assigned <= cfg.CAPS.perCycleTotal, `assigned ${result.assigned} > perCycleTotal ${cfg.CAPS.perCycleTotal}`);
-  assert.ok(mca.calls.assign.length <= cfg.CAPS.perCycleTotal);
+  assert.ok(calls.assign.length <= cfg.CAPS.perCycleTotal);
   // The cap must have actually engaged — otherwise this test is not exercising it.
-  assert.ok(mca.calls.assign.length > 0);
+  assert.ok(calls.assign.length > 0);
 
   const perAgent = {};
   const perRuntime = {};
-  for (const { agentName } of mca.calls.assign) {
+  for (const { agentName } of calls.assign) {
     perAgent[agentName] = (perAgent[agentName] || 0) + 1;
     const runtime = cfg.AGENTS[agentName].runtime;
     perRuntime[runtime] = (perRuntime[runtime] || 0) + 1;
