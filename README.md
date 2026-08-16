@@ -98,6 +98,13 @@ Env overrides: `AURIGA_PER_CYCLE_TOTAL`, `AURIGA_PER_CYCLE_PER_AGENT`, `AURIGA_C
 [`src/router/lib/config.mjs`](src/router/lib/config.mjs). See
 [`src/router/README.md`](src/router/README.md) for state-machine and human-queue details.
 
+`cycle()` no longer talks to Multica directly — it goes through the `backlogAdapter` /
+`spawnAdapter` boundary in [`src/router/lib/adapters/`](src/router/lib/adapters/), which holds
+the typed contracts, the real Multica-backed implementations (a behavior-preserving port of the
+former `lib/multica.mjs`), an in-memory stub used by tests, and the intentionally-unbuilt
+`pantheon-v2-l2` stub (the only sanctioned path from Auriga to Pantheon). See that directory's
+`README.md` for the two-adapter model.
+
 ## Status
 
 **WIP — live on the hive.** The `src/router/` auto-router runs live, draining the aligned Multica

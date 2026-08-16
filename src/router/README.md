@@ -93,7 +93,12 @@ Excluded issues aren't just dropped — run
 ## Files / paths
 
 - `auriga-router.mjs` — entrypoint / scan loop; exports `cycle()`.
-- `lib/` — `config.mjs`, `core.mjs`, `multica.mjs`.
+- `lib/` — `config.mjs`, `core.mjs`, `multica.mjs` (predates the adapter interface; no longer
+  called by `cycle()` — see `lib/adapters/`).
+- `lib/adapters/` — the `backlogAdapter` / `spawnAdapter` boundary `cycle()` calls through:
+  `backlog-adapter.mjs` / `spawn-adapter.mjs` (typedef contracts), `multica/` (real, live-default
+  implementation), `stub/` (in-memory test double), `pantheon-v2-l2/` (intentionally-unbuilt
+  stub — the only sanctioned path to Pantheon). See `lib/adapters/README.md`.
 - `test/*.test.mjs` — `npm test`; `test/support/mock-mca.mjs` is the mock
   Multica layer `test/router-cycle.e2e.test.mjs` drives `cycle()` against.
 - `scripts/launchd/` — `install.sh` / `uninstall.sh` +

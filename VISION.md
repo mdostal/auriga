@@ -44,6 +44,14 @@ What works, honestly:
 (`nohup ./supervisor.sh`), scanning an aligned-only set of Multica projects (Auriga / Heimdall /
 Consus today) on a ~75s cycle. Pidfiles and JSONL logs land in `/tmp`.
 
+- **Adapter interface — landed, epic `p2-adapter-interface`.** `src/router/lib/adapters/` now
+  holds the `backlogAdapter` / `spawnAdapter` contracts described in §③ below, a real
+  Multica-backed implementation (`adapters/multica/`) that `auriga-router.mjs`'s `cycle()` now
+  calls by default (a behavior-preserving port of the old `lib/multica.mjs`), an in-memory stub
+  for tests, and the intentionally-unbuilt `pantheon-v2-l2` stub (the only sanctioned path from
+  Auriga to Pantheon, still a separate future epic). The routing/capacity/state-machine logic
+  above is unchanged — this landed the boundary the logic talks through, not new behavior.
+
 **What is a stub / not yet wired:**
 
 - The richer **routing engine** in `src/engine/` (on the `feat/routing-engine` branch) — a
