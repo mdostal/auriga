@@ -1,0 +1,21 @@
+run_id: p2-adapter-interface-execute-20260816T161309Z
+skill: execute
+timestamp: "2026-08-16T16:13:09Z"
+gate_lift_fired: false
+methodology: classic
+methodology_source: hive-config
+story_specs_produced: 5
+nonsensical_defaults:
+  - all-backend-defaults
+warnings_emitted: 0
+backend_sources:
+  sessions_enabled: default
+  parallel_teams: default
+  terminal_mux: default
+  executor: default
+work_artifacts:
+  commits: 9
+  files_changed: 46
+  tests_passing: 157
+  tests_failing: 0
+  pr_url: https://github.com/mdostal/auriga/pull/58
