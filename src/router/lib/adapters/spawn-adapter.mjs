@@ -40,10 +40,10 @@
  *   Start a fresh run of `issue` on `lane` (a dispatch-target name from
  *   describeLanes()) — the general-purpose "make this run" primitive.
  *   Implements assign -> verify a run started -> force-rerun if not (the
- *   "dispatch dead-zone" fix — see auriga-router.mjs's cycle() "route new
- *   todos" pass, the one call site wired to this method). Returned object
- *   shape (see multica/spawn.mjs's dispatch() and stub/spawn.mjs's dispatch()
- *   for the two implementations):
+ *   "dispatch dead-zone" fix — behavior-preserving port of the sequence
+ *   auriga-router.mjs's cycle() "route new todos" pass hand-rolls inline).
+ *   Returned object shape (see multica/spawn.mjs's dispatch() and
+ *   stub/spawn.mjs's dispatch() for the two implementations):
  *     { identifier, lane, assigned: boolean, assignError?: string,
  *       started: boolean, forcedRerun: boolean, rerunError?: string,
  *       runStatus?: string, runtimeId?: string }
@@ -53,11 +53,25 @@
  *   forcedRerun: true` means assign succeeded but no run row appeared within
  *   the verify delay, so a rerun was force-attempted (rerunError present iff
  *   THAT failed too). `assigned: true, started: true` means a run row was
- *   observed; runStatus/runtimeId describe the latest one. NOT every inline
- *   assign/rerun sequence in auriga-router.mjs uses this method — cycle()'s
- *   cascade-dispatch and review-dispatch passes have a genuinely different
- *   "always force-rerun, never verify first" contract (see their own inline
- *   comments) and are deliberately NOT routed through dispatch().
+ *   observed; runStatus/runtimeId describe the latest one.
+ *
+ *   NOT wired into any of cycle()'s three inline assign/rerun call sites,
+ *   despite being a real, tested, behavior-preserving port of one of them —
+ *   each stays inline for its own documented reason (a "don't force a bad
+ *   abstraction" judgment call, not an oversight):
+ *     - cascade-dispatch and review-dispatch: a genuinely different
+ *       "always force-rerun, never verify first" contract (see their own
+ *       inline comments) — routing them through dispatch() would silently
+ *       change behavior, not just relocate it.
+ *     - route new todos: same contract as dispatch(), but dispatch()'s
+ *       verify-wait is a REAL synchronous Atomics.wait block (this
+ *       interface is synchronous by design — see this file's header
+ *       comment), and auriga-router.mjs is a long-lived supervised daemon
+ *       that needs to stay responsive to signals during that wait. It keeps
+ *       its own non-blocking `await sleep(...)`-based inline sequence
+ *       instead (see that pass's own comment). dispatch() remains available
+ *       for a future short-lived caller that doesn't need non-blocking
+ *       behavior.
  *
  * @property {() => Record<string, object>} describeLanes
  *   The available dispatch targets: lane name -> lane metadata (which

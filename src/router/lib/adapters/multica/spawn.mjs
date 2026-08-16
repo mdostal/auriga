@@ -3,10 +3,13 @@
 //   - assignIssue/rerunIssue/unassignIssue verbatim from lib/multica.mjs
 //     (same CLI invocation, same read-degrades/write-propagates asymmetry).
 //   - dispatch(issue, lane): the assign -> verify-a-run-started -> force-rerun
-//     sequence currently inline in auriga-router.mjs's cycle() "route new
-//     todos" block (see that file's comment "verify a run started;
-//     force-enqueue if not (dead-zone fix)"). NOT wired into cycle() by this
-//     story — this is a behavior-preserving port, tested in isolation.
+//     sequence auriga-router.mjs's cycle() "route new todos" pass hand-rolls
+//     inline (see that file's comment "verify a run started; force-enqueue
+//     if not (dead-zone fix)"). Deliberately NOT called from that pass (or
+//     anywhere else in cycle()) — see this method's own doc comment below
+//     for why — but a real, correct, behavior-preserving port, tested in
+//     isolation, available to any future caller that's fine with a
+//     synchronous blocking wait (e.g. a short-lived CLI tool).
 //   - describeLanes(): assembles PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/
 //     REVIEW_LANE/RUNTIME_CAP from lib/config-substrate.mjs into a LaneMap.
 //
@@ -127,6 +130,19 @@ export function createMulticaSpawnAdapter(cfg = {}) {
   // force-rerun if not). `lane` is a dispatch-target agent name (e.g.
   // 'auriga-dev') — same string cycle() calls `p.agent` and passes straight
   // to mcaImpl.assignIssue.
+  //
+  // NOT called by that "route new todos" pass, or by any cycle() call site —
+  // this method's verify-wait (the `sleep(VERIFY_DELAY_MS)` below) is a REAL
+  // synchronous Atomics.wait block (see sleepSync() and this file's header
+  // comment: every method here is synchronous by design, matching
+  // SpawnAdapter's contract). That's a fine trade for a short-lived caller,
+  // but auriga-router.mjs is a long-lived, supervised daemon (pidfile-locked,
+  // SIGTERM/SIGINT-handled) that must stay responsive during that wait, so
+  // its "route new todos" pass keeps its own non-blocking
+  // `await sleep(...)`-based inline sequence instead of calling this method.
+  // This is a real, tested, available method regardless — just not used by
+  // THIS call site. See spawn-adapter.mjs's typedef and auriga-router.mjs's
+  // "route new todos" comment for the fuller version of this reasoning.
   //
   // Ported exactly:
   //   - assign is wrapped so an assign failure short-circuits (skips verify)

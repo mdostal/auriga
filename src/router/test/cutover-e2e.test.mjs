@@ -93,7 +93,7 @@ test('cutover-e2e: cycle() runs end-to-end on stub adapters only, zero execFileS
   assert.equal(execFileSyncMock.mock.calls.length, 0, 'no execFileSync calls should have been attempted');
 });
 
-test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/dispatch observed)', async (t) => {
+test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/assign observed)', async (t) => {
   t.mock.module('node:child_process', { exports: { execFileSync: () => { throw new Error('must not be called'); } } });
   const { cycle } = await import('../auriga-router.mjs');
   const { backlog, spawn } = seedAdapters();
@@ -103,13 +103,14 @@ test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/dispatch obs
 
   const routed = log.byEvent('route').some((e) => e.identifier === PROFILE_TODO.identifier);
   assert.ok(routed, 'PROFILE_TODO should have been picked by the "route new todos" pass');
-  // "route new todos" calls spawn.dispatch() (assign -> verify -> force-rerun,
-  // centralized post-p2-adapter-interface-cleanup), not spawn.assignIssue()
-  // directly any more — see auriga-router.mjs's cycle().
-  const dispatched = spawn.calls.some((c) => c.method === 'dispatch' && c.args.issue && c.args.issue.identifier === PROFILE_TODO.identifier);
-  assert.ok(dispatched, 'spawn.dispatch should have been called for PROFILE_TODO');
-  const verifyOk = log.byEvent('verify_ok').some((e) => e.identifier === PROFILE_TODO.identifier);
-  assert.ok(verifyOk, 'the stub spawn adapter\'s dispatch() always reports started:true, so verify_ok (not verify_no_run) should log');
+  // "route new todos" calls spawn.assignIssue() directly (inline
+  // assign -> verify -> force-rerun) — NOT spawn.dispatch(), which exists as
+  // a real, tested, behavior-preserving port of this sequence but is
+  // deliberately not wired into this call site (dispatch()'s verify-wait is
+  // a real synchronous block, unsuited to this long-lived daemon process;
+  // see auriga-router.mjs's "route new todos" comment).
+  const dispatched = spawn.calls.some((c) => c.method === 'assignIssue' && c.args.id === PROFILE_TODO.identifier);
+  assert.ok(dispatched, 'spawn.assignIssue should have been called for PROFILE_TODO');
 });
 
 test('cutover-e2e: PROFILE_IN_PROGRESS_DONE_RUN advances in_progress -> in_review on a completed run', async (t) => {

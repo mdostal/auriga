@@ -50,17 +50,17 @@ function makeIssue(overrides = {}) {
 // Mock BacklogAdapter + SpawnAdapter sharing one in-memory board + runs map.
 // spawn.assignIssue()/rerunIssue() also synthesize an active run for the
 // assigned identifier — this stands in for "the platform started a run",
-// which is what spawn.dispatch()'s own internal post-assign verify step is
-// checking for (cycle()'s "route new todos" pass calls spawn.dispatch(),
-// which assigns + verifies + force-reruns in one call — see
-// lib/adapters/multica/spawn.mjs's dispatch()). Without this synthesis every
-// assignment would fall through to verify_no_run -> rerun, which is real
-// router behavior but not what these dispatch-shape tests are exercising
-// (mirrors mock-mca.mjs's own doc comment on this exact synthesis).
+// which is what cycle()'s own inline "route new todos" verify step
+// (backlog.getIssueRuns, right after spawn.assignIssue()) is checking for.
+// Without it every assignment would fall through to verify_no_run -> rerun,
+// which is real router behavior but not what these dispatch-shape tests are
+// exercising (mirrors mock-mca.mjs's own doc comment on this exact
+// synthesis).
 // opts.failAssignFor / opts.noRunFor: identifier sets letting a test drive
-// dispatch()'s OTHER two branches (assign failure; assign-succeeds-but-no-run
-// -> force-rerun) through the real cycle()/dispatch() call path, the same way
-// spawn-adapter.test.mjs drives them directly against the real adapter.
+// the inline sequence's OTHER two branches (assign failure;
+// assign-succeeds-but-no-run -> force-rerun) through the real cycle() call
+// path, the same way spawn-adapter.test.mjs drives dispatch()'s equivalent
+// branches directly against the real (unused-by-cycle()) adapter method.
 function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
@@ -83,58 +83,26 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
   };
 
-  // Shared by the public assignIssue/rerunIssue methods AND dispatch() below
-  // — mirrors the real multica spawn adapter's dispatch() (lib/adapters/
-  // multica/spawn.mjs), which calls its own private assignIssue/rerunIssue
-  // internally rather than going back through the public object.
-  function doAssign(identifier, agentName) {
-    calls.assign.push({ identifier, agentName });
-    if (failAssignFor.has(identifier)) throw new Error('multica: rate limited (429)');
-    const issue = findIssue(identifier);
-    if (issue) issue.assignee_id = agents[agentName] && agents[agentName].id;
-    if (!noRunFor.has(identifier)) {
+  const spawn = {
+    assignIssue: (identifier, agentName) => {
+      calls.assign.push({ identifier, agentName });
+      if (failAssignFor.has(identifier)) throw new Error('multica: rate limited (429)');
+      const issue = findIssue(identifier);
+      if (issue) issue.assignee_id = agents[agentName] && agents[agentName].id;
+      if (!noRunFor.has(identifier)) {
+        runsByIdentifier[identifier] = [
+          ...(runsByIdentifier[identifier] || []),
+          { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
+        ];
+      }
+    },
+    rerunIssue: (identifier) => {
+      calls.rerun.push({ identifier });
       runsByIdentifier[identifier] = [
         ...(runsByIdentifier[identifier] || []),
         { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
       ];
-    }
-  }
-
-  function doRerun(identifier) {
-    calls.rerun.push({ identifier });
-    runsByIdentifier[identifier] = [
-      ...(runsByIdentifier[identifier] || []),
-      { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
-    ];
-  }
-
-  const spawn = {
-    // dispatch(): the same assign -> verify a run started -> force-rerun
-    // sequence the real multica spawn adapter's dispatch() implements,
-    // reusing this mock's own "assign synthesizes an in_progress run" fixture
-    // behavior (see this function's header comment) so AC1's verify_ok
-    // assertion still holds without falling through to verify_no_run.
-    dispatch: (issue, lane) => {
-      const identifier = issue && issue.identifier;
-      try {
-        doAssign(identifier, lane);
-      } catch (e) {
-        return { identifier, lane, assigned: false, assignError: e.message, started: false, forcedRerun: false };
-      }
-      const runs = runsByIdentifier[identifier] || [];
-      const started = runs.length > 0; // doAssign synthesizes an in_progress row unless noRunFor
-      if (!started) {
-        doRerun(identifier);
-        return { identifier, lane, assigned: true, started: false, forcedRerun: true };
-      }
-      const lr = runs[runs.length - 1];
-      return {
-        identifier, lane, assigned: true, started: true, forcedRerun: false,
-        runStatus: lr.status, runtimeId: lr.runtime_id,
-      };
     },
-    assignIssue: doAssign,
-    rerunIssue: doRerun,
     unassignIssue: (identifier) => {
       calls.unassign.push({ identifier });
       const issue = findIssue(identifier);
@@ -297,15 +265,18 @@ test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(
   assert.equal(scanCalls, 1, `expected the board-wide PR scan to run exactly once per cycle() regardless of issue count (10 issues), got ${scanCalls} calls`);
 });
 
-// ---- regression coverage for the p2-adapter-interface follow-up cleanup:
-// "route new todos" now calls spawn.dispatch() instead of hand-rolling
-// assign -> verify -> force-rerun inline. These two tests drive dispatch()'s
-// OTHER two return-shape branches (assign failure; assign-ok-but-no-run)
-// through the real cycle() call path, proving the centralization preserves
-// the exact same assign_error / verify_no_run / rerun_error log events and
-// payloads the old inline code produced.
+// ---- regression coverage for "route new todos"'s inline assign -> verify ->
+// force-rerun sequence (see auriga-router.mjs's cycle() — this pass is
+// deliberately NOT routed through spawn.dispatch(), even though dispatch()
+// ports the identical sequence, because dispatch()'s verify-wait is a real
+// synchronous block unsuited to this long-lived daemon process; see that
+// pass's own comment and spawn-adapter.mjs's typedef). These two tests drive
+// the inline sequence's OTHER two branches (assign failure;
+// assign-ok-but-no-run -> force-rerun) through the real cycle() call path,
+// proving it produces the expected assign_error / verify_no_run / rerun_error
+// log events and payloads.
 
-test('route new todos: a dispatch() assign failure logs assign_error with the same identifier/agent/error shape as before centralization', async () => {
+test('route new todos: an assign failure logs assign_error with the expected identifier/agent/error shape', async () => {
   const AURIGA = projectId('Auriga');
   const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
   const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS, {
@@ -324,7 +295,7 @@ test('route new todos: a dispatch() assign failure logs assign_error with the sa
   assert.equal(log.byEvent('verify_ok').length, 0);
 });
 
-test('route new todos: dispatch() reporting started:false logs verify_no_run and the mock\'s force-rerun is observed via spawn.calls.rerun', async () => {
+test('route new todos: no run row appearing within the verify wait logs verify_no_run and force-reruns (observed via spawn.calls.rerun)', async () => {
   const AURIGA = projectId('Auriga');
   const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS, {
@@ -340,5 +311,5 @@ test('route new todos: dispatch() reporting started:false logs verify_no_run and
   assert.equal(noRun[0].identifier, story.identifier);
   assert.equal(noRun[0].action, 'rerun');
   assert.equal(log.byEvent('verify_ok').length, 0);
-  assert.ok(calls.rerun.some((c) => c.identifier === story.identifier), 'dispatch() must have force-reran the story');
+  assert.ok(calls.rerun.some((c) => c.identifier === story.identifier), 'the inline verify step must have force-reran the story');
 });
