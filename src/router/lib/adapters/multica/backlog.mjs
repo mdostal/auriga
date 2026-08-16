@@ -44,6 +44,7 @@
 // lib/core.mjs's job, not this adapter's.
 
 import { execFileSync } from 'node:child_process';
+import { cleanEnv, makeRun } from './cli-runner.mjs';
 
 /**
  * @param {{ cli?: string, profile?: string, ghCli?: string, reviewRepoOwner?: string, reviewSearchRepos?: string[] }} [cfg]
@@ -62,27 +63,10 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || [];
 
-  // The three env vars must be UNSET (stale values 404). execFileSync inherits
-  // process.env, so we delete them from a cloned env instead of `env -u`.
-  // SECURITY-RELEVANT — preserved verbatim from lib/multica.mjs; do not drop.
-  function cleanEnv() {
-    const e = { ...process.env };
-    delete e.MULTICA_TOKEN;
-    delete e.MULTICA_PAT_TOKEN;
-    delete e.MULTICA_WORKSPACE_ID;
-    return e;
-  }
-
-  function run(args, { json = true } = {}) {
-    const out = execFileSync(CLI, ['--profile', PROFILE, ...args], {
-      env: cleanEnv(),
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (!json) return out;
-    return out.trim() ? JSON.parse(out) : null;
-  }
+  // cleanEnv()/run() now live in ./cli-runner.mjs — shared with spawn.mjs
+  // (see that module's header comment for why execFileSync is INJECTED here
+  // rather than imported by cli-runner.mjs itself).
+  const run = makeRun(execFileSync, CLI, PROFILE);
 
   function ghRun(args, maxBuffer = 32 * 1024 * 1024) {
     const out = execFileSync(GH, args, {

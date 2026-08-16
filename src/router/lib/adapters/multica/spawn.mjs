@@ -31,6 +31,7 @@
 // *****************************************************************
 
 import { execFileSync } from 'node:child_process';
+import { makeRun } from './cli-runner.mjs';
 import { classifyRun, latestRun } from '../../core.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
@@ -81,27 +82,10 @@ export function createMulticaSpawnAdapter(cfg = {}) {
   const REVIEW_LANE = cfg.reviewLane || SUBSTRATE_REVIEW_LANE;
   const RUNTIME_CAP = cfg.runtimeCap || SUBSTRATE_RUNTIME_CAP;
 
-  // The three env vars must be UNSET (stale values 404). execFileSync inherits
-  // process.env, so we delete them from a cloned env instead of `env -u`.
-  // SECURITY-RELEVANT — preserved verbatim from lib/multica.mjs; do not drop.
-  function cleanEnv() {
-    const e = { ...process.env };
-    delete e.MULTICA_TOKEN;
-    delete e.MULTICA_PAT_TOKEN;
-    delete e.MULTICA_WORKSPACE_ID;
-    return e;
-  }
-
-  function run(args, { json = true } = {}) {
-    const out = execFileSync(CLI, ['--profile', PROFILE, ...args], {
-      env: cleanEnv(),
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (!json) return out;
-    return out.trim() ? JSON.parse(out) : null;
-  }
+  // cleanEnv()/run() now live in ./cli-runner.mjs — shared with backlog.mjs
+  // (see that module's header comment for why execFileSync is INJECTED here
+  // rather than imported by cli-runner.mjs itself).
+  const run = makeRun(execFileSync, CLI, PROFILE);
 
   // WRITE method: propagates any CLI failure to the caller (no try/catch) —
   // matches lib/multica.mjs's assignIssue exactly.
