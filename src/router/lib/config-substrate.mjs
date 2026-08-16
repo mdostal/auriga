@@ -112,4 +112,83 @@ export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a
 // decision"). Fabricating routing entries for non-existent projects would be
 // wrong, and expanding PROJECT_IDS is a separate, already-gated decision.
 // Needs reconciliation with Minerva/operator before this part of the epic can
-// be completed.
+// be completed. This same 7-unmapped-names gap carries through PROJECT_LANE
+// below, which also does not (and must not) have entries for those 7.
+
+// ============================================================================
+// LANE MAPS + RUNTIME_CAP (moved here VERBATIM from lib/config.mjs by
+// p2-multica-spawn-adapter, completing the substrate/policy split begun in
+// p2-multica-backlog-adapter — see that story's design_decisions). Byte-
+// identical values to what lib/config.mjs exported before this move,
+// including the KNOWN GAP above. lib/config.mjs re-exports these same names
+// (backward-compat window for any consumer still importing from
+// lib/config.mjs directly — see that file's header comment).
+
+// Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
+// so cap the whole runtime to avoid single-runtime contention collapse.
+export const RUNTIME_CAP = {
+  claude: 2,
+  opencode: 3,
+  codex: 4,
+};
+
+// Project -> ordered candidate agent lanes.
+// Aligned lanes (agent repo matches the project) are preferred and listed first.
+// "Others" spread across the two Codex agents; Claude used sparingly (Consus only).
+const CONSUS = '282343e2-b741-4438-bc80-b93c34819a96';
+const HEIMDALL = '8cb0298a-8a45-45c2-8d09-bc219e2d8a82';
+const AURIGA = 'd78a9f5d-8792-45e8-89e0-bd7b916564ca';
+const MINERVA = '6327fdaf-789e-4290-ab41-1421957b55c6';
+const PANTHEON_CORE = 'd8ecfab4-79bd-4290-8127-290885f01f38';
+
+export const PROJECT_LANE = {
+  [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
+  [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
+  [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
+  [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
+  // Pantheon Core is the dogfood seed drop (Consus ideabox) AND where Minerva now files the
+  // decomposed child stories of those seeds (a seed dropped here yields stories here — see
+  // Minerva's fileStoriesToMultica project resolution). Seeds themselves still route to
+  // minerva-dev (the isSeed check in core.mjs runs FIRST); this lane applies only to the
+  // NON-seed decomposed build-stories. They must never fall back to DEFAULT_LANE (codex/opencode
+  // have no plugin-hive and self-block on /hive:execute) — route them to the claude+hive BUILD
+  // lane. Minerva's stories are also hive-shaped, so isHiveStory routes most of them via
+  // HIVE_LANE anyway; this entry closes the gap for any decomposed story that isn't hive-shaped.
+  [PANTHEON_CORE]: ['auriga-build'],
+};
+
+// Fallback lane for every other project: spread across the two Codex agents.
+// Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
+export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
+
+// Capability-aware override: any story detected as hive-authored (isHiveStory in
+// lib/core.mjs — build/implementation/classic-methodology tagged, e.g. a Minerva-planned
+// story) routes HERE instead of PROJECT_LANE/DEFAULT_LANE, regardless of project. Codex and
+// Opencode runtimes have no plugin-hive install and cannot run /hive:execute|review|test —
+// routing a hive story there causes a silent self-block (PAN-6636, PAN-6640, PAN-6646).
+export const HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
+
+// The review/ship lane: in_review stories with an open PR route here. The
+// review agent itself ('auriga-review') is added to AGENTS, and its runtime
+// bucket ('claude-review') capped in RUNTIME_CAP above, by lib/config.mjs
+// (mutation happens there — see that file's BACK-HALF OF THE LOOP comment —
+// because it happens AFTER this module's AGENTS/RUNTIME_CAP are imported and
+// re-exported there, exactly like the AGENTS split in p2-multica-backlog-adapter).
+export const REVIEW_LANE = ['auriga-review'];
+
+// GitHub owner whose repos the review lane sweeps for open PRs. The router
+// discovers ALL of this owner's repos live (mca.ghListRepos) each cycle so a new
+// repo (logic-loops, house-finder, ...) is covered the moment it exists, instead
+// of waiting to be hand-added to REVIEW_SEARCH_REPOS below. REVIEW_SEARCH_REPOS
+// remains the static fallback used only when live discovery returns nothing.
+export const REVIEW_REPO_OWNER = 'mdostal';
+
+// Baseline repos the review lane searches for a story's open PR. Multica's
+// issue<->PR linkage is empty in practice, so PR discovery goes through gh; the
+// router also adds any explicit target_repo it finds on an in_review story, so
+// this is just the default set of OUR private plugin repos.
+export const REVIEW_SEARCH_REPOS = [
+  'mdostal/auriga', 'mdostal/heimdall', 'mdostal/consus',
+  'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
+  'mdostal/cron-maker',
+];
