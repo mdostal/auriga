@@ -304,6 +304,12 @@ export async function cycle(opts = {}) {
         if (c.status === 'blocked') backlog.setIssueStatus(c.identifier, 'todo');
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
+        // NOT ported to spawn.dispatch() (see "route new todos" below, which is):
+        // dispatch()'s verify-then-conditionally-rerun contract assumes assign
+        // SOMETIMES auto-enqueues a run and rerun is only a fallback; this cascade
+        // path instead treats rerun as ALWAYS required (assign never enqueues on
+        // its own) and always force-reruns, whether or not a run already exists —
+        // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
           spawn.assignIssue(c.identifier, agent);
@@ -431,6 +437,11 @@ export async function cycle(opts = {}) {
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
+        // NOT ported to spawn.dispatch() (see "route new todos" below, which is):
+        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
+        // branch, which never assigns at all) rather than verifying a run started
+        // first — a different contract than dispatch()'s verify-then-conditionally-
+        // rerun, not a stale duplicate of it.
         spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
@@ -481,30 +492,30 @@ export async function cycle(opts = {}) {
     if (assigned >= maxAssign) break;
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
-    try {
-      spawn.assignIssue(p.identifier, p.agent);
-      assigned++;
-    } catch (e) {
-      const msg = e.message || '';
+
+    // assign -> verify a run started -> force-enqueue if not (dead-zone fix),
+    // centralized in spawn.dispatch() (see lib/adapters/multica/spawn.mjs's
+    // dispatch() — a behavior-preserving port of exactly this sequence — and
+    // lib/adapters/spawn-adapter.mjs's typedef for the returned
+    // {assigned, assignError, started, forcedRerun, rerunError, runStatus,
+    // runtimeId} shape this reads). `p.agent` is dispatch()'s `lane` param
+    // (a dispatch-target agent name, not p.lane's routing-lane name).
+    const result = spawn.dispatch(p, p.agent);
+
+    if (!result.assigned) {
+      const msg = result.assignError || '';
       logImpl('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
       // If a lane errors with a limit/quota, block that runtime for the rest of this cycle.
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
     }
-    // verify a run started; force-enqueue if not (dead-zone fix)
-    await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
-    const runs = backlog.getIssueRuns(p.identifier);
-    const started = runs.length > 0 && runs.some((r) => {
-      const c = coreImpl.classifyRun(r, Date.now());
-      return c.active || c.done || c.failed; // any run row means it dispatched
-    });
-    if (!started) {
+    assigned++;
+
+    if (!result.started) {
       logImpl('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
-      try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
+      if (result.rerunError) logImpl('rerun_error', { identifier: p.identifier, error: result.rerunError });
     } else {
-      const lr = coreImpl.latestRun(runs);
-      const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
-      logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+      logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: result.runStatus, runtimeId: result.runtimeId });
     }
   }
 
