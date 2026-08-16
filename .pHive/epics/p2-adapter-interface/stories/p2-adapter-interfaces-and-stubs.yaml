@@ -1,0 +1,112 @@
+id: p2-adapter-interfaces-and-stubs
+epic: p2-adapter-interface
+title: Define backlogAdapter/spawnAdapter shapes and ship stub implementations
+status: done
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Define the two adapter shape contracts (backlogAdapter, spawnAdapter) as JSDoc
+  typedefs — no TypeScript build step, no ES6 classes (this codebase has zero
+  `class` declarations; plain factory-function modules only). Ship in-memory stub
+  implementations of both shapes, plus a shared realistic fixture set of test
+  profiles (personas) and runners (dispatch targets), plus a standalone smoke test
+  proving cycle() can run end-to-end using ONLY the stub adapters with zero
+  external process calls attempted. This is the cheapest possible proof the
+  interface shape is correct, before building either Multica-backed
+  implementation. Nothing in this story touches auriga-router.mjs or
+  lib/config.mjs — it is purely additive.
+
+acceptance_criteria:
+  - "Given backlog-adapter.mjs and spawn-adapter.mjs exist, when read, then each exports a JSDoc @typedef with the exact method list in Interfaces below and a comment stating spawnAdapter has NO provisioning method by design"
+  - "Given createStubBacklogAdapter(seedData) and createStubSpawnAdapter() exist, when called with no arguments, then every method is callable and returns the documented empty-default shape without throwing"
+  - "Given standalone-smoke.test.mjs exists, when `npm test` runs it, then cycle() completes successfully using only the stub adapters and a spy/mock on node:child_process confirms zero execFileSync calls were attempted"
+  - "Given test-profiles-runners.mjs fixture exists, when inspected, then it includes at least one issue in each of: todo, in_progress-with-done-run, in_review-with-merged-PR, blocked-with-cleared-dependency states"
+
+steps:
+  - id: research
+    description: Read lib/core.mjs's consumption of issue/run/PR shapes and test/support/mock-mca.mjs's existing fixture shapes to ground the new typedefs and stub fixtures in what lib/core.mjs actually expects
+    agent: researcher
+  - id: implement
+    description: Implement the two interface files, two stub adapter files, the adapters README, and the shared fixture file per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write stub-adapters.test.mjs and standalone-smoke.test.mjs covering the acceptance criteria above
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for JSDoc completeness, plain-function convention compliance (no classes), and that no live/mocked-CLI dependency was introduced
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p2-adapter-interface (real merge commit, not squashed, per developer.pr_style)
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:test, zero runtime deps)"
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: "Pure decision core — the actual consumer of issue/run/PR shapes; typedefs and stub fixtures must match what this file reads, not an invented shape"
+    - path: src/router/test/support/mock-mca.mjs
+      purpose: "Existing informal adapter-shape mock — reuse its fixture patterns rather than inventing thinner new ones"
+
+files_to_modify:
+  - file: src/router/lib/adapters/backlog-adapter.mjs
+    change: "CREATE — JSDoc @typedef BacklogAdapter: listIssues(projectId), listAllProjectIds(), getIssueRuns(id), getIssuePullRequests(id), setIssueStatus(id, status), commentOnIssue(id, body)"
+  - file: src/router/lib/adapters/spawn-adapter.mjs
+    change: "CREATE — JSDoc @typedef SpawnAdapter: dispatch(issue, lane), describeLanes(), assignIssue(id, agent), rerunIssue(id), unassignIssue(id). Comment: no provisioning method, and none should be added — see README.md"
+  - file: src/router/lib/adapters/README.md
+    change: "CREATE — explains the two-adapter model; states the no-pre-emptive-integrations rule generalized from the Vulcan decision"
+  - file: src/router/lib/adapters/stub/backlog.mjs
+    change: "CREATE — createStubBacklogAdapter(seedData = {}), in-memory Map-backed, implements BacklogAdapter"
+  - file: src/router/lib/adapters/stub/spawn.mjs
+    change: "CREATE — createStubSpawnAdapter(), records calls to .calls[], implements SpawnAdapter, describeLanes() returns a small hardcoded fixture lane map"
+  - file: src/router/test/fixtures/test-profiles-runners.mjs
+    change: "CREATE — shared fixture set of profiles (personas) and runners (lanes) covering todo/in_progress-done/in_review-merged/blocked-cleared states, reused by this story's smoke test and p2-router-cutover's cutover-e2e test"
+  - file: src/router/test/stub-adapters.test.mjs
+    change: "CREATE — asserts stub adapters satisfy the shape contracts"
+  - file: src/router/test/standalone-smoke.test.mjs
+    change: "CREATE — runs cycle() with stub adapters only, asserts zero execFileSync calls attempted"
+
+code_examples:
+  - title: "Existing injectable-dependency pattern cycle() already uses (the seam this story formalizes)"
+    file: src/router/README.md
+    snippet: |
+      `cycle()` (one full scan -> route -> verify pass) is exported from
+      `auriga-router.mjs` and accepts an options bag (`mca`, `cfg`, `core`, `log`,
+      `sleep`, `dryRun`, `noZombie`, `maxAssign`, `now`) so tests can drive it
+      end-to-end against a mock Multica layer instead of the live CLI.
+
+design_decisions:
+  - decision: "Adapter implementations are plain factory-function modules (createXAdapter(cfg) returning a frozen object literal), never ES6 classes"
+    rationale: "This codebase has zero `class` declarations anywhere (verified by repo-wide grep during grill review); matches the stated camelCase/plain-function convention in .pHive/project-profile.yaml"
+  - decision: "spawnAdapter has no provisioning method, hook, or middleware slot of any kind"
+    rationale: "Explicit user correction during design-discussion review: Auriga's core must never pre-build a concept for a tool (Vulcan) it doesn't yet need — see .pHive/CONTEXT.md and the adapter-boundary-integrity cross-cutting concern"
+
+cross_cutting:
+  - concern: documentation
+    action: "New src/router/lib/adapters/ directory structure and README.md require the doc-impact note in structured-outline.md Part 3b to be tracked — this story creates the docs, doesn't yet update the OTHER docs that reference it (that's p2-pantheon-l2-stub-and-docs)"
+  - concern: adapter-boundary-integrity
+    action: "This story defines the boundary itself — verify no method sneaks in a vendor-specific concept (Multica, gh, Vulcan) into either shape's JSDoc typedef; spawnAdapter's no-provisioning comment is the explicit guard"
+
+risks:
+  - severity: low
+    description: "Stub adapter return shapes could subtly diverge from what lib/core.mjs actually expects, giving false confidence from a green smoke test"
+    mitigation: "Reuse test/support/mock-mca.mjs's already-validated fixture shapes rather than inventing new ones (see design_decisions and key_files)"
+
+references:
+  - path: .pHive/epics/p2-adapter-interface/docs/structured-outline.md
+    relevant_excerpt: |
+      Part 2, Phase 1: Interfaces + Stub Adapters — full file list, interface
+      JSDoc typedefs, and validation plan for this story.
+  - path: .pHive/cross-cutting-concerns.yaml
+    relevant_excerpt: |
+      adapter-boundary-integrity concern — Auriga's core must never import or
+      call a specific external system directly; all such access goes through
+      a defined adapter interface.

@@ -4,6 +4,6 @@
   "private": true,
   "description": "Auriga — Pantheon auto-router. Root test entrypoint so CI's generic Node gate (ci.yml) actually runs the router's unit + loop-level e2e suite.",
   "scripts": {
-    "test": "node --test src/router/test/*.test.mjs"
+    "test": "node --experimental-test-module-mocks --test src/router/test/*.test.mjs"
   }
 }

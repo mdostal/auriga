@@ -1,0 +1,29 @@
+# Hive workflow configuration for Auriga.
+# NOT a duplicate of CLAUDE.md — this holds Hive orchestration settings only.
+# Build/test/lint commands and code conventions belong in CLAUDE.md (create one
+# alongside this file — see .pHive/CONTEXT.md and .pHive/project-profile.yaml
+# for what was discovered during kickoff).
+
+metrics:
+  enabled: true
+
+execution:
+  default_methodology: classic  # inferred: tests live in a separate dir (no co-location), no BDD keywords
+
+task_tracking:
+  adapter: null  # no Linear/GitHub-issues backlog wired for THIS repo's own Hive workflow — reconsider once the generic backlog adapter interface (the subject of this kickoff) exists
+
+developer:
+  pr_style: atomic-prs  # user override: NEVER squash-merge unless deliberately killing off history — pull, merge, push, real merge commits preserving shared history
+  commit_granularity: medium   # feature-scoped
+  review_depth: standard
+  notes: |
+    Never squash-merge unless necessary (e.g. deliberately killing off dead
+    history/commits). Prefer pull -> merge -> push with real merge commits
+    that preserve shared history over repeated squash-and-fix cycles.
+
+planning:
+  collaborative_review: true
+
+meta_team:
+  github_forwarding: false

@@ -17,15 +17,40 @@
 //   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG.
 //
 // TESTABILITY: `cycle()` is exported and accepts an options bag so tests can
-// inject a mock Multica layer (opts.mca), a fixture config (opts.cfg), a log
-// sink (opts.log), and a fast/no-op sleep (opts.sleep) — see
-// test/router-cycle.e2e.test.mjs. `main()` (the live daemon loop) only runs
-// when this file is executed directly, never when imported by a test.
+// inject fixture/stub backlog+spawn adapters (opts.backlog, opts.spawn), a
+// fixture config (opts.cfg), a log sink (opts.log), and a fast/no-op sleep
+// (opts.sleep) — see test/router-cycle.e2e.test.mjs and
+// test/cutover-e2e.test.mjs. `main()` (the live daemon loop) only runs when
+// this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
-import * as mca from './lib/multica.mjs';
+import { createMulticaBacklogAdapter } from './lib/adapters/multica/backlog.mjs';
+import { createMulticaSpawnAdapter } from './lib/adapters/multica/spawn.mjs';
+
+// Live defaults — constructed once at module load (cheap: a factory closure,
+// no CLI call happens until a method is actually invoked), exactly mirroring
+// the old `import * as mca from './lib/multica.mjs'` singleton-module
+// pattern. reviewRepoOwner/reviewSearchRepos are wired from cfg so the
+// backlog adapter's internal gh-based PR discovery (which folded in what
+// used to be the router's own ghListRepos/ghOpenPrs/ghPrs calls) searches
+// the SAME repo set live behavior already depended on — omitting these would
+// silently break PR discovery (false-done + review-dispatch would find no
+// PRs). verifyDelayMs/lane-map fields mirror the router's live CAPS/lane
+// config so a future describeLanes() consumer sees byte-identical values.
+const defaultBacklog = createMulticaBacklogAdapter({
+  reviewRepoOwner: cfg.REVIEW_REPO_OWNER,
+  reviewSearchRepos: cfg.REVIEW_SEARCH_REPOS,
+});
+const defaultSpawn = createMulticaSpawnAdapter({
+  verifyDelayMs: cfg.CAPS.verifyDelayMs,
+  projectLane: cfg.PROJECT_LANE,
+  defaultLane: cfg.DEFAULT_LANE,
+  hiveLane: cfg.HIVE_LANE,
+  reviewLane: cfg.REVIEW_LANE,
+  runtimeCap: cfg.RUNTIME_CAP,
+});
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -75,12 +100,13 @@ function log(event, data) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---- one cycle -------------------------------------------------------------
-// opts: { mca, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
+// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
 // Every dependency defaults to the live module-level singleton, so calling
 // cycle() with no args (from main()) is exactly the original live behavior.
 // Returns { todo, picked, assigned }.
 export async function cycle(opts = {}) {
-  const mcaImpl = opts.mca || mca;
+  const backlog = opts.backlog || defaultBacklog;
+  const spawn = opts.spawn || defaultSpawn;
   const cfgImpl = opts.cfg || cfg;
   const coreImpl = opts.core || core;
   const logImpl = opts.log || log;
@@ -97,15 +123,44 @@ export async function cycle(opts = {}) {
   // build-DISPATCH set (cfgImpl.PROJECT_IDS) deliberately excludes, so scanning only
   // those 4 hid them. selectAssignments still filters to cfgImpl.PROJECT_IDS internally
   // (dispatch stays gated to aligned lanes); only observation goes board-wide.
-  const discovered = mcaImpl.listAllProjectIds();
+  const discovered = backlog.listAllProjectIds();
   const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
-  const issues = mcaImpl.listAllIssues(scanIds);
+  const issues = backlog.listAllIssues(scanIds);
   const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS);
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
+
+  // ---- BOARD-WIDE PR candidate scan (ONCE per cycle) ----
+  // Restores the pre-cutover router's own top-level ghListRepos/ghOpenPrs/
+  // ghPrs gather (which ran once per cycle and was reused across every
+  // issue): backlog.listCandidatePullRequests(), when the adapter provides it
+  // (the real Multica adapter does; simpler test/stub adapters generally
+  // don't), does the raw repo-wide gh scan HERE, ONCE, and every call site
+  // below that needs "does issue X have a matching PR" filters this SAME
+  // cached, unfiltered list via matchedPrs() — using core.mjs's real
+  // prMatchesStory/prIdentityMatchesStory, never a narrower per-adapter
+  // heuristic. This fixes two regressions an independent review found in this
+  // epic's diff: (1) a PR matching only via a story's short slug key (not the
+  // raw ticket identifier) is found again, and (2) the repo-wide gh scan no
+  // longer re-runs per issue per call site (an O(issues x repos) subprocess
+  // explosion), it runs once per cycle like it always did pre-cutover.
+  let candidatePrs = null;
+  if (typeof backlog.listCandidatePullRequests === 'function') {
+    try { candidatePrs = backlog.listCandidatePullRequests(); }
+    catch (e) { logImpl('candidate_pr_scan_error', { error: e.message }); }
+  }
+  // Returns the PRs in `candidatePrs` matching `issueObj` via `matcher`
+  // (coreImpl.prMatchesStory or coreImpl.prIdentityMatchesStory). Falls back
+  // to backlog.getIssuePullRequests's own per-identifier lookup (filtered by
+  // the SAME rich matcher) only when the adapter has no board-wide scan —
+  // e.g. stub/mock adapters used by unit tests.
+  function matchedPrs(identifier, issueObj, matcher) {
+    if (candidatePrs) return candidatePrs.filter((pr) => matcher(pr, issueObj));
+    return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
+  }
 
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
   logImpl('scan', {
@@ -142,15 +197,18 @@ export async function cycle(opts = {}) {
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       let hasPr = false;
       if (slug) {
-        try { hasPr = mcaImpl.ghPrs(slug, 'all').some((pr) => coreImpl.prMatchesStory(pr, issueObj)); }
+        // Matches against the per-cycle cached board-wide PR scan (see
+        // matchedPrs above) via the real prMatchesStory — not a narrower
+        // per-adapter heuristic.
+        try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
         catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
       if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
       logImpl('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !dryRun });
       if (!dryRun) {
         try {
-          mcaImpl.issueStatus(u.identifier, 'todo');
-          try { mcaImpl.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
+          backlog.setIssueStatus(u.identifier, 'todo');
+          try { spawn.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
         } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
       }
     }
@@ -163,7 +221,7 @@ export async function cycle(opts = {}) {
     for (const pd of parentDone) {
       logImpl('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {
-        try { mcaImpl.issueStatus(pd.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
+        try { backlog.setIssueStatus(pd.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
       }
     }
   }
@@ -175,24 +233,24 @@ export async function cycle(opts = {}) {
   // idempotent (a transitioned issue simply drops out of its source filter).
   const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
   const runsByIssue = {};
-  for (const i of inProgress) runsByIssue[i.identifier] = mcaImpl.issueRuns(i.identifier);
+  for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
   const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: 'in_review', applied: !dryRun });
     if (!dryRun) {
-      try { mcaImpl.issueStatus(c.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
+      try { backlog.setIssueStatus(c.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
     }
   }
 
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
   const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = mcaImpl.issuePullRequests(i.identifier);
+  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
   const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: 'done', applied: !dryRun });
     if (!dryRun) {
-      try { mcaImpl.issueStatus(v.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+      try { backlog.setIssueStatus(v.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
     }
   }
 
@@ -224,15 +282,17 @@ export async function cycle(opts = {}) {
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
       let activeRun = false;
-      try { activeRun = mcaImpl.issueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
+      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
       catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
       if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
-      // in review, merged = shipped) — same gh-based guard the unblock pass uses.
+      // in review, merged = shipped) — same gh-based guard the unblock pass uses,
+      // matched against the per-cycle cached board-wide PR scan (see matchedPrs
+      // above).
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       if (slug) {
         try {
-          if (mcaImpl.ghPrs(slug, 'all').some((pr) => coreImpl.prMatchesStory(pr, issueObj))) {
+          if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
             logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
             continue;
           }
@@ -241,16 +301,16 @@ export async function cycle(opts = {}) {
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
-        if (c.status === 'blocked') mcaImpl.issueStatus(c.identifier, 'todo');
+        if (c.status === 'blocked') backlog.setIssueStatus(c.identifier, 'todo');
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
-          mcaImpl.assignIssue(c.identifier, agent);
+          spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         }
-        mcaImpl.rerunIssue(c.identifier);
+        spawn.rerunIssue(c.identifier);
         assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
@@ -270,34 +330,28 @@ export async function cycle(opts = {}) {
   // Assignment to the review agent is the idempotency marker (see
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
-  for (const i of inReview) inReviewRuns[i.identifier] = mcaImpl.issueRuns(i.identifier);
+  for (const i of inReview) inReviewRuns[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  // Board-wide open-PR gather (shared by false-done + review dispatch).
-  // Multica's issue<->PR linkage is empty in practice, so discover PRs directly via
-  // gh across ALL of the owner's repos (live discovery — a new repo like logic-loops
-  // is covered the moment it exists) PLUS the static fallback PLUS any explicit
-  // target_repo on an in_review/done story. Matching is slug-aware (prMatchesStory):
-  // it matches the story's short key (m-01) in a branch, not only the PAN id, so
-  // slug-branched PRs (mnemosyne#1 feat/m-01-service) are found.
-  const discoveredRepos = mcaImpl.ghListRepos(cfgImpl.REVIEW_REPO_OWNER);
-  const repoSet = new Set([
-    ...discoveredRepos,
-    ...(cfgImpl.REVIEW_SEARCH_REPOS || []),
-  ].map((r) => coreImpl.normalizeRepoSlug(r)).filter(Boolean));
-  for (const i of inReview) { const s = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
+  // Per-story PR gather (shared by false-done + review dispatch), drawn from
+  // the SAME per-cycle cached board-wide scan (candidatePrs, gathered once
+  // near the top of cycle() — see matchedPrs above). Matching stays
+  // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
+  // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
+  // are still found).
   const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
-  for (const i of doneIssues) { const s = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
-  const openPrsAll = [];
-  for (const repo of repoSet) {
-    try { for (const pr of mcaImpl.ghOpenPrs(repo)) { pr._repo = repo; openPrsAll.push(pr); } } catch { /* one repo failing must not abort the scan */ }
-  }
+
   // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
   // parent/seed ticket that some unrelated PR merely references is never dispatched.
+  // The candidate scan returns PRs of ANY state (unlike the old ghOpenPrs, which
+  // was open-only), so prIsOpen must be checked explicitly here.
   const openPrIds = new Set();
   for (const i of inReview) {
-    if (openPrsAll.some((pr) => coreImpl.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
+    let prs = [];
+    try { prs = matchedPrs(i.identifier, i, coreImpl.prIdentityMatchesStory); }
+    catch (e) { logImpl('review_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
+    if (prs.some((pr) => coreImpl.prIsOpen(pr))) openPrIds.add(i.identifier);
   }
-  if (inReview.length) logImpl('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
+  if (inReview.length) logImpl('review_pr_scan', { checked: inReview.length, withPr: [...openPrIds] });
 
   // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
   // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
@@ -305,7 +359,33 @@ export async function cycle(opts = {}) {
   // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
   // story with no open PR is left alone (may be a legit non-code done task).
   {
-    const falseDone = coreImpl.detectFalseDone(doneIssues, openPrsAll);
+    // detectFalseDone itself applies the prIsOpen/ownPrUrl/repo-qualified/
+    // prIdentityMatchesStory matching per doneIssue against a BOARD-WIDE
+    // candidate list (exactly like the pre-cutover router's own openPrsAll),
+    // so the full unfiltered candidatePrs scan is passed straight through
+    // when available. Only adapters with no board-wide scan (e.g. stub/test
+    // adapters) fall back to unioning each done issue's own per-identifier
+    // lookup, de-duplicated by PR url — the pre-fix per-issue gather shape,
+    // kept only as that fallback's approximation of a board-wide list.
+    let donePrs;
+    if (candidatePrs) {
+      donePrs = candidatePrs;
+    } else {
+      donePrs = [];
+      const seenPr = new Set();
+      for (const i of doneIssues) {
+        let prs = [];
+        try { prs = backlog.getIssuePullRequests(i.identifier); }
+        catch (e) { logImpl('false_done_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
+        for (const pr of prs) {
+          const key = pr.url || pr.html_url || `${pr._repo || ''}#${pr.number}`;
+          if (seenPr.has(key)) continue;
+          seenPr.add(key);
+          donePrs.push(pr);
+        }
+      }
+    }
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs);
     const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
@@ -313,7 +393,7 @@ export async function cycle(opts = {}) {
       n++;
       logImpl('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
       if (!dryRun) {
-        try { mcaImpl.issueStatus(f.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
+        try { backlog.setIssueStatus(f.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
       }
     }
   }
@@ -340,7 +420,7 @@ export async function cycle(opts = {}) {
         // Publish the squad plan onto the ticket so what the squad will do is visible
         // on the board up front and is read by the squad agent (best-effort; a comment
         // failure must never block the dispatch).
-        mcaImpl.issueComment(
+        backlog.commentOnIssue(
           r.identifier,
           'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
           '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
@@ -351,10 +431,10 @@ export async function cycle(opts = {}) {
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
-        mcaImpl.assignIssue(r.identifier, r.agent);
+        spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
-      mcaImpl.rerunIssue(r.identifier);
+      spawn.rerunIssue(r.identifier);
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
     } catch (e) {
       logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
@@ -372,7 +452,7 @@ export async function cycle(opts = {}) {
       if (assigned >= maxAssign) break;
       if (z.action === 'rerun') {
         logImpl('zombie', { ...z, applied: !dryRun });
-        if (!dryRun) { try { mcaImpl.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
@@ -380,7 +460,7 @@ export async function cycle(opts = {}) {
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
           try {
-            mcaImpl.assignIssue(z.identifier, agent);
+            spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
@@ -402,7 +482,7 @@ export async function cycle(opts = {}) {
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
     try {
-      mcaImpl.assignIssue(p.identifier, p.agent);
+      spawn.assignIssue(p.identifier, p.agent);
       assigned++;
     } catch (e) {
       const msg = e.message || '';
@@ -413,14 +493,14 @@ export async function cycle(opts = {}) {
     }
     // verify a run started; force-enqueue if not (dead-zone fix)
     await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
-    const runs = mcaImpl.issueRuns(p.identifier);
+    const runs = backlog.getIssueRuns(p.identifier);
     const started = runs.length > 0 && runs.some((r) => {
       const c = coreImpl.classifyRun(r, Date.now());
       return c.active || c.done || c.failed; // any run row means it dispatched
     });
     if (!started) {
       logImpl('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
-      try { mcaImpl.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
+      try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
     } else {
       const lr = coreImpl.latestRun(runs);
       const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};

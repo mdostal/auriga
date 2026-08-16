@@ -1,0 +1,99 @@
+id: p2-router-cutover
+epic: p2-adapter-interface
+title: Rewire cycle() and all mcaImpl.* call sites to the backlog/spawn adapter boundary
+status: done
+complexity: high
+methodology: classic
+depends_on: [p2-multica-backlog-adapter, p2-multica-spawn-adapter]
+
+description: |
+  The concentrated-risk cutover: rewire auriga-router.mjs's cycle() options bag
+  from `mca` to `backlog` + `spawn` (typed adapter instances), and re-point all
+  ~25 mcaImpl.* call sites across the unblock pass, cascade re-dispatch pass,
+  false-done/review-scan pass, dispatch pass, and review lane to the new adapter
+  methods. main() defaults to createMulticaBacklogAdapter()/
+  createMulticaSpawnAdapter(), preserving today's live supervised behavior with
+  zero config changes required. lib/core.mjs is NOT touched — every call into it
+  is unchanged. Acceptance bar: the full existing 6-file/26+-assertion regression
+  suite passes unchanged, PLUS a new in-memory cutover-e2e test against a
+  realistic profiles/runners fixture set. NO live or mocked-CLI Multica board is
+  used anywhere in this story's verification — that was an explicit user
+  correction; do not add a "dry run against real Multica" step.
+
+acceptance_criteria:
+  - "Given cycle(opts) is called, when opts is inspected, then it accepts { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now } — no `mca` parameter remains"
+  - "Given `npm test` runs from repo root, then all 6 pre-existing test files (core, cascade, descdeps, slugkey, squad, router-cycle.e2e) pass with their existing assertions about ROUTING DECISIONS unchanged"
+  - "Given the new cutover-e2e.test.mjs runs, when cycle() is driven end-to-end through the cut-over auriga-router.mjs using test/fixtures/test-profiles-runners.mjs via the stub adapters, then it completes correctly with zero external process calls attempted"
+  - "Given main() is invoked (not under test), when constructed, then it defaults backlog/spawn to the Multica-backed adapters from p2-multica-backlog-adapter/p2-multica-spawn-adapter with no new required config"
+  - "Given the unblock, cascade, false-done/review-scan, dispatch, and review-lane passes, when grepped, then none references `mcaImpl` — every call site uses `backlog.*` or `spawn.*`"
+
+steps:
+  - id: research
+    description: Enumerate every mcaImpl.* call site in auriga-router.mjs (the ~25 sites across 5 passes documented in research-brief.md §2 and structured-outline.md Part 2 Phase 4) and map each to its target backlog/spawn method
+    agent: researcher
+  - id: implement
+    description: Rewire cycle()'s signature and every call site per the mapping from research; update main()'s default construction
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Update router-cycle.e2e.test.mjs to construct { backlog, spawn } instead of { mca }; write cutover-e2e.test.mjs against test-profiles-runners.mjs; run the full existing suite
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: For EVERY re-pointed call site, cross-check against the research step's mapping — this is the story where a subtle wrong-method-picked bug would matter most
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p2-adapter-interface — this is the cutover commit, keep it isolated (no unrelated changes bundled in)
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:test)"
+  key_files:
+    - path: src/router/auriga-router.mjs
+      purpose: "The file being rewired — every mcaImpl.* call site in the unblock/cascade/false-done/dispatch/review passes"
+    - path: src/router/test/router-cycle.e2e.test.mjs
+      purpose: "Existing loop-level e2e test against mock-mca.mjs — must be updated to the new { backlog, spawn } shape without changing its asserted scenarios"
+    - path: src/router/lib/core.mjs
+      purpose: "Pure decision core — NOT modified by this story; every call into it must remain byte-identical"
+
+files_to_modify:
+  - file: src/router/auriga-router.mjs
+    change: "MODIFY — cycle() options bag (mca → backlog + spawn) and ~25 call sites across unblock/cascade/false-done-review-scan/dispatch/review-lane passes"
+  - file: src/router/test/router-cycle.e2e.test.mjs
+    change: "MODIFY — construct { backlog, spawn } instead of { mca }; assertions about routing decisions must not change"
+  - file: src/router/test/cutover-e2e.test.mjs
+    change: "CREATE — Phase 4's acceptance test: cycle() through the cut-over router against test/fixtures/test-profiles-runners.mjs, zero external process calls, no live Multica"
+
+design_decisions:
+  - decision: "No live or mocked-CLI Multica board is used anywhere in this story's or this epic's verification, permanently"
+    rationale: "Explicit user correction during structured-outline review: Multica is just one implementation behind the adapter; mocked/in-memory testing is equivalent, not a lesser substitute. Real end-to-end testing across live Pantheon plugin surfaces is separate, later, Pantheon-owned work."
+  - decision: "This story is the ONLY one in the epic that touches the live router's actual call sites"
+    rationale: "Deliberate sequencing (vertical-plan.md Slice 4) — both real adapters are already independently proven correct (p2-multica-backlog-adapter, p2-multica-spawn-adapter) before this story begins, so this story's job is re-pointing only, not writing new logic"
+
+cross_cutting:
+  - concern: documentation
+    action: "README.md's quickstart section and src/router/README.md's Files/paths section reference lib/multica.mjs and lib/config.mjs by name — flag as stale after this cutover (actual updates land in p2-pantheon-l2-stub-and-docs, but note the staleness here so it isn't missed)"
+  - concern: adapter-boundary-integrity
+    action: "This is the story that PROVES the boundary works end-to-end — the cutover-e2e test IS the concern's enforcement mechanism for this slice of work"
+
+risks:
+  - severity: high
+    description: "A call site re-pointed to the wrong adapter method (similar name/shape, different semantics) would not necessarily throw — it could silently change WHICH issues get dispatched, and the existing test suite's fixture scenarios might not happen to cover the specific case that breaks"
+    mitigation: "Full regression suite (26+ assertions) plus the new cutover-e2e test against a richer in-memory fixture set (test-profiles-runners.mjs, covering more states than the existing fixtures alone); any test failure in this story is a signal to re-audit the specific call site's mapping against the research step's table, not to adjust the test"
+
+references:
+  - path: .pHive/epics/p2-adapter-interface/docs/research-brief.md
+    relevant_excerpt: |
+      §2: gh-backed PR discovery gates THREE state-machine passes beyond the
+      review lane — the unblock pass, the cascade re-dispatch pass, and the
+      false-done/review-scan pass. All three must be re-pointed in this story,
+      not just the review lane.
+  - path: .pHive/epics/p2-adapter-interface/docs/structured-outline.md
+    relevant_excerpt: |
+      Part 2, Phase 4 — full call-site-by-pass mapping and the corrected,
+      in-memory-only verification plan (no live Multica dependency).

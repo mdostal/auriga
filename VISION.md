@@ -44,6 +44,14 @@ What works, honestly:
 (`nohup ./supervisor.sh`), scanning an aligned-only set of Multica projects (Auriga / Heimdall /
 Consus today) on a ~75s cycle. Pidfiles and JSONL logs land in `/tmp`.
 
+- **Adapter interface — landed, epic `p2-adapter-interface`.** `src/router/lib/adapters/` now
+  holds the `backlogAdapter` / `spawnAdapter` contracts described in §③ below, a real
+  Multica-backed implementation (`adapters/multica/`) that `auriga-router.mjs`'s `cycle()` now
+  calls by default (a behavior-preserving port of the old `lib/multica.mjs`), an in-memory stub
+  for tests, and the intentionally-unbuilt `pantheon-v2-l2` stub (the only sanctioned path from
+  Auriga to Pantheon, still a separate future epic). The routing/capacity/state-machine logic
+  above is unchanged — this landed the boundary the logic talks through, not new behavior.
+
 **What is a stub / not yet wired:**
 
 - The richer **routing engine** in `src/engine/` (on the `feat/routing-engine` branch) — a
@@ -95,6 +103,23 @@ Multica — and a team can adopt Auriga's routing without adopting Multica.
 Combined with Pantheon's toggle-and-compare model, this makes routing policy a first-class,
 swappable, measurable thing: pick your board adapter, pick your lanes and runtimes, flip rules on and
 off, and compare throughput and cost at every step.
+
+---
+
+## ④ Future — a self-building queue UI (deferred, recorded 2026-08-15)
+
+Once the adapter interface (§③, tracked as epic `p2-adapter-interface`) lands, Auriga gets a
+simple queue UI as a separate, later epic — deliberately **not** bundled into the adapter work so
+that foundational interface work doesn't grow unbounded.
+
+The intended shape of that UI, captured now so it isn't lost before its turn comes: not a static,
+hand-built dashboard, but something closer to **v0-style (Vercel)** — an LLM in the browser the
+operator can discuss the UI with, alongside a set of tools and templates so the UI can scaffold and
+extend itself: pull in existing tooling, run deep research on the right approach, and let new
+components/charts/graphs/dashboards get created and scaled as needs grow, all in standalone mode.
+Likely built on **shadcn/ui** as the component foundation. When this epic is actually planned, its
+kickoff/design-discussion research phase should treat this as the starting brief, not default to a
+plain hand-coded dashboard.
 
 ---
 

@@ -1,0 +1,104 @@
+id: p2-pantheon-l2-stub-and-docs
+epic: p2-adapter-interface
+title: Add the documented pantheon-v2-l2 stub adapter and close out doc updates
+status: done
+complexity: low
+methodology: classic
+depends_on: [p2-adapter-interfaces-and-stubs]
+parallel_allowed: true
+parallel_rationale: bounded-slice
+
+description: |
+  Add src/router/lib/adapters/pantheon-v2-l2/ implementing both backlogAdapter and
+  spawnAdapter shapes as clear not-yet-implemented stubs — every method throws a
+  NotImplementedError-shaped error rather than silently succeeding, so the stub
+  fails loudly if anyone accidentally wires it in as if it were real. Its README
+  states plainly this is the ONLY sanctioned path from Auriga to Pantheon and is
+  intentionally unbuilt in this epic. Close the epic's doc-impact items: add the
+  new adapter vocabulary to .pHive/CONTEXT.md, and update README.md / src/router/
+  README.md / VISION.md's §① to reflect that the adapter interface has landed.
+  This story is functionally independent of p2-multica-backlog-adapter,
+  p2-multica-spawn-adapter, and p2-router-cutover — it only depends on the
+  interfaces from p2-adapter-interfaces-and-stubs and touches an entirely
+  disjoint set of files, so it can run in parallel with those three.
+
+acceptance_criteria:
+  - "Given pantheon-v2-l2/index.mjs exports createPantheonV2L2BacklogAdapter() and createPantheonV2L2SpawnAdapter(), when any method on either is called, then it throws an error with { name: 'NotImplementedError', message: referencing README.md }"
+  - "Given pantheon-v2-l2/README.md, when read, then it states this is the only sanctioned path from Auriga to Pantheon and that it is intentionally unbuilt in this epic"
+  - "Given .pHive/CONTEXT.md, when read, then it defines backlogAdapter, spawnAdapter, and pantheon-v2-l2 in its Terminology section"
+  - "Given `npm test` runs, then pantheon-l2-stub.test.mjs passes, asserting every method throws the documented shape"
+
+steps:
+  - id: research
+    description: Read backlog-adapter.mjs and spawn-adapter.mjs's typedefs (from p2-adapter-interfaces-and-stubs) to ensure the stub matches exactly
+    agent: researcher
+  - id: implement
+    description: Implement the pantheon-v2-l2 stub adapter and its README; update CONTEXT.md, VISION.md, README.md, src/router/README.md per files_to_modify
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write pantheon-l2-stub.test.mjs asserting every method throws
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the stub is inert (throws, never silently succeeds or returns a plausible-looking empty result) and that doc updates accurately describe the epic's landed state
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p2-adapter-interface
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:test)"
+  key_files:
+    - path: .pHive/CONTEXT.md
+      purpose: "Project domain glossary — needs the new adapter vocabulary this epic introduces"
+    - path: VISION.md
+      purpose: "§① 'Current — what actually runs today' needs a note that the adapter interface has landed, keeping the doc's real-vs-aspirational framing accurate"
+
+files_to_modify:
+  - file: src/router/lib/adapters/pantheon-v2-l2/index.mjs
+    change: "CREATE — both adapter shapes implemented as throw-not-silent-success stubs"
+  - file: src/router/lib/adapters/pantheon-v2-l2/README.md
+    change: "CREATE — sanctioned-path statement, intentionally-unbuilt statement"
+  - file: .pHive/CONTEXT.md
+    change: "MODIFY — add backlogAdapter, spawnAdapter, pantheon-v2-l2 terminology entries"
+  - file: VISION.md
+    change: "MODIFY — §① note that the adapter interface has landed"
+  - file: README.md
+    change: "MODIFY — quickstart section pointer update (was lib/multica.mjs-centric, now adapter-boundary-aware)"
+  - file: src/router/README.md
+    change: "MODIFY — Files/paths section: add the new lib/adapters/ tree, remove/update stale lib/multica.mjs-only framing"
+  - file: src/router/test/pantheon-l2-stub.test.mjs
+    change: "CREATE — asserts every stub method throws the documented NotImplementedError shape"
+
+design_decisions:
+  - decision: "The stub throws loudly rather than returning empty/success values"
+    rationale: "design-discussion.md §3 step 4: 'a stub that fails loudly is safer than one that looks like it's working' — prevents the exact failure mode named in structured-outline.md Part 7 (a future story gradually building this into a half-real integration without anyone deciding to)"
+
+cross_cutting:
+  - concern: documentation
+    action: "This story IS the documentation cross-cutting concern's resolution for the whole epic — closes out every doc-impact item flagged in structured-outline.md Part 3b"
+  - concern: adapter-boundary-integrity
+    action: "The pantheon-v2-l2 README's 'intentionally unbuilt' statement is the concern's enforcement mechanism for future stories that touch this directory — any PR adding real behavior here without updating that statement is a signal to escalate"
+
+risks:
+  - severity: medium
+    description: "A future story could incrementally add real methods to this stub without a clear moment where anyone decided to build the real Pantheon integration"
+    mitigation: "The adapter-boundary-integrity cross-cutting concern (.pHive/cross-cutting-concerns.yaml) already gates every future story on this question, from kickoff"
+
+references:
+  - path: .pHive/epics/p2-adapter-interface/docs/design-discussion.md
+    relevant_excerpt: |
+      §3 step 4: pantheon-v2-l2 satisfies "no direct Minerva/Consus/Pantheon
+      coupling" without scope-creeping into actually building the Pantheon
+      integration here.
+  - path: .pHive/epics/p2-adapter-interface/docs/vertical-plan.md
+    relevant_excerpt: |
+      Moldability Notes: "Slice 5 (pantheon-v2-l2) only depends on Slice 1... it
+      could be pulled earlier and run in parallel with Slices 2-3" — the basis
+      for this story's parallel_allowed: true.

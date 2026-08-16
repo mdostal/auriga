@@ -1,0 +1,123 @@
+id: p2-multica-backlog-adapter
+epic: p2-adapter-interface
+title: Port lib/multica.mjs's issue CRUD + gh PR-discovery into createMulticaBacklogAdapter
+status: done
+complexity: medium
+methodology: classic
+depends_on: [p2-adapter-interfaces-and-stubs]
+
+description: |
+  Port lib/multica.mjs's read/write issue surface (listIssues, listAllProjectIds,
+  getIssueRuns, setIssueStatus, commentOnIssue) AND its gh-backed PR discovery
+  (ghOpenPrs/ghListRepos/ghPrs, folded into getIssuePullRequests) into
+  createMulticaBacklogAdapter(cfg) — a behavior-preserving refactor, not a
+  rewrite. Begin the lib/config.mjs substrate/policy split by extracting AGENTS,
+  PROJECT_NAMES, PROJECT_IDS into lib/config-substrate.mjs, carrying the known
+  "7 unmapped project names" gap forward byte-identical (not fixed). Tested in
+  isolation against mocked CLI output — NOT wired into auriga-router.mjs yet.
+
+acceptance_criteria:
+  - "Given createMulticaBacklogAdapter(cfg) exists, when its methods are called against mocked multica/gh CLI output, then it implements every method in backlog-adapter.mjs's typedef with output matching today's lib/multica.mjs behavior"
+  - "Given a project with more than one page of issues (mocked), when listIssues runs, then it paginates via --offset until a short page is returned, matching today's pagination loop exactly"
+  - "Given cleanEnv() runs, when the child process env is inspected, then MULTICA_TOKEN, MULTICA_PAT_TOKEN, and MULTICA_WORKSPACE_ID are absent from it"
+  - "Given lib/config-substrate.mjs exists, when diffed against today's lib/config.mjs AGENTS/PROJECT_NAMES/PROJECT_IDS exports, then the values are byte-identical including the KNOWN GAP comment"
+  - "Given `npm test` runs, then all 6 pre-existing test files still pass unchanged (this story does not touch auriga-router.mjs, so nothing should regress)"
+
+steps:
+  - id: research
+    description: Read lib/multica.mjs in full plus the mined status-mapping notes referenced in research-brief.md §4 (from commit f4847ee's src/engine/adapters/multica/index.ts) to ground the port
+    agent: researcher
+  - id: implement
+    description: Implement src/router/lib/adapters/multica/backlog.mjs and lib/config-substrate.mjs per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write backlog-adapter.test.mjs extending test/support/mock-mca.mjs's pattern, covering pagination and cleanEnv() edge cases
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for behavior-preservation — every ported method's output must match lib/multica.mjs's existing behavior exactly, including error-handling asymmetry (reads degrade gracefully, writes propagate errors)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p2-adapter-interface
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:test)"
+  key_files:
+    - path: src/router/lib/multica.mjs
+      purpose: "The source of truth being ported — every function here maps to a method on createMulticaBacklogAdapter"
+    - path: src/router/lib/adapters/backlog-adapter.mjs
+      purpose: "The shape contract this adapter must implement exactly (from p2-adapter-interfaces-and-stubs)"
+
+files_to_modify:
+  - file: src/router/lib/adapters/multica/backlog.mjs
+    change: "CREATE — createMulticaBacklogAdapter(cfg) wrapping listIssues/listAllProjectIds/listAllIssues/issueRuns/issueStatus/issuePullRequests/issueComment plus internal ghOpenPrs/ghListRepos/ghPrs, with cleanEnv() preserved verbatim"
+  - file: src/router/lib/config-substrate.mjs
+    change: "CREATE — AGENTS, PROJECT_NAMES, PROJECT_IDS moved verbatim from lib/config.mjs, including the KNOWN GAP comment about 7 unmapped project names"
+  - file: src/router/lib/config.mjs
+    change: "MODIFY — remove AGENTS/PROJECT_NAMES/PROJECT_IDS exports (moved to config-substrate.mjs); REVIEW_SQUAD_RULES/CAPS/HUMAN_NAMES stay unchanged"
+  - file: src/router/test/backlog-adapter.test.mjs
+    change: "CREATE — unit tests against mocked multica/gh CLI output, including the pagination and cleanEnv() edge cases"
+
+code_examples:
+  - title: "cleanEnv() — the security-relevant env-scrubbing that MUST be preserved verbatim"
+    file: src/router/lib/multica.mjs
+    snippet: |
+      function cleanEnv() {
+        const e = { ...process.env };
+        delete e.MULTICA_TOKEN;
+        delete e.MULTICA_PAT_TOKEN;
+        delete e.MULTICA_WORKSPACE_ID;
+        return e;
+      }
+  - title: "listIssues pagination loop — preserve the offset-loop and 100k safety stop exactly"
+    file: src/router/lib/multica.mjs
+    snippet: |
+      export function listIssues(projectId, pageSize = 200) {
+        const all = [];
+        for (let offset = 0; ; offset += pageSize) {
+          const res = run(['issue', 'list', '--project', projectId, '--output', 'json',
+            '--limit', String(pageSize), '--offset', String(offset)]);
+          const page = (res && res.issues) || [];
+          for (const i of page) all.push(i);
+          if (page.length < pageSize) break;
+          if (offset > 100000) break;
+        }
+        return all;
+      }
+
+design_decisions:
+  - decision: "GitHub PR-discovery (ghOpenPrs/ghListRepos/ghPrs) folds into getIssuePullRequests on backlogAdapter, not a separate vcsAdapter"
+    rationale: "Open Question 1 resolution (design-discussion.md): smaller diff, avoids an undocumented third adapter kind not present in north_star/CONTEXT.md's two-adapter model; revisit only if a second VCS is ever needed"
+  - decision: "The 7-unmapped-project-names gap is carried forward unchanged, not fixed"
+    rationale: "Explicitly out of scope per VISION.md — 'needs reconciliation with Minerva/operator,' not this epic's job"
+
+cross_cutting:
+  - concern: documentation
+    action: "lib/config.mjs's structure changes (exports removed) — flag for the doc-impact review in p2-pantheon-l2-stub-and-docs's README.md updates"
+  - concern: adapter-boundary-integrity
+    action: "This adapter IS the sanctioned Multica-specific implementation — verify no OTHER file outside this one imports the multica/gh CLI directly after this story lands"
+
+risks:
+  - severity: high
+    description: "getIssuePullRequests's internal gh-fallback logic could be ported incorrectly, silently returning empty instead of erroring — would look like 'no open PR' to the state machine and stall the review lane invisibly"
+    mitigation: "Dedicated test case with a non-empty gh-mocked response, per structured-outline.md Part 2 Phase 2 Validation"
+  - severity: medium
+    description: "cleanEnv()'s token-scrubbing could be dropped or altered during the port"
+    mitigation: "Explicit acceptance criterion + dedicated test asserting the three env vars are absent from the child process env"
+
+references:
+  - path: .pHive/epics/p2-adapter-interface/docs/research-brief.md
+    relevant_excerpt: |
+      §4: MulticaTrackerAdapter's empirical status-enum mapping comments and its
+      "PUT is a partial merge, no CAS, no native lease" findings — genuine prior
+      art to cite as source comments in the new implementation.
+  - path: .pHive/epics/p2-adapter-interface/docs/structured-outline.md
+    relevant_excerpt: |
+      Part 2, Phase 2 — full Changes/Interfaces/Validation detail for this story.

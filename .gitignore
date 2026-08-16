@@ -2,3 +2,8 @@ node_modules/
 *.bak
 *.log
 .DS_Store
+
+# Local Claude Code session/harness runtime bookkeeping — not project state
+.pHive/agent-complete/
+.pHive/interrupts/
+.pHive/metrics/events/
