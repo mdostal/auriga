@@ -19,34 +19,34 @@ import {
 
 // ---- BacklogAdapter: empty-default shape, called with no arguments ----
 
-test('createStubBacklogAdapter() with no args: every method is callable and returns the empty-default shape', async () => {
+test('createStubBacklogAdapter() with no args: every method is callable and returns the empty-default shape', () => {
   const backlog = createStubBacklogAdapter();
 
-  assert.deepEqual(await backlog.listIssues('any-project'), []);
-  assert.deepEqual(await backlog.listAllProjectIds(), []);
-  assert.deepEqual(await backlog.getIssueRuns('ANY-1'), []);
-  assert.deepEqual(await backlog.getIssuePullRequests('ANY-1'), []);
+  assert.deepEqual(backlog.listIssues('any-project'), []);
+  assert.deepEqual(backlog.listAllProjectIds(), []);
+  assert.deepEqual(backlog.getIssueRuns('ANY-1'), []);
+  assert.deepEqual(backlog.getIssuePullRequests('ANY-1'), []);
 
   // Mutating methods must not throw even against an empty store.
-  await assert.doesNotReject(backlog.setIssueStatus('ANY-1', 'todo'));
-  await assert.doesNotReject(backlog.commentOnIssue('ANY-1', 'hello'));
+  assert.doesNotThrow(() => backlog.setIssueStatus('ANY-1', 'todo'));
+  assert.doesNotThrow(() => backlog.commentOnIssue('ANY-1', 'hello'));
 });
 
 // ---- SpawnAdapter: empty-default shape, called with no arguments ----
 
-test('createStubSpawnAdapter() with no args: every method is callable, records calls, without throwing', async () => {
+test('createStubSpawnAdapter() with no args: every method is callable, records calls, without throwing', () => {
   const spawn = createStubSpawnAdapter();
 
   assert.deepEqual(spawn.calls, []);
 
-  const lanes = await spawn.describeLanes();
+  const lanes = spawn.describeLanes();
   assert.ok(lanes && typeof lanes === 'object');
   assert.ok(Object.keys(lanes).length > 0, 'describeLanes() should return a non-empty fixture lane map');
 
-  await assert.doesNotReject(spawn.dispatch({ identifier: 'ANY-1' }, 'stub-build-lane'));
-  await assert.doesNotReject(spawn.assignIssue('ANY-1', 'some-agent'));
-  await assert.doesNotReject(spawn.rerunIssue('ANY-1'));
-  await assert.doesNotReject(spawn.unassignIssue('ANY-1'));
+  assert.doesNotThrow(() => spawn.dispatch({ identifier: 'ANY-1' }, 'stub-build-lane'));
+  assert.doesNotThrow(() => spawn.assignIssue('ANY-1', 'some-agent'));
+  assert.doesNotThrow(() => spawn.rerunIssue('ANY-1'));
+  assert.doesNotThrow(() => spawn.unassignIssue('ANY-1'));
 
   assert.equal(spawn.calls.length, 4);
   assert.deepEqual(spawn.calls.map((c) => c.method), ['dispatch', 'assignIssue', 'rerunIssue', 'unassignIssue']);
@@ -54,7 +54,7 @@ test('createStubSpawnAdapter() with no args: every method is callable, records c
 
 // ---- BacklogAdapter: seeded behavior, reusing the shared fixture set ----
 
-test('createStubBacklogAdapter(seedData): seeded issues/runs/PRs are readable and status/comments mutate in place', async () => {
+test('createStubBacklogAdapter(seedData): seeded issues/runs/PRs are readable and status/comments mutate in place', () => {
   // Shallow-clone every fixture issue before seeding: the adapter mutates
   // issue objects IN PLACE (by reference), and ALL_PROFILES is a SHARED
   // module-level export other tests in this file (and other files) also
@@ -65,25 +65,25 @@ test('createStubBacklogAdapter(seedData): seeded issues/runs/PRs are readable an
     pullRequestsByIdentifier: PULL_REQUESTS_BY_IDENTIFIER,
   });
 
-  const projectIds = await backlog.listAllProjectIds();
+  const projectIds = backlog.listAllProjectIds();
   assert.equal(projectIds.length, 1, 'all fixture profiles share one project id');
 
-  const issues = await backlog.listIssues(projectIds[0]);
+  const issues = backlog.listIssues(projectIds[0]);
   assert.equal(issues.length, ALL_PROFILES.length);
 
-  const runs = await backlog.getIssueRuns(PROFILE_IN_PROGRESS_DONE_RUN.identifier);
+  const runs = backlog.getIssueRuns(PROFILE_IN_PROGRESS_DONE_RUN.identifier);
   assert.equal(runs.length, 1);
   assert.equal(runs[0].status, 'done');
 
-  const prs = await backlog.getIssuePullRequests(PROFILE_IN_REVIEW_MERGED_PR.identifier);
+  const prs = backlog.getIssuePullRequests(PROFILE_IN_REVIEW_MERGED_PR.identifier);
   assert.equal(prs.length, 1);
   assert.equal(prs[0].state, 'merged');
 
-  await backlog.setIssueStatus(PROFILE_TODO.identifier, 'in_progress');
-  const [mutated] = (await backlog.listIssues(projectIds[0])).filter((i) => i.identifier === PROFILE_TODO.identifier);
+  backlog.setIssueStatus(PROFILE_TODO.identifier, 'in_progress');
+  const [mutated] = backlog.listIssues(projectIds[0]).filter((i) => i.identifier === PROFILE_TODO.identifier);
   assert.equal(mutated.status, 'in_progress');
 
-  await backlog.commentOnIssue(PROFILE_TODO.identifier, 'hi there');
+  backlog.commentOnIssue(PROFILE_TODO.identifier, 'hi there');
   assert.deepEqual(backlog.comments, [{ id: PROFILE_TODO.identifier, body: 'hi there' }]);
 });
 

@@ -16,6 +16,24 @@ implementation is a plain factory function, `createXAdapter(cfg)`, returning
 a frozen object literal (see `.pHive/project-profile.yaml`'s stated
 camelCase/plain-function convention).
 
+## Synchronous, deliberately
+
+Every method on both `BacklogAdapter` and `SpawnAdapter` is **synchronous** —
+it returns its plain result directly, never a `Promise`. This is a deliberate
+match to the real, already-synchronous implementation
+(`lib/multica.mjs`, backed by `execFileSync`) and to every existing consumer
+call site: `auriga-router.mjs`'s `cycle()` calls its injected `mca`
+dependency across ~25 sites, several inside synchronous `.some()`/`.filter()`
+callbacks, and never `await`s any of them (`cycle()` being declared `async`
+is unrelated — it awaits its own `sleep()`, not `mca`). Do NOT "improve" these
+interfaces back to async/Promise-returning without a real story that needs
+it: doing so would force the future router-cutover story to convert control
+flow around every one of those call sites into async/await, turning what
+should be a mechanical rename into a real, higher-regression-risk async
+refactor. If a future concrete implementation genuinely needs to be
+asynchronous (e.g. a network-backed backlog), that is the point to revisit
+this decision explicitly — not a reason to default to async now.
+
 ## Why two adapters, not one
 
 A backlog (where work items live) and a runner (what actually executes work

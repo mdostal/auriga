@@ -8,10 +8,10 @@
 //
 // This is the other half of Auriga's two-adapter model — see ./README.md.
 //
-// Every method is async (returns a Promise) — see backlog-adapter.mjs's doc
-// comment for why that is the right contract even though the pre-existing,
-// unmodified auriga-router.mjs's cycle() currently calls its injected `mca`
-// dependency synchronously.
+// Every method is SYNCHRONOUS (returns its plain result directly, never a
+// Promise) — see backlog-adapter.mjs's doc comment for why that is the right
+// contract: it matches the pre-existing, unmodified auriga-router.mjs's
+// cycle(), which calls its injected `mca` dependency synchronously today.
 //
 // "id" below always means the issue's human-readable public identifier
 // (e.g. "PAN-1234"), matching every existing mca-shaped call site.
@@ -36,25 +36,25 @@
 /**
  * @typedef {Object} SpawnAdapter
  *
- * @property {(issue: object, lane: string) => Promise<object>} dispatch
+ * @property {(issue: object, lane: string) => object} dispatch
  *   Start a fresh run of `issue` on `lane` (a dispatch-target name from
  *   describeLanes()) — the general-purpose "make this run" primitive.
  *
- * @property {() => Promise<Record<string, object>>} describeLanes
+ * @property {() => Record<string, object>} describeLanes
  *   The available dispatch targets: lane name -> lane metadata (which
  *   agents/runtimes it maps to, capacity, etc.) — the runner-side analog of
  *   lib/config.mjs's PROJECT_LANE / HIVE_LANE / DEFAULT_LANE tables.
  *
- * @property {(id: string, agent: string) => Promise<void>} assignIssue
+ * @property {(id: string, agent: string) => void} assignIssue
  *   Assign an issue to a named agent, WITHOUT necessarily enqueuing a run —
  *   matches the existing assign-then-verify-then-rerun dance in
  *   auriga-router.mjs's cycle(), which treats assignment and run-enqueue as
  *   separate steps (the "dispatch dead-zone" cycle()'s own comments describe).
  *
- * @property {(id: string) => Promise<void>} rerunIssue
+ * @property {(id: string) => void} rerunIssue
  *   Force-enqueue a run for an issue's CURRENT assignment.
  *
- * @property {(id: string) => Promise<void>} unassignIssue
+ * @property {(id: string) => void} unassignIssue
  *   Clear an issue's assignee (e.g. so a freshly-unblocked story re-enters
  *   the candidate pool as unassigned — see lib/core.mjs's detectUnblocks).
  */

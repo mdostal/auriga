@@ -28,41 +28,31 @@ import {
 const NOOP_SLEEP = async () => {};
 const NOOP_LOG = () => {};
 
-// Bridges the async BacklogAdapter/SpawnAdapter contract onto the
-// SYNCHRONOUS shape auriga-router.mjs's cycle() actually calls — cycle()
-// never `await`s its injected `mca` dependency (see its own doc comment).
-// The stub adapters have no internal `await`, so every call's side effect
-// (a store mutation, a `.calls` push) already happened synchronously by the
-// time the call returns, even though the return VALUE is wrapped in a
-// Promise. This shim exploits exactly that: it resolves the handful of
-// per-issue reads once up front (the fixture set is small and fully known),
-// then exposes cycle()'s expected synchronous read functions over that
-// snapshot, while every write cycle() performs is forwarded straight into
-// the real stub adapters (still exercised, still recorded on spawn.calls /
-// backlog's own store) — a thin bridge, not a second reimplementation of
-// either adapter.
-async function buildMcaShim(backlog, spawn) {
-  const projectIds = await backlog.listAllProjectIds();
-  const issues = [];
-  for (const pid of projectIds) issues.push(...(await backlog.listIssues(pid)));
-
-  const runsCache = {};
-  const prsCache = {};
-  for (const issue of issues) {
-    runsCache[issue.identifier] = await backlog.getIssueRuns(issue.identifier);
-    prsCache[issue.identifier] = await backlog.getIssuePullRequests(issue.identifier);
-  }
-
+// Wires the stub adapters straight in as cycle()'s `opts.mca` — both are
+// synchronous now (see ../lib/adapters/*.mjs), matching exactly the call
+// convention cycle() already uses for its real mcaImpl.* call sites (see
+// auriga-router.mjs's own doc comment on cycle(): it never `await`s them).
+// No Promise-resolution/caching bridge is needed anymore — every call below
+// forwards straight into the stub adapter and returns its plain result.
+//
+// cycle()'s mcaImpl.* call sites use vendor-shaped method names
+// (listAllIssues/issueRuns/issueStatus/...) while BacklogAdapter/SpawnAdapter
+// intentionally use vendor-agnostic names (see lib/adapters/README.md) — that
+// naming difference is a pre-existing, permanent property of the two-adapter
+// abstraction (not something this fix changes), so a one-line-per-method
+// name mapping remains here. What this fix removes is the async/Promise
+// bridging that mismatch used to require.
+function mcaFromAdapters(backlog, spawn) {
   return {
-    listAllProjectIds: () => projectIds,
-    listAllIssues: (ids) => issues.filter((i) => ids.includes(i.project_id)),
-    issueRuns: (identifier) => runsCache[identifier] || [],
-    issuePullRequests: (identifier) => prsCache[identifier] || [],
-    issueStatus: (identifier, status) => { backlog.setIssueStatus(identifier, status); return { ok: true }; },
-    issueComment: (identifier, body) => { backlog.commentOnIssue(identifier, body); return { ok: true }; },
-    assignIssue: (identifier, agentName) => { spawn.assignIssue(identifier, agentName); return { ok: true }; },
-    rerunIssue: (identifier) => { spawn.rerunIssue(identifier); return { ok: true }; },
-    unassignIssue: (identifier) => { spawn.unassignIssue(identifier); return { ok: true }; },
+    listAllProjectIds: () => backlog.listAllProjectIds(),
+    listAllIssues: (projectIds) => projectIds.flatMap((pid) => backlog.listIssues(pid)),
+    issueRuns: (identifier) => backlog.getIssueRuns(identifier),
+    issuePullRequests: (identifier) => backlog.getIssuePullRequests(identifier),
+    issueStatus: (identifier, status) => backlog.setIssueStatus(identifier, status),
+    issueComment: (identifier, body) => backlog.commentOnIssue(identifier, body),
+    assignIssue: (identifier, agentName) => spawn.assignIssue(identifier, agentName),
+    rerunIssue: (identifier) => spawn.rerunIssue(identifier),
+    unassignIssue: (identifier) => spawn.unassignIssue(identifier),
     // GitHub-flavored PR/repo discovery is deliberately OUTSIDE the
     // two-adapter model (see lib/adapters/README.md's no-pre-emptive-
     // integrations rule) — cycle() still calls these unconditionally today,
@@ -97,7 +87,7 @@ test('standalone smoke: cycle() runs end-to-end on stub adapters only, zero exec
     pullRequestsByIdentifier: PULL_REQUESTS_BY_IDENTIFIER,
   });
   const spawn = createStubSpawnAdapter();
-  const mca = await buildMcaShim(backlog, spawn);
+  const mca = mcaFromAdapters(backlog, spawn);
 
   const result = await cycle({ mca, log: NOOP_LOG, sleep: NOOP_SLEEP });
 

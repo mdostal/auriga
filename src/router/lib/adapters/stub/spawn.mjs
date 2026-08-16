@@ -26,24 +26,24 @@ export function createStubSpawnAdapter() {
   return Object.freeze({
     calls,
 
-    async dispatch(issue, lane) {
+    dispatch(issue, lane) {
       record('dispatch', { issue, lane });
       return { ok: true, lane };
     },
 
-    async describeLanes() {
+    describeLanes() {
       return LANES;
     },
 
-    async assignIssue(id, agent) {
+    assignIssue(id, agent) {
       record('assignIssue', { id, agent });
     },
 
-    async rerunIssue(id) {
+    rerunIssue(id) {
       record('rerunIssue', { id });
     },
 
-    async unassignIssue(id) {
+    unassignIssue(id) {
       record('unassignIssue', { id });
     },
   });

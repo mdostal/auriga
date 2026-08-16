@@ -1,7 +1,8 @@
 // In-memory stub implementation of BacklogAdapter (see ../backlog-adapter.mjs).
 // Plain factory function, no class — matches this codebase's zero-`class`
-// convention. Every method is async (returns a Promise), matching the
-// BacklogAdapter contract.
+// convention. Every method is SYNCHRONOUS (returns its plain result
+// directly), matching the BacklogAdapter contract — in-memory operations are
+// naturally synchronous, so there is nothing to await here.
 //
 // createStubBacklogAdapter(seedData) seeds an in-memory Map keyed by each
 // issue's `identifier` (never its internal id — see backlog-adapter.mjs's
@@ -32,28 +33,28 @@ export function createStubBacklogAdapter(seedData = {}) {
   const comments = [];
 
   return Object.freeze({
-    async listIssues(projectId) {
+    listIssues(projectId) {
       return [...issuesByIdentifier.values()].filter((i) => i.project_id === projectId);
     },
 
-    async listAllProjectIds() {
+    listAllProjectIds() {
       return [...new Set([...issuesByIdentifier.values()].map((i) => i.project_id))];
     },
 
-    async getIssueRuns(id) {
+    getIssueRuns(id) {
       return runsByIdentifier[id] || [];
     },
 
-    async getIssuePullRequests(id) {
+    getIssuePullRequests(id) {
       return pullRequestsByIdentifier[id] || [];
     },
 
-    async setIssueStatus(id, status) {
+    setIssueStatus(id, status) {
       const issue = issuesByIdentifier.get(id);
       if (issue) issue.status = status;
     },
 
-    async commentOnIssue(id, body) {
+    commentOnIssue(id, body) {
       comments.push({ id, body });
     },
 

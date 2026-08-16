@@ -12,16 +12,15 @@
 // assume a specific vendor (Multica, GitHub, Linear, Jira, ...) or a
 // vendor-specific field shape.
 //
-// Every method is async (returns a Promise) — that is the CONTRACT this
-// story defines. Note that auriga-router.mjs's cycle() (the pre-existing,
-// unmodified consumer) currently calls its injected `mca` dependency
-// SYNCHRONOUSLY (never `await`s it) — see that file's own doc comment on
-// cycle(). Bridging an async BacklogAdapter into that synchronous call site
-// is a caller-side concern (see test/standalone-smoke.test.mjs for the
-// pattern), not something this contract compromises on: the async shape is
-// what a real network-backed implementation (Multica or otherwise) will
-// actually need, and what a future cutover of cycle() itself is expected to
-// await directly.
+// Every method is SYNCHRONOUS (returns its plain result directly, never a
+// Promise) — that is the CONTRACT this story defines. auriga-router.mjs's
+// cycle() (the pre-existing, unmodified consumer) calls its injected `mca`
+// dependency synchronously and never `await`s it, because today's real
+// implementation (lib/multica.mjs, backed by execFileSync) is genuinely
+// synchronous — see that file's own doc comment on cycle(). Matching that
+// call convention here means a future cutover of cycle() onto this adapter
+// is a mechanical rename, not a control-flow refactor. See ./README.md for
+// the fuller rationale.
 //
 // "id" / "identifier" below always means the issue's human-readable public
 // identifier (e.g. "PAN-1234"), matching the convention every existing
@@ -31,30 +30,30 @@
 /**
  * @typedef {Object} BacklogAdapter
  *
- * @property {(projectId: string) => Promise<object[]>} listIssues
+ * @property {(projectId: string) => object[]} listIssues
  *   All issues (whatever the backlog calls a work item) in one project.
  *
- * @property {() => Promise<string[]>} listAllProjectIds
+ * @property {() => string[]} listAllProjectIds
  *   Every project id the backlog knows about — used for the board-wide scan
  *   the STATUS passes need (unblock, parent-rollup, false-done,
  *   run-completion, verified-done all look board-wide, not just at the
  *   dispatch-aligned project set).
  *
- * @property {(id: string) => Promise<object[]>} getIssueRuns
+ * @property {(id: string) => object[]} getIssueRuns
  *   The dispatch/execution history for one issue (agent runs, builds,
  *   whatever the runner calls an attempt) — used to classify
  *   active/done/failed/stale (see lib/core.mjs's classifyRun).
  *
- * @property {(id: string) => Promise<object[]>} getIssuePullRequests
+ * @property {(id: string) => object[]} getIssuePullRequests
  *   Pull/merge requests linked to one issue — used to verify a run's success
  *   claim against a REAL merge (see lib/core.mjs's detectVerifiedDone);
  *   run status alone is never trusted as "done".
  *
- * @property {(id: string, status: string) => Promise<void>} setIssueStatus
+ * @property {(id: string, status: string) => void} setIssueStatus
  *   Move an issue to a new status (todo/in_progress/in_review/done/blocked/
  *   cancelled/...).
  *
- * @property {(id: string, body: string) => Promise<void>} commentOnIssue
+ * @property {(id: string, body: string) => void} commentOnIssue
  *   Post a comment onto an issue (e.g. the review-squad plan — see
  *   lib/core.mjs's squadPlanSummary).
  */
