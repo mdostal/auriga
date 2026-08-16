@@ -98,6 +98,23 @@ off, and compare throughput and cost at every step.
 
 ---
 
+## ④ Future — a self-building queue UI (deferred, recorded 2026-08-15)
+
+Once the adapter interface (§③, tracked as epic `p2-adapter-interface`) lands, Auriga gets a
+simple queue UI as a separate, later epic — deliberately **not** bundled into the adapter work so
+that foundational interface work doesn't grow unbounded.
+
+The intended shape of that UI, captured now so it isn't lost before its turn comes: not a static,
+hand-built dashboard, but something closer to **v0-style (Vercel)** — an LLM in the browser the
+operator can discuss the UI with, alongside a set of tools and templates so the UI can scaffold and
+extend itself: pull in existing tooling, run deep research on the right approach, and let new
+components/charts/graphs/dashboards get created and scaled as needs grow, all in standalone mode.
+Likely built on **shadcn/ui** as the component foundation. When this epic is actually planned, its
+kickoff/design-discussion research phase should treat this as the starting brief, not default to a
+plain hand-coded dashboard.
+
+---
+
 ## Good first contributions
 
 - **Add a routing unit test** — extend `src/router/test/core.test.mjs` with an edge case (a new

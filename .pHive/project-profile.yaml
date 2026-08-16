@@ -1,0 +1,205 @@
+project_name: "auriga"
+type: brownfield
+discovered: "2026-08-15"
+source: "README.md + VISION.md + codebase scan (no CLAUDE.md present)"
+
+project_type: framework   # generic top-level orchestrator consumed by other systems via adapters (this kickoff's own subject)
+has_ui: true               # target state: no UI code exists today, but a simple queue UI is an explicit near-term requirement, not speculative
+
+ship_target:
+  kind: github-release
+  notes: "Matches sibling Pantheon god repos' convention. Tag a release when the standalone orchestrator + adapter interface + queue UI milestone lands."
+
+claude_md_summary: |
+  No CLAUDE.md exists yet in this repo — this section is a placeholder until one
+  is written. Discovered conventions in the meantime:
+  - Root package.json test script: `node --test src/router/test/*.test.mjs` (also
+    runnable from src/router/: `npm test`, `npm run once`, `npm run dry`).
+  - CI (`.github/workflows/ci.yml`) auto-detects Node and runs `npm test` at repo
+    root — the root package.json exists specifically so this generic gate works.
+  - `promote.yml` auto-opens a dev -> main PR on every push to dev; final merge is
+    manual (or handled by a review squad), auto-merge deliberately NOT enabled.
+  - Plain Node 22+, zero runtime dependencies, ESM (`type: module` in
+    src/router/package.json).
+  - No linter/formatter/pre-commit config detected anywhere in the repo.
+
+tech_stack:
+  languages: [javascript]
+  frameworks: []
+  build_tools: []
+  package_managers: [npm]
+  versions:
+    node: "22 (CI), 24+ (README stated minimum)"
+
+structure:
+  modules:
+    - name: router
+      purpose: >
+        The live auto-router: scans Multica board state, applies pure
+        capability/capacity/state-machine decision logic, and dispatches work
+        to agent lanes. This is the ONLY code that actually runs today.
+      source: src/router/
+      tests: src/router/test/
+  entry_points:
+    - src/router/auriga-router.mjs   # main CLI entrypoint (--once, --dry-run, --max-assign, --no-zombie)
+    - src/router/supervisor.sh       # keeps exactly one detached router alive, restarts on death
+    - src/router/reroute-hive-off-codex.mjs  # one-off remediation script
+
+architecture:
+  pattern: "Pure-core / thin-shell — lib/core.mjs is pure, unit-tested decision logic; auriga-router.mjs is the imperative shell that reads board state, calls core.mjs, and writes decisions back."
+  di_framework: manual (no DI framework; plain ESM module imports)
+  state_management: "None — stateless per cycle. Every cycle re-derives candidates from live board state (idempotent by construction); no persisted in-memory state between cycles beyond a /tmp pidfile lock."
+  navigation: n/a (backend service, no UI)
+  data_layer: >
+    src/router/lib/multica.mjs is a thin wrapper around the `multica` CLI
+    (execFileSync, mandated clean env + profile) — this is the ONLY external
+    system integration point today, and it is a DIRECT, hardcoded coupling
+    (no adapter boundary). src/router/lib/config.mjs hand-maintains agent
+    UUIDs, lane maps, and capacity caps against one specific live Multica
+    workspace ID. This tight coupling is precisely what this kickoff's
+    north_star work intends to replace with a generic adapter interface.
+
+conventions:
+  naming: "kebab-case files, camelCase functions/vars, SCREAMING_SNAKE_CASE for config constants (AGENTS, RUNTIME_CAP, HIVE_LANE, DEFAULT_LANE)."
+  file_organization: "Pure decision logic isolated in lib/core.mjs (unit-tested against mocked board state); imperative I/O (multica.mjs, config.mjs) kept separate; agent instruction prompts live in src/router/agents/*.instructions.md."
+  branching: "main is the default branch; dev exists as an integration branch (promote.yml auto-PRs dev -> main); feature branches use feat/<ticket-id>-<slug>."
+  commit_messages: >
+    Mix of conventional-ish prefixes (`fix(router): ...`, `feat(router): ...`,
+    `docs: ...`, `router: ...`) plus PAN-<id> ticket references. Most feature
+    work lands as a single commit per PR referencing the PR number (e.g.
+    "(#18)"), though true merge commits also appear. Developer preference
+    (this kickoff): prefer real merge commits over squash — see
+    hive.config.yaml -> developer.pr_style / notes.
+
+test_infrastructure:
+  unit:
+    framework: "node:test (built-in, `import { test } from 'node:test'`)"
+    location: src/router/test/
+    count: "6 files (core.test.mjs, cascade.test.mjs, descdeps.test.mjs, slugkey.test.mjs, squad.test.mjs, router-cycle.e2e.test.mjs)"
+    coverage_tool: none
+  integration:
+    framework: "router-cycle.e2e.test.mjs runs full cycle() against a mocked Multica CLI (test/support/mock-mca.mjs) — loop-level e2e without a real board."
+    location: src/router/test/router-cycle.e2e.test.mjs
+  e2e:
+    framework: none (no browser/UI e2e — headless service)
+    location: n/a
+    count: 0
+  mocking: "Hand-written fixtures/mocks (test/support/mock-mca.mjs) — no mocking library."
+  test_commands:
+    - "npm test"                      # root: node --test src/router/test/*.test.mjs
+    - "cd src/router && npm test"     # equivalent, run from the module itself
+
+ci_cd:
+  platform: "GitHub Actions"
+  workflows:
+    - ci.yml       # generic Node/Python/Go auto-detect gate; runs npm test on every PR into dev/main/master
+    - promote.yml  # auto-opens dev -> main PR on push to dev; no auto-merge
+  gating: "ci.yml is THE gate on PRs into dev/main. No branch protection details discovered from the repo itself (would need GitHub API/settings, not in-repo)."
+
+documentation_found:
+  - path: README.md
+    content_summary: "What Auriga is, architecture diagram (mermaid), quickstart, sibling-gods list."
+  - path: VISION.md
+    content_summary: "Three-rung trajectory: ① what runs today (capability routing, state machine, capacity, human-todo filter, zombie recovery) ② near-term goals (consolidate PRs, methodology-aware default lane, dynamic discovery, metrics) ③ long-term — adapter interface so Auriga routes ANY board, not just Multica. This is the direct precursor to the current kickoff's brief."
+  - path: docs/review-squad.md
+    content_summary: "The back-half review loop: Auriga fires a 4-perspective review squad (product/technical/qa/ux) sized by ticket-type tier, never force-merges."
+  - path: src/router/README.md
+    content_summary: "Router module specifics — state machine and human-queue detail (not yet read in full during this kickoff)."
+  - path: src/router/agents/README.md
+    content_summary: "Agent instruction files for build/review lanes (auriga-build, auriga-review, mnemosyne-dev, votum-dev)."
+
+existing_knowledge:
+  mcp_servers: []          # nothing declared in this project's own .claude/ (no .claude/ dir exists)
+  existing_skills: []
+  existing_hooks: []
+
+integrations:
+  cli_tools:
+    linearis: missing
+    frame0: missing
+    codex: detected        # /Users/mdostal/.local/bin/codex on PATH
+    maestro: missing
+  mcp_servers:
+    firecrawl: missing
+    context7: missing
+    posthog: detected       # configured user-wide in ~/.claude.json, not project-scoped
+    firebase: missing
+    mobile-mcp: missing
+  vaults:
+    obsidian: missing
+
+code_quality:
+  linters: []
+  formatters: []
+  pre_commit:
+    framework: null
+    hooks: []
+  code_snippets:
+    - path: src/router/lib/core.mjs
+      pattern: pure-decision-core
+      annotation: "Pure functions (isHiveStory, selectAssignments, state-machine transitions, reviewSquadPlan) that take plain issue/run/PR shapes and config, return decisions — no I/O, fully unit-testable against mocked board state."
+      lines: "1-40"
+    - path: src/router/lib/multica.mjs
+      pattern: cli-wrapper-adapter-seam
+      annotation: "Thin execFileSync wrapper around the multica CLI with clean-env handling and pagination; this is the one hardcoded I/O boundary the north_star adapter-interface work needs to generalize."
+      lines: "1-40"
+  test_first_signals:
+    co_located_tests: false        # tests live in src/router/test/, not adjacent to source
+    test_before_source: inconclusive
+    test_runner_in_precommit: false
+    bdd_keywords: false            # uses node:test's test(), not describe/it/given-when-then
+    test_absence: false
+
+project_maturity: active_development
+
+north_star:
+  goal: >
+    Turn Auriga into a generic, standalone top-level orchestrator: it ingests a
+    list of tasks and iterates through them, dispatching each to the right
+    director/squad/swarm using personas and orchestration metadata it is given
+    — no direct coupling to any specific backlog, persona registry, or spawn
+    mechanism. All of that goes through pluggable interfaces (a backlog
+    adapter — Linear, Multica, etc. — and a persona/spawn adapter — e.g.
+    Multica's squads/runners) so any consumer builds its own custom adapter.
+    Pantheon is the first consumer: Auriga replaces the "board of ideas"
+    running standalone with a simple view, talking to Pantheon ONLY through
+    the pantheon-v2 L2 adapter (stubbed for now) — never directly to Minerva,
+    Consus, or Pantheon itself. The default rollout ships a simple built-in
+    queue + a simple UI. Every Pantheon god/plugin this produces must also be
+    able to run standalone on its own.
+  audience: >
+    The operator (this user) running many concurrent Claude Code sessions
+    across many unrelated projects (Dostal Technology client work, personal
+    sites, the whole Pantheon plugin family, OSS tools) — Auriga is meant to
+    sit above ALL of them as the single top-level dispatcher, plus potentially
+    other people doing the same against their own project sets.
+  expected_scale: >
+    One Auriga instance per operator (not literally single-tenant forever —
+    "we could have it spread across teams and surfaces"), but each instance
+    fans out across a large number of concurrent orchestration streams: today
+    ~20+ concurrent Claude Code sessions across ~4 project groups (Dostal
+    Technology clients, personal sites, Pantheon + its plugins, OSS
+    tools/projects). Auriga sits at the top of one big cross-project
+    orchestration queue, hands work to the correct agent/orchestrator/repo,
+    and it is the RECEIVING side's job to verify no duplicate/in-progress
+    work — Auriga's job is correct hand-off plus keeping things moving
+    (like a CXO: high-level routing + process, not doing the work itself).
+  pain_points: >
+    Confirmed: Auriga is hard-wired directly to the Multica CLI
+    (src/router/lib/multica.mjs) with hand-maintained agent UUIDs and lane
+    maps against one specific live workspace (src/router/lib/config.mjs) —
+    there is no adapter boundary, so it cannot run standalone or be reused
+    outside this one Pantheon workspace, and there is no UI to see or manage
+    the queue.
+  success: >
+    Standalone AND the Pantheon adapter both work end-to-end: Auriga runs
+    fully standalone with its own simple built-in queue and UI, and separately
+    the Pantheon adapter (via the pantheon-v2 L2 adapter surface) replaces the
+    existing board-of-ideas flow with no direct Minerva/Consus/Pantheon
+    coupling — tested and flawless.
+  avoid: >
+    No direct integrations from Auriga core to any specific external system.
+    Everything external — backlog source, persona/spawn mechanism, and the
+    Pantheon path itself (via the stubbed pantheon-v2 L2 adapter) — must go
+    through an adapter interface, never a direct import/call into
+    Minerva/Consus/Pantheon/Multica-specific code.

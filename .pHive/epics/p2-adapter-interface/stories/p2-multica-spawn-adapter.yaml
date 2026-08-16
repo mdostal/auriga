@@ -1,0 +1,105 @@
+id: p2-multica-spawn-adapter
+epic: p2-adapter-interface
+title: Port dispatch/assign/rerun + lane maps into createMulticaSpawnAdapter
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p2-adapter-interfaces-and-stubs]
+
+description: |
+  Port today's assign-then-verify-a-run-started dispatch logic (currently inline
+  in auriga-router.mjs's dispatch loop) plus assignIssue/rerunIssue/unassignIssue
+  from lib/multica.mjs into createMulticaSpawnAdapter(cfg). Complete the
+  lib/config.mjs substrate split begun in p2-multica-backlog-adapter by moving
+  PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE/REVIEW_REPO_OWNER/
+  REVIEW_SEARCH_REPOS/RUNTIME_CAP into lib/config-substrate.mjs, unchanged.
+  describeLanes() assembles these into the LaneMap shape. This adapter has NO
+  provisioning method of any kind — that decision is locked, not open for
+  reconsideration in this story. Tested in isolation; NOT wired into
+  auriga-router.mjs yet.
+
+acceptance_criteria:
+  - "Given createMulticaSpawnAdapter(cfg) exists, when describeLanes() is called, then its output is structurally identical (snapshot-equal) to today's PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE constants, including the 7-unmapped-names gap"
+  - "Given dispatch(issue, lane) is called against a mocked CLI, when the run doesn't start within the verify delay, then it force-reruns exactly as today's inline dispatch loop does (CAPS.verifyDelayMs semantics preserved)"
+  - "Given the spawn-adapter.mjs typedef and this implementation, when both are read, then neither exposes a provisioning/ensureProvisioned/hook method of any kind"
+  - "Given `npm test` runs, then all 6 pre-existing test files still pass unchanged (this story does not touch auriga-router.mjs)"
+
+steps:
+  - id: research
+    description: Read auriga-router.mjs's current dispatch loop (assign → verify-run-started → force-rerun sequence) and lib/config.mjs's lane-map constants in full
+    agent: researcher
+  - id: implement
+    description: Implement src/router/lib/adapters/multica/spawn.mjs and complete the lib/config-substrate.mjs move per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write spawn-adapter.test.mjs including the lane-map snapshot-equality test
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that no provisioning concept was reintroduced anywhere in this adapter, and that lane-map values are byte-identical to today's config.mjs
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p2-adapter-interface
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:test)"
+  key_files:
+    - path: src/router/lib/config.mjs
+      purpose: "Source of the PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE/RUNTIME_CAP constants being moved verbatim"
+    - path: src/router/auriga-router.mjs
+      purpose: "Contains today's inline assign→verify→force-rerun dispatch sequence this story ports into dispatch()"
+
+files_to_modify:
+  - file: src/router/lib/adapters/multica/spawn.mjs
+    change: "CREATE — createMulticaSpawnAdapter(cfg): dispatch(issue, lane), describeLanes(), assignIssue, rerunIssue, unassignIssue. Explicit comment: no provisioning method, cross-references adapters/README.md"
+  - file: src/router/lib/config-substrate.mjs
+    change: "MODIFY — add PROJECT_LANE, DEFAULT_LANE, HIVE_LANE, REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS, RUNTIME_CAP, unchanged values"
+  - file: src/router/lib/config.mjs
+    change: "MODIFY — remove the lane-map exports above (moved); REVIEW_SQUAD_RULES/CAPS/HUMAN_NAMES stay unchanged (substrate-agnostic policy)"
+  - file: src/router/test/spawn-adapter.test.mjs
+    change: "CREATE — unit tests including the describeLanes() snapshot-equality check and dispatch() verify/force-rerun sequence test"
+
+code_examples:
+  - title: "Today's PROJECT_LANE shape being moved verbatim (do not alter values)"
+    file: src/router/lib/config.mjs
+    snippet: |
+      export const PROJECT_LANE = {
+        [CONSUS]: ['consus-dev'],
+        [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'],
+        [AURIGA]: ['auriga-dev'],
+        [MINERVA]: ['auriga-dev'],
+        [PANTHEON_CORE]: ['auriga-build'],
+      };
+      export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
+      export const HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
+
+design_decisions:
+  - decision: "spawnAdapter carries no provisioning method, hook, or middleware slot"
+    rationale: "Locked by explicit user correction — see p2-adapter-interfaces-and-stubs's design_decisions and .pHive/CONTEXT.md. This story implements the concrete Multica-backed adapter and must not reopen this."
+  - decision: "Lane discovery is static, adapter-owned config for this epic, not a live query"
+    rationale: "Open Question 2 resolution (design-discussion.md) — dynamic lane/agent discovery is VISION.md §②'s separate near-term goal"
+
+cross_cutting:
+  - concern: adapter-boundary-integrity
+    action: "Verify describeLanes()'s output never leaks a hardcoded Multica UUID reference outside this adapter file — it's the one place substrate-specific lane data is allowed to live"
+
+risks:
+  - severity: medium
+    description: "A transcription error during the lane-map move (e.g. a mistyped project UUID) would silently misroute that one project's issues, hard to catch by inspection"
+    mitigation: "Snapshot-equality test against today's exact constants catches any byte-level transcription error"
+
+references:
+  - path: .pHive/epics/p2-adapter-interface/docs/structured-outline.md
+    relevant_excerpt: |
+      Part 2, Phase 3 — full Changes/Interfaces/Validation detail for this story.
+  - path: .pHive/epics/p2-adapter-interface/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 3 — "Multica-backed spawn adapter, built and tested in isolation" —
+      confirms this story is functionally independent of p2-multica-backlog-adapter.
