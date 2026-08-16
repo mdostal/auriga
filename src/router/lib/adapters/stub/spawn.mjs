@@ -10,6 +10,19 @@
 // under test/, even a fixture file. RUNNERS is a separate, independently
 // defined fixture for tests that want a richer or differently-shaped lane
 // map than this stub's own default.
+//
+// dispatch() return shape matches createMulticaSpawnAdapter's real dispatch()
+// (see ../multica/spawn.mjs): { identifier, lane, assigned, started,
+// forcedRerun, runStatus?, runtimeId?, assignError?, rerunError? } — fixed as
+// a follow-up to the p2-adapter-interface epic, which shipped this stub
+// returning the incompatible `{ ok: true, lane }` and left dispatch()
+// unwired from auriga-router.mjs's live "route new todos" path for exactly
+// that reason. This stub has no real "did a run start" concept of its own
+// (no external run history to check), so it always simulates an immediate,
+// successful, already-started dispatch — never forcing a rerun — which is
+// the same "assign implies a run appears" simplification
+// test/support/mock-mca.mjs's mock and test/router-cycle.e2e.test.mjs's own
+// mock adapters already use for the identical reason.
 
 /**
  * @returns {import('../spawn-adapter.mjs').SpawnAdapter}
@@ -28,7 +41,11 @@ export function createStubSpawnAdapter() {
 
     dispatch(issue, lane) {
       record('dispatch', { issue, lane });
-      return { ok: true, lane };
+      const identifier = issue && issue.identifier;
+      return {
+        identifier, lane, assigned: true, started: true, forcedRerun: false,
+        runStatus: 'in_progress', runtimeId: null,
+      };
     },
 
     describeLanes() {

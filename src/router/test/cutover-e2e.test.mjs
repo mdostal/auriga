@@ -103,6 +103,12 @@ test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/assign obser
 
   const routed = log.byEvent('route').some((e) => e.identifier === PROFILE_TODO.identifier);
   assert.ok(routed, 'PROFILE_TODO should have been picked by the "route new todos" pass');
+  // "route new todos" calls spawn.assignIssue() directly (inline
+  // assign -> verify -> force-rerun) — NOT spawn.dispatch(), which exists as
+  // a real, tested, behavior-preserving port of this sequence but is
+  // deliberately not wired into this call site (dispatch()'s verify-wait is
+  // a real synchronous block, unsuited to this long-lived daemon process;
+  // see auriga-router.mjs's "route new todos" comment).
   const dispatched = spawn.calls.some((c) => c.method === 'assignIssue' && c.args.id === PROFILE_TODO.identifier);
   assert.ok(dispatched, 'spawn.assignIssue should have been called for PROFILE_TODO');
 });

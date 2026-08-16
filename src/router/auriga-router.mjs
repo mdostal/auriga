@@ -304,6 +304,13 @@ export async function cycle(opts = {}) {
         if (c.status === 'blocked') backlog.setIssueStatus(c.identifier, 'todo');
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
+        // NOT routed through spawn.dispatch() (a real, tested method with a
+        // genuinely different contract here — see spawn-adapter.mjs's typedef):
+        // dispatch()'s verify-then-conditionally-rerun contract assumes assign
+        // SOMETIMES auto-enqueues a run and rerun is only a fallback; this cascade
+        // path instead treats rerun as ALWAYS required (assign never enqueues on
+        // its own) and always force-reruns, whether or not a run already exists —
+        // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
           spawn.assignIssue(c.identifier, agent);
@@ -431,6 +438,12 @@ export async function cycle(opts = {}) {
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
+        // NOT routed through spawn.dispatch() (a real, tested method with a
+        // genuinely different contract here — see spawn-adapter.mjs's typedef):
+        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
+        // branch, which never assigns at all) rather than verifying a run started
+        // first — a different contract than dispatch()'s verify-then-conditionally-
+        // rerun, not a stale duplicate of it.
         spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
@@ -491,7 +504,25 @@ export async function cycle(opts = {}) {
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
     }
-    // verify a run started; force-enqueue if not (dead-zone fix)
+    // verify a run started; force-enqueue if not (dead-zone fix).
+    //
+    // Deliberately INLINE here, not routed through spawn.dispatch() (which
+    // ports this exact assign -> verify -> force-rerun sequence — see
+    // lib/adapters/multica/spawn.mjs's dispatch() and
+    // lib/adapters/spawn-adapter.mjs's typedef), for the same "don't force a
+    // bad abstraction" reasoning that already keeps the cascade-dispatch and
+    // review-dispatch passes below off dispatch(), just a different mismatch:
+    // dispatch()'s verify-wait is a REAL synchronous Atomics.wait block
+    // (consistent with the SpawnAdapter interface's synchronous-by-design
+    // contract — see spawn.mjs's header comment). That's fine for a
+    // short-lived caller, but auriga-router.mjs is a long-lived, supervised
+    // daemon (see main()'s SIGTERM/SIGINT handlers) that must stay responsive
+    // during this wait, so this call site keeps its own non-blocking
+    // `await sleepImpl(...)` instead of freezing the event loop for up to
+    // CAPS.verifyDelayMs per dispatch (bounded by CAPS.perCycleTotal /
+    // perCyclePerAgent, but still a real, live hit to signal responsiveness).
+    // dispatch() itself remains correct and available for a future caller
+    // that doesn't need non-blocking behavior (e.g. a short-lived CLI tool).
     await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
     const runs = backlog.getIssueRuns(p.identifier);
     const started = runs.length > 0 && runs.some((r) => {

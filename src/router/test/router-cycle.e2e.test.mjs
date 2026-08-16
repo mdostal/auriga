@@ -50,12 +50,20 @@ function makeIssue(overrides = {}) {
 // Mock BacklogAdapter + SpawnAdapter sharing one in-memory board + runs map.
 // spawn.assignIssue()/rerunIssue() also synthesize an active run for the
 // assigned identifier — this stands in for "the platform started a run",
-// which is what cycle()'s post-assign verify step (backlog.getIssueRuns) is
-// checking for. Without it every assignment would fall through to
-// verify_no_run -> rerun, which is real router behavior but not what these
-// dispatch-shape tests are exercising (mirrors mock-mca.mjs's own doc
-// comment on this exact synthesis).
-function createMockAdapters(boardIssues, agents) {
+// which is what cycle()'s own inline "route new todos" verify step
+// (backlog.getIssueRuns, right after spawn.assignIssue()) is checking for.
+// Without it every assignment would fall through to verify_no_run -> rerun,
+// which is real router behavior but not what these dispatch-shape tests are
+// exercising (mirrors mock-mca.mjs's own doc comment on this exact
+// synthesis).
+// opts.failAssignFor / opts.noRunFor: identifier sets letting a test drive
+// the inline sequence's OTHER two branches (assign failure;
+// assign-succeeds-but-no-run -> force-rerun) through the real cycle() call
+// path, the same way spawn-adapter.test.mjs drives dispatch()'s equivalent
+// branches directly against the real (unused-by-cycle()) adapter method.
+function createMockAdapters(boardIssues, agents, opts = {}) {
+  const failAssignFor = opts.failAssignFor || new Set();
+  const noRunFor = opts.noRunFor || new Set();
   const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
@@ -78,12 +86,15 @@ function createMockAdapters(boardIssues, agents) {
   const spawn = {
     assignIssue: (identifier, agentName) => {
       calls.assign.push({ identifier, agentName });
+      if (failAssignFor.has(identifier)) throw new Error('multica: rate limited (429)');
       const issue = findIssue(identifier);
       if (issue) issue.assignee_id = agents[agentName] && agents[agentName].id;
-      runsByIdentifier[identifier] = [
-        ...(runsByIdentifier[identifier] || []),
-        { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
-      ];
+      if (!noRunFor.has(identifier)) {
+        runsByIdentifier[identifier] = [
+          ...(runsByIdentifier[identifier] || []),
+          { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
+        ];
+      }
     },
     rerunIssue: (identifier) => {
       calls.rerun.push({ identifier });
@@ -252,4 +263,53 @@ test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(
   await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(scanCalls, 1, `expected the board-wide PR scan to run exactly once per cycle() regardless of issue count (10 issues), got ${scanCalls} calls`);
+});
+
+// ---- regression coverage for "route new todos"'s inline assign -> verify ->
+// force-rerun sequence (see auriga-router.mjs's cycle() — this pass is
+// deliberately NOT routed through spawn.dispatch(), even though dispatch()
+// ports the identical sequence, because dispatch()'s verify-wait is a real
+// synchronous block unsuited to this long-lived daemon process; see that
+// pass's own comment and spawn-adapter.mjs's typedef). These two tests drive
+// the inline sequence's OTHER two branches (assign failure;
+// assign-ok-but-no-run -> force-rerun) through the real cycle() call path,
+// proving it produces the expected assign_error / verify_no_run / rerun_error
+// log events and payloads.
+
+test('route new todos: an assign failure logs assign_error with the expected identifier/agent/error shape', async () => {
+  const AURIGA = projectId('Auriga');
+  const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS, {
+    failAssignFor: new Set([story.identifier]),
+  });
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 0, 'a failed assign must not count towards assigned');
+  const errs = log.byEvent('assign_error');
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].identifier, story.identifier);
+  assert.match(errs[0].error, /rate limited/);
+  assert.equal(log.byEvent('verify_no_run').length, 0, 'verify must never run after a failed assign');
+  assert.equal(log.byEvent('verify_ok').length, 0);
+});
+
+test('route new todos: no run row appearing within the verify wait logs verify_no_run and force-reruns (observed via spawn.calls.rerun)', async () => {
+  const AURIGA = projectId('Auriga');
+  const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS, {
+    noRunFor: new Set([story.identifier]),
+  });
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 1, 'a successful assign (even with no run yet) still counts towards assigned');
+  const noRun = log.byEvent('verify_no_run');
+  assert.equal(noRun.length, 1);
+  assert.equal(noRun[0].identifier, story.identifier);
+  assert.equal(noRun[0].action, 'rerun');
+  assert.equal(log.byEvent('verify_ok').length, 0);
+  assert.ok(calls.rerun.some((c) => c.identifier === story.identifier), 'the inline verify step must have force-reran the story');
 });
