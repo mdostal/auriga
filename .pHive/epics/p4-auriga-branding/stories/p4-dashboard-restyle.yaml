@@ -1,0 +1,100 @@
+id: p4-dashboard-restyle
+epic: p4-auriga-branding
+title: Restyle src/ui/ dashboard to Star Atlas visual language, keep tab navigation
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Restyle the REAL, already-shipped operator dashboard (src/ui/ — EpicsListView,
+  StoryDetailView, ActivityView, App.jsx nav, index.css) to match Concept B's "Star
+  Atlas" visual language: deep-space palette, serif/geometric-sans/mono type pairing,
+  card/section treatment, the constellation dependency diagram in story detail, and the
+  Charioteer's Pentagon as the real favicon. This is a visual restyle, NOT a structural
+  rewrite — KEEP the existing tab-based navigation (Epics / Story / Activity) from the
+  current implementation (which matches Concept A's interaction model), do not convert
+  it to Concept B's long-scroll plates. The operator explicitly wants fast tab-browsing,
+  not scrolling.
+
+acceptance_criteria:
+  - "Given the dashboard, when opened, then its palette/typography/card treatment visually matches design-concept-b-celestial.html's tokens (deep-space background, gold Capella accent, the same status-color mapping), not the current default shadcn look"
+  - "Given the dashboard's navigation, when used, then it still works as tabs (Epics / Story / Activity), NOT a single long scrolling page — the restyle is visual only, the interaction model is unchanged"
+  - "Given StoryDetailView, when a story with dependencies is shown, then its dependencies render as a constellation diagram (nodes + dashed connecting lines) matching design-concept-b-celestial.html's Plate II treatment, replacing the current plain dependency-chip list"
+  - "Given the favicon/tab icon, when inspected, then it is the Charioteer's Pentagon mark from design-concept-b-celestial.html's Mark section, not the current default"
+  - "Given all 3 existing Playwright specs (epics-list, story-detail, activity) plus the 4 hardening specs, when run against the restyled dashboard, then they still pass — the restyle must not break existing functional behavior/assertions (update selectors if needed for the new markup, but the ASSERTED SCENARIOS must not change)"
+  - "Given `npm run build` in src/ui/, then it still succeeds with no errors after the restyle"
+
+steps:
+  - id: research
+    description: Read design-concept-b-celestial.html in full (tokens, type stack, card treatment, constellation-diagram markup/CSS) AND the current src/ui/ implementation (App.jsx, all 3 views, index.css, tailwind.config.js) to plan the mapping from current shadcn defaults to the new visual language
+    agent: researcher
+  - id: implement
+    description: Apply the restyle across src/ui/'s CSS tokens, components, and the 3 views per files_to_modify below; keep tab navigation structure intact
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Run the existing Playwright suite (real + hardening), update selectors if the restyle changed markup structure, without changing what scenarios are asserted; visually verify via Playwright MCP screenshots
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm visual fidelity to design-concept-b-celestial.html AND confirm the tab navigation model was preserved (not converted to scroll) AND confirm no functional regression
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p4-auriga-branding
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    frontend: "Vite + React + Tailwind CSS + shadcn/ui (existing, from p3-auriga-ui)"
+  key_files:
+    - path: /private/tmp/claude-501/-Users-mdostal-Documents-work-pantheon-auriga/bd037f63-4e19-4e9b-badf-ba861fe9ccb8/scratchpad/design-concept-b-celestial.html
+      purpose: "Design source of truth for palette/type/card-treatment/constellation-diagram/icon — adapt, don't reinterpret"
+    - path: src/ui/src/App.jsx
+      purpose: "Current tab-navigation implementation — the interaction model to KEEP unchanged"
+    - path: src/ui/src/views/StoryDetailView.jsx
+      purpose: "Where the dependency list needs to become a constellation diagram"
+    - path: src/ui/src/index.css
+      purpose: "Current Tailwind + shadcn CSS-variable theme tokens to replace with Star Atlas's tokens"
+    - path: src/ui/tests/e2e/
+      purpose: "Existing Playwright specs (real-data + hardening) that must keep passing"
+
+files_to_modify:
+  - file: src/ui/src/index.css
+    change: "MODIFY — replace the current light shadcn theme tokens with Star Atlas's deep-space palette + CSS custom properties"
+  - file: src/ui/tailwind.config.js
+    change: "MODIFY — font family tokens for the serif/geometric-sans/mono pairing, color tokens if needed"
+  - file: src/ui/src/views/EpicsListView.jsx
+    change: "MODIFY — visual restyle to Star Atlas card/table treatment, status glyphs matching the design source"
+  - file: src/ui/src/views/StoryDetailView.jsx
+    change: "MODIFY — visual restyle PLUS the dependency constellation diagram (new, replacing the plain chip list)"
+  - file: src/ui/src/views/ActivityView.jsx
+    change: "MODIFY — visual restyle to Star Atlas's Observation Log timeline treatment"
+  - file: src/ui/index.html
+    change: "MODIFY — favicon link updated to the Charioteer's Pentagon mark (as an inline SVG data URI or a new asset file, whichever fits the existing setup)"
+  - file: src/ui/tests/e2e/*.spec.js
+    change: "MODIFY (only if needed) — update selectors broken by markup changes; do not change asserted scenarios"
+
+design_decisions:
+  - decision: "Tab navigation from the current implementation is kept; Concept B's long-scroll Plates structure is NOT adopted for the real dashboard"
+    rationale: "Explicit operator direction: 'turn the one long page into tabs to make it an easier dashboarding tool' — the showcase page (separate story) gets the scroll treatment, the real tool gets tabs"
+  - decision: "This is a visual-token/component restyle, not a rewrite"
+    rationale: "src/ui/ already has a working, tested, hardened implementation (p3-auriga-ui) — reuse its structure and data-fetching logic entirely, change only how it looks"
+
+cross_cutting: []
+
+risks:
+  - severity: medium
+    description: "Restyling could silently break the existing Playwright test suite's selectors (e.g. tests that select by a shadcn class name or specific text that changes)"
+    mitigation: "Acceptance criteria require the full existing suite (3 real-data + 4 hardening specs) to keep passing, with selector updates allowed but asserted scenarios unchanged — same rule used throughout this project's prior restructuring work"
+  - severity: low
+    description: "The constellation dependency diagram is new, custom SVG/CSS work adapted from a static mockup — the real view needs it to work for ANY number of dependencies (0, 1, many), not just the 2-dependency example the mockup showed"
+    mitigation: "Explicitly test with a 0-dependency story and a story with more than 2 dependencies (check real story YAMLs in .pHive/epics/ for examples), not just the p2-router-cutover case the mockup used"
+
+references:
+  - path: .pHive/epics/p4-auriga-branding/epic.yaml
+    relevant_excerpt: |
+      Full synthesis context and both reference artifact paths.
