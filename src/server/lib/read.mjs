@@ -23,212 +23,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { parse as parseYaml } from 'yaml';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // lib/ -> server/ -> src/ -> repo root
 export const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 export const DEFAULT_PHIVE_ROOT = path.join(REPO_ROOT, '.pHive');
 
-// ---------------------------------------------------------------------------
-// Minimal hand-rolled YAML reader for the specific subset of YAML actually
-// used by .pHive/epics/*/epic.yaml, stories/*.yaml, and audits/post-run/*.yaml
-// (block mappings/sequences, sequences-of-mappings, flow arrays `[a, b]`,
-// block literal scalars `|`, quoted/unquoted scalars, numbers/booleans/null).
-// Not a general-purpose YAML implementation — this repo adds zero new runtime
-// dependencies for this story, so there is no js-yaml/yaml package available,
-// and none is needed for the shapes this story actually has to parse.
-// ---------------------------------------------------------------------------
-
-function splitKeyValue(content) {
-  let inQuote = null;
-  for (let i = 0; i < content.length; i++) {
-    const ch = content[i];
-    if (inQuote) {
-      if (ch === inQuote) inQuote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inQuote = ch; continue; }
-    if (ch === ':' && (i + 1 === content.length || content[i + 1] === ' ')) {
-      return { key: content.slice(0, i).trim(), rest: content.slice(i + 1).trim() };
-    }
-  }
-  return null;
-}
-
-function parseScalarToken(raw) {
-  const s = raw.trim();
-  if (s === '') return null;
-  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
-    return s.slice(1, -1).replace(/\\"/g, '"').replace(/\\n/g, '\n').replace(/\\\\/g, '\\');
-  }
-  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) {
-    return s.slice(1, -1).replace(/''/g, "'");
-  }
-  if (s === 'true') return true;
-  if (s === 'false') return false;
-  if (s === 'null' || s === '~') return null;
-  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
-  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
-  return s;
-}
-
-function splitFlowItems(s) {
-  const items = [];
-  let cur = '';
-  let inQuote = null;
-  for (const ch of s) {
-    if (inQuote) {
-      cur += ch;
-      if (ch === inQuote) inQuote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { inQuote = ch; cur += ch; continue; }
-    if (ch === ',') { items.push(cur); cur = ''; continue; }
-    cur += ch;
-  }
-  if (cur.trim() !== '') items.push(cur);
-  return items.map((t) => t.trim());
-}
-
-function parseFlowValue(s) {
-  const trimmed = s.trim();
-  if (trimmed.startsWith('[')) {
-    const inner = trimmed.slice(1, trimmed.lastIndexOf(']'));
-    if (inner.trim() === '') return [];
-    return splitFlowItems(inner).map(parseScalarToken);
-  }
-  if (trimmed.startsWith('{')) {
-    const inner = trimmed.slice(1, trimmed.lastIndexOf('}'));
-    const obj = {};
-    if (inner.trim() === '') return obj;
-    for (const pair of splitFlowItems(inner)) {
-      const idx = pair.indexOf(':');
-      if (idx === -1) continue;
-      obj[pair.slice(0, idx).trim()] = parseScalarToken(pair.slice(idx + 1).trim());
-    }
-    return obj;
-  }
-  return parseScalarToken(trimmed);
-}
-
-/**
- * Parse a subset of YAML (block mappings/sequences, flow arrays, block
- * literal scalars, quoted/unquoted scalars) sufficient for this repo's own
- * .pHive/ epic/story/audit YAML shapes. Throws on structurally nonsensical
- * input (e.g. tabs where indentation is expected produce garbage rather than
- * a clean error) is NOT guaranteed — callers must not rely on this throwing
- * for every malformed file; listEpics/getEpic/getStory additionally validate
- * the parsed shape has the required fields (id/title/name) before trusting
- * it, which is what actually catches "malformed" files in practice.
- * @param {string} text
- * @returns {any}
- */
-export function parseYaml(text) {
-  const rawLines = String(text).replace(/\r\n/g, '\n').split('\n');
-  const lines = rawLines.map((l) => {
-    const m = l.match(/^(\s*)(.*)$/);
-    return { indent: m[1].length, content: m[2] };
-  });
-
-  let pos = 0;
-
-  function isBlank(line) { return line.content.trim() === ''; }
-  function isComment(line) { return line.content.trim().startsWith('#'); }
-  function skipNoise() { while (pos < lines.length && (isBlank(lines[pos]) || isComment(lines[pos]))) pos++; }
-  function peek() { skipNoise(); return pos < lines.length ? lines[pos] : null; }
-
-  function parseBlockScalar(parentIndent, chomp) {
-    const contentLines = [];
-    let baseIndent = null;
-    while (pos < lines.length) {
-      const line = lines[pos];
-      if (line.content.trim() === '') { contentLines.push(''); pos++; continue; }
-      if (line.indent <= parentIndent) break;
-      if (baseIndent === null) baseIndent = line.indent;
-      contentLines.push(' '.repeat(Math.max(0, line.indent - baseIndent)) + line.content);
-      pos++;
-    }
-    while (contentLines.length && contentLines[contentLines.length - 1] === '') contentLines.pop();
-    let result = contentLines.join('\n');
-    if (chomp !== '-') result += '\n';
-    return result;
-  }
-
-  function parseValueForKey(rest, keyIndent) {
-    if (rest === '') {
-      const next = peek();
-      if (next && next.indent > keyIndent) return parseBlock(next.indent);
-      return null;
-    }
-    if (rest === '|' || rest === '|-' || rest === '|+') {
-      const chomp = rest.includes('-') ? '-' : rest.includes('+') ? '+' : '';
-      return parseBlockScalar(keyIndent, chomp);
-    }
-    if (rest.startsWith('[') || rest.startsWith('{')) return parseFlowValue(rest);
-    return parseScalarToken(rest);
-  }
-
-  function parseMapping(indent) {
-    const obj = {};
-    while (true) {
-      const line = peek();
-      if (!line || line.indent !== indent) break;
-      if (line.content.startsWith('- ') || line.content.trim() === '-') break;
-      const split = splitKeyValue(line.content);
-      if (!split) { pos++; continue; }
-      pos++;
-      obj[split.key] = parseValueForKey(split.rest, indent);
-    }
-    return obj;
-  }
-
-  function parseSequence(indent) {
-    const arr = [];
-    while (true) {
-      const line = peek();
-      if (!line || line.indent !== indent) break;
-      const trimmed = line.content;
-      if (!(trimmed.startsWith('- ') || trimmed.trim() === '-')) break;
-      const dashIndent = line.indent;
-      const contentCol = dashIndent + 2;
-      if (trimmed.trim() === '-') {
-        pos++;
-        const next = peek();
-        arr.push(next && next.indent > dashIndent ? parseBlock(next.indent) : null);
-        continue;
-      }
-      const rest = trimmed.slice(2);
-      const kv = splitKeyValue(rest);
-      if (kv) {
-        // "- key: value" — rewrite this line as a mapping-continuation line
-        // at contentCol so parseMapping's ordinary key:value loop can read
-        // it (and the item's remaining keys on subsequent, more-indented
-        // lines) without a separate code path.
-        lines[pos] = { indent: contentCol, content: rest };
-        arr.push(parseMapping(contentCol));
-      } else if (rest.trim() === '') {
-        pos++;
-        const next = peek();
-        arr.push(next && next.indent > dashIndent ? parseBlock(next.indent) : null);
-      } else {
-        pos++;
-        arr.push(parseValueForKey(rest.trim(), dashIndent));
-      }
-    }
-    return arr;
-  }
-
-  function parseBlock(indent) {
-    const first = peek();
-    if (!first) return null;
-    if (first.content.startsWith('- ') || first.content.trim() === '-') return parseSequence(indent);
-    return parseMapping(indent);
-  }
-
-  const first = peek();
-  if (!first) return null;
-  return parseBlock(first.indent);
-}
+// YAML parsing is delegated entirely to the `yaml` package (this server's
+// first real runtime dependency, deliberately — see package.json's
+// description). A prior version of this file hand-rolled a minimal parser
+// for the subset of YAML this repo's own .pHive/ files happened to use;
+// that was replaced because future story YAMLs (generated by /plan) can
+// have more complex shapes than what the hand-rolled parser was verified
+// against, and a subtle mis-parse would silently corrupt what the dashboard
+// displays. `yaml`'s parse() throws a YAMLParseError (a real, well-defined
+// error) on genuinely malformed input, which every call site below catches
+// per-file — same graceful-degradation contract as before, just backed by a
+// real parser instead of a hand-rolled one.
 
 // ---------------------------------------------------------------------------
 // File loaders — each wraps fs.readFileSync + parseYaml + minimal required-

@@ -144,6 +144,46 @@ test('graceful degradation: a malformed epic.yaml is skipped, not a crash', (t) 
   assert.ok(stderrLines.some((l) => l.includes('broken-epic')), 'expected a stderr log naming the skipped file');
 });
 
+test('graceful degradation: genuinely invalid YAML syntax (not just a missing field) is skipped, not a crash', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const epicsDir = path.join(tmpRoot, 'epics');
+  fs.mkdirSync(path.join(epicsDir, 'valid-epic', 'stories'), { recursive: true });
+  fs.mkdirSync(path.join(epicsDir, 'syntax-broken-epic'), { recursive: true });
+
+  fs.writeFileSync(
+    path.join(epicsDir, 'valid-epic', 'epic.yaml'),
+    'name: valid-epic\ntitle: A valid epic\n',
+  );
+  // Genuinely invalid YAML syntax (unclosed flow sequence) — this must
+  // throw a real yaml.YAMLParseError from the underlying `yaml` package,
+  // not just fail this module's own required-field check. Proves the
+  // real library's parse errors are caught per-file exactly like the old
+  // hand-rolled parser's errors were.
+  fs.writeFileSync(
+    path.join(epicsDir, 'syntax-broken-epic', 'epic.yaml'),
+    'name: syntax-broken-epic\ntitle: [unclosed flow seq\n',
+  );
+
+  const stderrLines = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk, ...rest) => { stderrLines.push(String(chunk)); return true; };
+  let epics;
+  try {
+    epics = listEpics(tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(epics.length, 1, 'the syntactically-broken epic must be skipped, not crash the listing');
+  assert.equal(epics[0].id, 'valid-epic');
+  assert.ok(
+    stderrLines.some((l) => l.includes('syntax-broken-epic')),
+    'expected a stderr log naming the skipped file',
+  );
+});
+
 test('graceful degradation: a malformed story yaml is skipped within an otherwise valid epic', (t) => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
   t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
