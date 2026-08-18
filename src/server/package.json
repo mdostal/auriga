@@ -1,0 +1,15 @@
+{
+  "name": "auriga-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Auriga server — read-only node:http JSON API over .pHive/ state (epics, stories, activity). No HTTP framework dependency (plain node:http); uses the `yaml` package for real YAML parsing.",
+  "main": "index.mjs",
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  }
+}

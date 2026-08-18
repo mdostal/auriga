@@ -106,20 +106,20 @@ off, and compare throughput and cost at every step.
 
 ---
 
-## ④ Future — a self-building queue UI (deferred, recorded 2026-08-15)
+## ④ Auriga's UI — a clean operator dashboard (landed/landing, epic `p3-auriga-ui`)
 
-Once the adapter interface (§③, tracked as epic `p2-adapter-interface`) lands, Auriga gets a
-simple queue UI as a separate, later epic — deliberately **not** bundled into the adapter work so
-that foundational interface work doesn't grow unbounded.
+Once the adapter interface (§③, epic `p2-adapter-interface`) landed, Auriga got a simple
+operator dashboard as a separate, later epic — a clean, focused surface for seeing Auriga's
+state (epics/stories/status, the audit/log trail of what it's done), nothing more. Built on
+**shadcn/ui + Vite/Tailwind** as an isolated frontend package, separate from the router's
+zero-dep backend.
 
-The intended shape of that UI, captured now so it isn't lost before its turn comes: not a static,
-hand-built dashboard, but something closer to **v0-style (Vercel)** — an LLM in the browser the
-operator can discuss the UI with, alongside a set of tools and templates so the UI can scaffold and
-extend itself: pull in existing tooling, run deep research on the right approach, and let new
-components/charts/graphs/dashboards get created and scaled as needs grow, all in standalone mode.
-Likely built on **shadcn/ui** as the component foundation. When this epic is actually planned, its
-kickoff/design-discussion research phase should treat this as the starting brief, not default to a
-plain hand-coded dashboard.
+*(Correction, 2026-08-17: an earlier version of this section described a general-purpose,
+LLM-assisted, self-building UI-creation tool — v0-style code generation, templates, "create
+new components/charts/dashboards as needs grow." That was written for **Janus** (Pantheon's
+UI-creation portal), not Auriga, and got recorded here by mistake. Auriga is an orchestrator,
+not a UI builder — its own UI stays a simple, clean dashboard. The corrected content has been
+moved out; Janus's own repo/VISION.md is the right home for it.)*
 
 ---
 
