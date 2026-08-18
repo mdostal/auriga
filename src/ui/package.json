@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:hardening": "playwright test --config=playwright.hardening.config.js"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.3",

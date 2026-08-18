@@ -9,6 +9,13 @@ const PORT = process.env.AURIGA_E2E_PORT || '8799'
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // The hardening/ subdir has its own dedicated config
+  // (playwright.hardening.config.js, run via `npm run test:e2e:hardening`)
+  // that boots real servers pointed at real empty/malformed temp .pHive/
+  // fixtures instead of this repo's own — exclude it here so it isn't
+  // picked up (and run against the WRONG, real-data server) by this
+  // config's recursive default testDir glob.
+  testIgnore: '**/hardening/**',
   timeout: 30_000,
   fullyParallel: false,
   retries: 0,

@@ -105,6 +105,12 @@ former `lib/multica.mjs`), an in-memory stub used by tests, and the intentionall
 `pantheon-v2-l2` stub (the only sanctioned path from Auriga to Pantheon). See that directory's
 `README.md` for the two-adapter model.
 
+Alongside the router, [`src/server/`](src/server/) is a small read-only `node:http` JSON API
+over this repo's own `.pHive/` state (epics, stories, activity — see `src/server/lib/read.mjs`),
+and [`src/ui/`](src/ui/) is the Vite + Tailwind + shadcn/ui operator dashboard it serves —
+together, a local, read-only web view onto the same planning/audit data the router itself acts
+on. Neither package is a dependency of the router; each has its own `package.json` and `npm test`.
+
 ## Status
 
 **WIP — live on the hive.** The `src/router/` auto-router runs live, draining the aligned Multica

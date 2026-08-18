@@ -28,7 +28,18 @@ import { parse as parseYaml } from 'yaml';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // lib/ -> server/ -> src/ -> repo root
 export const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-export const DEFAULT_PHIVE_ROOT = path.join(REPO_ROOT, '.pHive');
+// AURIGA_PHIVE_ROOT lets the running server (index.mjs) be pointed at a
+// different .pHive/ root entirely — every call site below already accepts an
+// explicit `root` param for in-process tests, but the live HTTP server
+// (src/server/index.mjs) always calls the read functions with no override,
+// so a real *process*-level end-to-end check (Playwright driving a real
+// server against a real empty/malformed temp fixture, per
+// p3-dashboard-hardening's acceptance criteria) needs an env-level knob
+// instead. Unset in normal/production use — resolves to this repo's real
+// .pHive/ exactly as before.
+export const DEFAULT_PHIVE_ROOT = process.env.AURIGA_PHIVE_ROOT
+  ? path.resolve(process.env.AURIGA_PHIVE_ROOT)
+  : path.join(REPO_ROOT, '.pHive');
 
 // YAML parsing is delegated entirely to the `yaml` package (this server's
 // first real runtime dependency, deliberately — see package.json's

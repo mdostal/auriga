@@ -162,7 +162,11 @@ export function createServer() {
 }
 
 // Only listen when invoked directly (`node src/server/index.mjs`), not when
-// createServer is imported for tests.
+// createServer is imported for tests. `AURIGA_PHIVE_ROOT` (read by
+// ./lib/read.mjs's DEFAULT_PHIVE_ROOT) optionally points this whole process
+// at a different .pHive/ root — used by src/ui's hardening Playwright
+// scenarios to boot a real server against a real empty/malformed temp
+// fixture; unset in normal use, defaults to this repo's real .pHive/.
 if (import.meta.url === `file://${process.argv[1]}`) {
   const PORT = Number(process.env.PORT) || 8787;
   const server = createServer();

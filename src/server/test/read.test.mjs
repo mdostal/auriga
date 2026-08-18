@@ -14,6 +14,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   listEpics,
   getEpic,
@@ -22,6 +24,8 @@ import {
   DEFAULT_PHIVE_ROOT,
   REPO_ROOT,
 } from '../lib/read.mjs';
+
+const READ_MJS_PATH = fileURLToPath(new URL('../lib/read.mjs', import.meta.url));
 
 // ---------------------------------------------------------------------------
 // 1. Against this repo's REAL .pHive/ state
@@ -224,6 +228,65 @@ test('graceful degradation: a malformed story yaml is skipped within an otherwis
   assert.equal(missing, null, 'getStory on a malformed story returns null, never throws');
 });
 
+test('getEpic() returns an empty stories[] array for an epic with zero story files, not a throw/undefined', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const epicDir = path.join(tmpRoot, 'epics', 'zero-story-epic');
+  // No stories/ dir at all — the freshest-possible "no stories yet" shape.
+  fs.mkdirSync(epicDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(epicDir, 'epic.yaml'),
+    'name: zero-story-epic\ntitle: Zero Story Epic\n',
+  );
+
+  const epic = getEpic('zero-story-epic', tmpRoot);
+  assert.ok(epic);
+  assert.deepEqual(epic.stories, [], 'zero-story epic must yield [], never undefined/throw');
+});
+
+test('listEpics() derives "planning" status for a zero-story epic (deriveEpicStatus([]))', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const epicDir = path.join(tmpRoot, 'epics', 'zero-story-epic');
+  fs.mkdirSync(path.join(epicDir, 'stories'), { recursive: true }); // present but empty
+  fs.writeFileSync(
+    path.join(epicDir, 'epic.yaml'),
+    'name: zero-story-epic\ntitle: Zero Story Epic\n',
+  );
+
+  const epics = listEpics(tmpRoot);
+  assert.equal(epics.length, 1);
+  assert.equal(epics[0].story_count, 0);
+  assert.equal(epics[0].status, 'planning');
+});
+
+test('getStory() returns a story object with no cross_cutting key when the YAML omits it — never throws, never fabricates a value', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const storiesDir = path.join(tmpRoot, 'epics', 'minimal-epic', 'stories');
+  fs.mkdirSync(storiesDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(tmpRoot, 'epics', 'minimal-epic', 'epic.yaml'),
+    'name: minimal-epic\ntitle: Minimal Epic\n',
+  );
+  // Deliberately minimal: only the required id/title/status fields — no
+  // cross_cutting, no risks, no references, no acceptance_criteria.
+  fs.writeFileSync(
+    path.join(storiesDir, 'minimal-story.yaml'),
+    'id: minimal-story\nepic: minimal-epic\ntitle: A minimal story\nstatus: pending\n',
+  );
+
+  const story = getStory('minimal-epic', 'minimal-story', tmpRoot);
+  assert.ok(story);
+  assert.equal(story.id, 'minimal-story');
+  assert.equal('cross_cutting' in story, false, 'omitted optional field must stay absent, not become undefined-on-purpose or null');
+  assert.equal(story.risks, undefined);
+  assert.equal(story.acceptance_criteria, undefined);
+});
+
 test('listEpics()/listActivity() degrade to [] rather than throwing on a missing root', () => {
   const nonexistentRoot = path.join(os.tmpdir(), 'phive-does-not-exist-' + Date.now());
   assert.deepEqual(listEpics(nonexistentRoot), []);
@@ -237,4 +300,16 @@ test('listEpics()/listActivity() degrade to [] rather than throwing on a missing
 test('DEFAULT_PHIVE_ROOT resolves to this repo\'s real .pHive directory', () => {
   assert.equal(DEFAULT_PHIVE_ROOT, path.join(REPO_ROOT, '.pHive'));
   assert.ok(fs.existsSync(DEFAULT_PHIVE_ROOT));
+});
+
+test('DEFAULT_PHIVE_ROOT honors AURIGA_PHIVE_ROOT when set — a fresh process, since it\'s read once at module load', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const out = execFileSync(
+    process.execPath,
+    ['-e', `import(${JSON.stringify(READ_MJS_PATH)}).then((m) => { process.stdout.write(m.DEFAULT_PHIVE_ROOT); });`],
+    { env: { ...process.env, AURIGA_PHIVE_ROOT: tmpRoot }, encoding: 'utf8' },
+  );
+  assert.equal(out, path.resolve(tmpRoot));
 });

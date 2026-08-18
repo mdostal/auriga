@@ -3,6 +3,11 @@
 The auto-router: the decide+assign layer that self-drains the Multica board by
 routing unassigned todos to Pantheon swarm agents. Runs live on the hive.
 
+This directory is the router only. Its siblings `../server/` (read-only JSON API over
+this repo's own `.pHive/` state) and `../ui/` (the dashboard that API serves) are a
+separate, independent subsystem — see the repo-root [`README.md`](../../README.md) for
+what they are; nothing below concerns them.
+
 ## State-machine transitions (pure code, no agent calls)
 
 Every cycle, before routing new todos, the router also advances issue status
