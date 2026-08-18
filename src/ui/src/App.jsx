@@ -17,10 +17,10 @@ function NavButton({ active, onClick, children }) {
       type="button"
       onClick={onClick}
       className={cn(
-        'text-sm px-2 py-1 rounded-md transition-colors',
+        'font-ui text-[13.5px] px-3 pb-3 pt-1 border-b-2 transition-colors',
         active
-          ? 'font-semibold text-foreground'
-          : 'text-muted-foreground hover:text-foreground',
+          ? 'font-semibold text-capella border-capella'
+          : 'text-ink-3 border-transparent hover:text-ink-1',
       )}
     >
       {children}
@@ -34,12 +34,15 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background px-4 py-10">
-      <header className="max-w-4xl mx-auto mb-6 text-left">
-        <h1 className="text-2xl font-semibold tracking-tight">Auriga</h1>
-        <p className="text-sm text-muted-foreground mb-4">
+      <header className="max-w-4xl mx-auto mb-10 text-left">
+        <p className="font-ui text-[11.5px] tracking-[0.24em] uppercase text-star-planning mb-2">
+          Pantheon · Router &amp; Dispatch
+        </p>
+        <h1 className="font-display text-4xl text-ink-1 tracking-tight">Auriga</h1>
+        <p className="text-sm text-ink-2 mt-2 mb-5 max-w-[46ch]">
           Read-only operator dashboard over this repo&apos;s .pHive/ state.
         </p>
-        <nav className="flex gap-2 -ml-2">
+        <nav className="flex gap-1 -ml-3 border-b border-hairline">
           <NavButton active={route.name === 'epics'} onClick={() => setRoute({ name: 'epics' })}>
             Epics
           </NavButton>

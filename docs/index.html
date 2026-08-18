@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga — Router God of Pantheon</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga senses the Pantheon work board and dispatches every ticket to the lane and agent best able to do it — the router god of a multi-agent SDLC pipeline." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<style>
+  /* ============================= TOKENS ============================= */
+  :root{
+    --bg-void:        #0a0d18;
+    --bg-void-2:      #0d1120;
+    --bg-plate:       #10152a;
+    --bg-plate-raised:#161d38;
+    --bg-inset:       #0c1024;
+
+    --line-hair:      #2a3155;
+    --line-hair-soft: #1b2140;
+    --line-hair-faint:#171c38;
+
+    --ink-1:  #eef1fb;
+    --ink-2:  #a3abd1;
+    --ink-3:  #6d7599;
+
+    --capella:      #f3c667;
+    --capella-soft: rgba(243,198,103,.14);
+    --capella-line: rgba(243,198,103,.35);
+
+    --star-done:      #bcd6ff;
+    --star-done-soft: rgba(188,214,255,.14);
+    --star-pending:      #747da3;
+    --star-pending-soft: rgba(116,125,163,.14);
+    --star-progress:      #f0954a;
+    --star-progress-soft: rgba(240,149,74,.16);
+    --star-planning:      #a390d8;
+    --star-planning-soft: rgba(163,144,216,.16);
+
+    --nova-high: #e2555f;
+    --nova-high-soft: rgba(226,85,95,.14);
+    --nova-mid:  #e0b155;
+    --nova-mid-soft: rgba(224,177,85,.14);
+    --nova-low:  #7fae8e;
+    --nova-low-soft: rgba(127,174,142,.14);
+
+    --font-display: 'Iowan Old Style','Palatino Linotype',Palatino,'URW Palladio L',Georgia,serif;
+    --font-ui: Optima,Futura,'Century Gothic','URW Gothic','Avenir Next',-apple-system,'Segoe UI',sans-serif;
+    --font-mono: 'SF Mono','JetBrains Mono',Menlo,Consolas,'Liberation Mono',monospace;
+
+    --radius-sm: 3px;
+    --radius-md: 5px;
+    --measure: 68ch;
+  }
+
+  /* ============================= RESET ============================= */
+  *,*::before,*::after{ box-sizing:border-box; }
+  html{ scroll-behavior:smooth; }
+  @media (prefers-reduced-motion:reduce){ html{ scroll-behavior:auto; } }
+  body{
+    margin:0;
+    background:var(--bg-void);
+    color:var(--ink-1);
+    font-family:var(--font-ui);
+    font-size:16px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  h1,h2,h3,h4{ margin:0; font-family:var(--font-display); font-weight:600; text-wrap:balance; }
+  p{ margin:0; }
+  ul{ margin:0; padding:0; list-style:none; }
+  a{ color:inherit; }
+  svg{ display:block; }
+  button{ font-family:inherit; }
+  :focus-visible{ outline:2px solid var(--capella); outline-offset:3px; border-radius:2px; }
+
+  /* ============================= AMBIENT STARFIELD ============================= */
+  #starfield{
+    position:fixed; inset:0; z-index:0; pointer-events:none;
+    width:100%; height:100%;
+  }
+
+  .stage{ position:relative; z-index:1; }
+
+  /* ============================= LAYOUT SHELLS ============================= */
+  .rail{
+    max-width:920px;
+    margin:0 auto;
+    padding:0 28px;
+  }
+
+  /* ============================= BROWSER-TAB CHROME PREVIEW ============================= */
+  .chrome-caption{
+    text-align:center;
+    font-family:var(--font-ui);
+    font-size:11px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--ink-3);
+    padding:22px 0 10px;
+  }
+  .chrome-preview{
+    max-width:560px;
+    margin:0 auto 8px;
+    background:#161a2c;
+    border:1px solid var(--line-hair);
+    border-radius:9px 9px 0 0;
+    overflow:hidden;
+    box-shadow:0 30px 60px -30px rgba(0,0,0,.7);
+  }
+  .chrome-tabs{
+    display:flex; align-items:flex-end; gap:2px;
+    padding:8px 8px 0;
+    background:#0e1120;
+  }
+  .chrome-tab{
+    display:flex; align-items:center; gap:7px;
+    padding:8px 14px;
+    border-radius:7px 7px 0 0;
+    font-family:var(--font-ui);
+    font-size:12.5px;
+    color:var(--ink-3);
+    background:transparent;
+    max-width:190px;
+  }
+  .chrome-tab.active{ background:var(--bg-plate); color:var(--ink-1); }
+  .chrome-tab span{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chrome-tab .fav{ width:13px; height:13px; flex:none; }
+  .chrome-bar{
+    display:flex; align-items:center; gap:10px;
+    padding:8px 12px;
+    background:var(--bg-plate);
+    border-top:1px solid var(--line-hair-soft);
+  }
+  .chrome-dot{ width:9px; height:9px; border-radius:50%; background:#2a3155; }
+  .chrome-url{
+    flex:1;
+    font-family:var(--font-mono);
+    font-size:11.5px;
+    color:var(--ink-3);
+    background:var(--bg-inset);
+    border:1px solid var(--line-hair-soft);
+    border-radius:5px;
+    padding:5px 10px;
+  }
+
+  /* ============================= HERO / TITLE PLATE ============================= */
+  .hero{
+    text-align:center;
+    padding:34px 28px 46px;
+    position:relative;
+  }
+  .hero-glyph{ width:112px; height:112px; margin:0 auto 18px; }
+  .eyebrow{
+    font-family:var(--font-ui);
+    font-size:11.5px;
+    letter-spacing:.24em;
+    text-transform:uppercase;
+    color:var(--star-planning);
+  }
+  .hero h1{
+    font-size:56px;
+    letter-spacing:.01em;
+    color:var(--ink-1);
+    margin-top:10px;
+    font-variant-caps:small-caps;
+  }
+  .hero .sub{
+    margin-top:12px;
+    color:var(--ink-2);
+    font-size:16.5px;
+    max-width:50ch;
+    margin-left:auto; margin-right:auto;
+  }
+  .hero .rule{
+    width:64px; height:1px;
+    margin:22px auto;
+    background:linear-gradient(90deg,transparent,var(--capella-line),transparent);
+  }
+  .hero .sync{
+    font-family:var(--font-mono);
+    font-size:12px;
+    color:var(--ink-3);
+    letter-spacing:.02em;
+  }
+
+  /* ============================= PLATE NAV ============================= */
+  .plate-nav{
+    position:sticky; top:0; z-index:5;
+    background:rgba(10,13,24,.86);
+    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line-hair);
+  }
+  .plate-nav ul{
+    display:flex; justify-content:center; gap:2px;
+    max-width:920px; margin:0 auto; padding:0 28px;
+  }
+  .plate-nav a{
+    display:flex; flex-direction:column; align-items:center; gap:2px;
+    padding:14px 22px 12px;
+    text-decoration:none;
+    border-bottom:2px solid transparent;
+    color:var(--ink-3);
+    transition:color .15s ease, border-color .15s ease;
+  }
+  .plate-nav a .num{
+    font-family:var(--font-mono); font-size:10px; letter-spacing:.16em;
+    text-transform:uppercase;
+  }
+  .plate-nav a .lbl{ font-family:var(--font-ui); font-size:13.5px; }
+  .plate-nav a:hover{ color:var(--ink-1); }
+  .plate-nav a.is-active{ color:var(--capella); border-bottom-color:var(--capella); }
+
+  /* ============================= PLATE / SECTION HEADERS ============================= */
+  .plate{
+    padding:64px 0 20px;
+    border-bottom:1px solid var(--line-hair-faint);
+    position:relative;
+  }
+  .plate::before{
+    content:"";
+    position:absolute; inset:0;
+    background-image:
+      linear-gradient(var(--line-hair-faint) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line-hair-faint) 1px, transparent 1px);
+    background-size:64px 64px;
+    -webkit-mask-image:linear-gradient(to bottom, black, transparent 70%);
+    mask-image:linear-gradient(to bottom, black, transparent 70%);
+    opacity:.5;
+    pointer-events:none;
+  }
+  .plate-head{ position:relative; margin-bottom:36px; }
+  .plate-head .eyebrow{ color:var(--capella); }
+  .plate-head h2{ font-size:32px; margin-top:8px; color:var(--ink-1); }
+  .plate-head .desc{ margin-top:10px; color:var(--ink-2); max-width:var(--measure); font-size:15px; }
+
+  /* ============================= STATUS GLYPHS (shared) ============================= */
+  .glyph{ width:16px; height:16px; flex:none; }
+  .glyph.done{ fill:var(--star-done); filter:drop-shadow(0 0 5px rgba(188,214,255,.5)); }
+  .glyph.pending{ fill:none; stroke:var(--star-pending); stroke-width:1.6; }
+  .glyph.in-progress{ fill:var(--star-progress); filter:drop-shadow(0 0 5px rgba(240,149,74,.55)); animation:twinkle 2.6s ease-in-out infinite; }
+  @keyframes twinkle{ 0%,100%{ opacity:1; transform:scale(1); } 50%{ opacity:.7; transform:scale(.88); } }
+  @media (prefers-reduced-motion:reduce){ .glyph.in-progress{ animation:none; } }
+  .glyph-nebula{
+    width:16px; height:16px; border-radius:50%; flex:none;
+    background:radial-gradient(circle, var(--star-planning) 0%, rgba(163,144,216,.25) 55%, transparent 78%);
+    filter:blur(.3px);
+  }
+
+  .status-legend{
+    display:flex; flex-wrap:wrap; gap:10px;
+    margin-bottom:34px;
+  }
+  .status-legend .chip{
+    display:flex; align-items:center; gap:9px;
+    padding:9px 14px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+  }
+  .status-legend .chip .t{ display:flex; flex-direction:column; }
+  .status-legend .chip .name{ font-size:12.5px; color:var(--ink-1); font-weight:600; }
+  .status-legend .chip .hint{ font-size:11px; color:var(--ink-3); }
+
+  /* ============================= EPIC CARDS ============================= */
+  .epics{ display:flex; flex-direction:column; gap:12px; }
+  .epic{
+    display:flex; align-items:center; gap:18px;
+    padding:20px 22px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    transition:border-color .15s ease, background .15s ease;
+  }
+  .epic:hover{ border-color:var(--line-hair-soft); background:var(--bg-plate-raised); }
+  .epic .mark{ flex:none; width:34px; height:34px; display:flex; align-items:center; justify-content:center; }
+  .epic .body{ flex:1; min-width:0; }
+  .epic .id{
+    font-family:var(--font-mono); font-size:11.5px; color:var(--ink-3);
+    letter-spacing:.02em;
+  }
+  .epic h3{
+    font-size:19px; margin-top:3px; color:var(--ink-1); font-weight:600;
+  }
+  .epic .meta{
+    flex:none; display:flex; align-items:center; gap:16px;
+  }
+  .pill{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:5px 11px;
+    border-radius:20px;
+    font-size:11.5px;
+    letter-spacing:.04em;
+    text-transform:uppercase;
+    font-family:var(--font-ui);
+    font-weight:600;
+    white-space:nowrap;
+  }
+  .pill.done{ color:var(--star-done); background:var(--star-done-soft); }
+  .pill.pending{ color:var(--star-pending); background:var(--star-pending-soft); }
+  .pill.in-progress{ color:var(--star-progress); background:var(--star-progress-soft); }
+  .pill.planning{ color:var(--star-planning); background:var(--star-planning-soft); }
+  .magnitude{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--ink-2);
+    display:flex; align-items:center; gap:5px;
+    min-width:82px;
+  }
+  .magnitude svg{ width:12px; height:12px; fill:var(--capella); }
+
+  /* ============================= STORY DETAIL ============================= */
+  .breadcrumb{
+    font-family:var(--font-mono); font-size:12.5px; color:var(--ink-3);
+    display:flex; align-items:center; gap:8px; margin-bottom:16px;
+  }
+  .breadcrumb .sep{ color:var(--line-hair); }
+  .breadcrumb .here{ color:var(--capella); }
+
+  .story-title{ font-size:29px; color:var(--ink-1); max-width:32ch; }
+
+  .story-meta{
+    display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+    margin-top:18px;
+  }
+  .meter{ display:flex; align-items:center; gap:8px; padding:5px 12px 5px 6px; background:var(--bg-plate); border:1px solid var(--line-hair); border-radius:20px; }
+  .meter .lbl{ font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3); padding-left:6px;}
+  .meter .dots{ display:flex; gap:3px; }
+  .meter .dots i{ width:6px; height:6px; border-radius:50%; background:var(--line-hair); display:block; }
+  .meter .dots i.on{ background:var(--nova-high); }
+  .tag-method{
+    font-family:var(--font-mono); font-size:11.5px; color:var(--ink-2);
+    padding:6px 12px; border:1px solid var(--line-hair); border-radius:20px;
+  }
+
+  .constellation-wrap{
+    margin-top:38px;
+    background:var(--bg-inset);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    padding:22px 22px 18px;
+  }
+  .constellation-wrap .cap{
+    font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3);
+    margin-bottom:6px;
+  }
+  .dep-diagram{ width:100%; height:auto; }
+  .dep-diagram .link{ stroke:var(--capella-line); stroke-width:1; stroke-dasharray:3 4; }
+  .dep-diagram .node-c{ fill:var(--star-done); filter:drop-shadow(0 0 6px rgba(188,214,255,.55)); }
+  .dep-diagram .node-lbl{ font-family:var(--font-mono); font-size:9.5px; fill:var(--ink-2); }
+  .dep-diagram .node-lbl.center{ fill:var(--ink-1); font-weight:600; }
+  .dep-diagram .tag-lbl{ font-family:var(--font-ui); font-size:8px; letter-spacing:.08em; fill:var(--ink-3); text-transform:uppercase; }
+
+  .section-block{ margin-top:38px; }
+  .section-block .cap{
+    font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3);
+    margin-bottom:12px;
+  }
+  .log-entry{
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-left:2px solid var(--capella-line);
+    border-radius:0 var(--radius-md) var(--radius-md) 0;
+    padding:20px 24px;
+    max-width:var(--measure);
+    color:var(--ink-2);
+    font-size:15px;
+    line-height:1.7;
+  }
+  .log-entry code{ font-family:var(--font-mono); font-size:.92em; color:var(--ink-1); background:var(--bg-inset); padding:.1em .35em; border-radius:3px; }
+
+  .ac-list{ display:flex; flex-direction:column; gap:10px; max-width:var(--measure); }
+  .ac-item{
+    display:flex; gap:12px; align-items:flex-start;
+    padding:13px 16px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+  }
+  .ac-check{ flex:none; width:18px; height:18px; margin-top:1px; }
+  .ac-item p{ font-size:14px; color:var(--ink-2); line-height:1.6; }
+  .ac-item code{ font-family:var(--font-mono); font-size:.9em; color:var(--star-done); }
+
+  .flag-card{
+    max-width:var(--measure);
+    padding:16px 20px;
+    background:var(--star-planning-soft);
+    border:1px solid rgba(163,144,216,.35);
+    border-radius:var(--radius-md);
+  }
+  .flag-card .k{
+    font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--star-planning);
+    font-weight:700; margin-bottom:7px;
+  }
+  .flag-card p{ font-size:14px; color:var(--ink-2); line-height:1.6; }
+
+  .risk-card{
+    max-width:var(--measure);
+    padding:18px 20px;
+    background:var(--nova-high-soft);
+    border:1px solid rgba(226,85,95,.4);
+    border-left:3px solid var(--nova-high);
+    border-radius:0 var(--radius-md) var(--radius-md) 0;
+  }
+  .risk-card .k{
+    display:flex; align-items:center; gap:8px;
+    font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--nova-high);
+    font-weight:700; margin-bottom:9px;
+  }
+  .risk-card .k svg{ width:13px; height:13px; fill:var(--nova-high); }
+  .risk-card p{ font-size:14px; color:var(--ink-2); line-height:1.65; margin-bottom:8px; }
+  .risk-card p:last-child{ margin-bottom:0; }
+  .risk-card .mit-lbl{ color:var(--nova-low); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.06em; margin-right:6px; }
+
+  /* ============================= ACTIVITY LOG ============================= */
+  .timeline{ position:relative; padding-left:26px; }
+  .timeline::before{
+    content:""; position:absolute; left:5px; top:6px; bottom:6px; width:1px;
+    background:linear-gradient(var(--line-hair), var(--line-hair-faint));
+  }
+  .tl-item{ position:relative; padding-bottom:20px; }
+  .tl-item:last-child{ padding-bottom:0; }
+  .tl-item::before{
+    content:""; position:absolute; left:-26px; top:14px;
+    width:9px; height:9px; border-radius:50%;
+    background:var(--bg-void); border:2px solid var(--ink-3);
+  }
+  .tl-item.commit::before{ border-color:var(--star-done); }
+  .tl-item.audit::before{ border-color:var(--star-planning); background:var(--star-planning); box-shadow:0 0 8px rgba(163,144,216,.6); }
+
+  .tl-row{
+    display:flex; align-items:flex-start; gap:16px;
+    padding:14px 18px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+  }
+  .tl-item.audit .tl-row{
+    background:var(--star-planning-soft);
+    border-color:rgba(163,144,216,.35);
+  }
+  .tl-when{
+    flex:none; width:118px;
+    font-family:var(--font-mono); font-size:11.5px; color:var(--ink-3);
+    line-height:1.5; padding-top:1px;
+  }
+  .tl-when b{ display:block; color:var(--ink-2); font-size:12px; }
+  .tl-main{ flex:1; min-width:0; }
+  .tl-kind{
+    font-family:var(--font-mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--star-done); margin-bottom:5px; display:flex; align-items:center; gap:7px;
+  }
+  .tl-item.audit .tl-kind{ color:var(--star-planning); }
+  .tl-hash{
+    font-family:var(--font-mono); font-size:12px; color:var(--ink-1);
+    background:var(--bg-inset); border:1px solid var(--line-hair); border-radius:4px;
+    padding:1px 6px; cursor:help;
+  }
+  .tl-subject{ margin-top:6px; color:var(--ink-1); font-size:14.5px; line-height:1.5; }
+  .tl-stats{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
+  .tl-stats span{
+    font-family:var(--font-mono); font-size:11.5px; color:var(--star-planning);
+    background:rgba(163,144,216,.12); border:1px solid rgba(163,144,216,.3);
+    padding:3px 9px; border-radius:12px;
+  }
+  .tl-runid{ font-family:var(--font-mono); font-size:12px; color:var(--ink-1); margin-top:6px; }
+
+  /* ============================= ICON SHOWCASE ============================= */
+  .icon-grid{ display:flex; flex-wrap:wrap; gap:36px; align-items:flex-end; margin-bottom:26px; }
+  .icon-card{ display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .icon-card .swatch{
+    display:flex; align-items:center; justify-content:center;
+    background:var(--bg-plate); border:1px solid var(--line-hair); border-radius:var(--radius-md);
+  }
+  .icon-card .lbl{ font-family:var(--font-mono); font-size:11px; color:var(--ink-3); }
+  .icon-note{ max-width:var(--measure); color:var(--ink-2); font-size:14.5px; line-height:1.7; }
+  .icon-note b{ color:var(--ink-1); font-weight:600; }
+
+  /* ============================= PROSE / LEDE (added content) ============================= */
+  .lede{ max-width:var(--measure); color:var(--ink-2); font-size:15.5px; line-height:1.75; }
+  .lede + .lede{ margin-top:16px; }
+  .prose-h{ font-size:19px; color:var(--ink-1); margin-top:34px; margin-bottom:12px; font-family:var(--font-display); }
+  .prose-h:first-child{ margin-top:0; }
+
+  /* ============================= CTA BUTTONS (added content) ============================= */
+  .cta-row{ display:flex; flex-wrap:wrap; gap:14px; margin-top:28px; }
+  .btn{
+    display:inline-flex; align-items:center; gap:8px;
+    padding:12px 22px;
+    border-radius:var(--radius-md);
+    font-family:var(--font-ui); font-size:14px; font-weight:600;
+    letter-spacing:.02em;
+    text-decoration:none;
+    border:1px solid var(--line-hair);
+    transition:border-color .15s ease, background .15s ease, color .15s ease;
+  }
+  .btn .arrow{ font-family:var(--font-mono); font-size:13px; }
+  .btn-primary{ background:var(--capella); color:#241a06; border-color:var(--capella); }
+  .btn-primary:hover{ background:#f6d488; }
+  .btn-ghost{ background:var(--bg-plate); color:var(--ink-1); }
+  .btn-ghost:hover{ border-color:var(--ink-3); background:var(--bg-plate-raised); }
+
+  /* ============================= INSTALL STEPS (added content) ============================= */
+  .install-steps{ display:flex; flex-direction:column; gap:16px; max-width:var(--measure); }
+  .step{
+    display:flex; gap:18px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    padding:20px 22px;
+  }
+  .step-num{
+    flex:none; width:28px; height:28px;
+    display:flex; align-items:center; justify-content:center;
+    border-radius:50%;
+    background:var(--capella-soft);
+    color:var(--capella);
+    border:1px solid var(--capella-line);
+    font-family:var(--font-mono); font-size:12.5px; font-weight:700;
+  }
+  .step-body{ flex:1; min-width:0; }
+  .step-title{ font-size:14.5px; color:var(--ink-1); font-weight:600; font-family:var(--font-ui); margin-bottom:5px; }
+  .step-hint{ font-size:12.5px; color:var(--ink-3); margin-bottom:10px; line-height:1.6; }
+  pre.code-block{
+    margin:0;
+    background:var(--bg-inset);
+    border:1px solid var(--line-hair-soft);
+    border-radius:var(--radius-sm);
+    padding:13px 16px;
+    overflow-x:auto;
+    font-family:var(--font-mono); font-size:13px; line-height:1.7; color:var(--ink-1);
+    white-space:pre;
+  }
+  pre.code-block .c{ color:var(--ink-3); }
+
+  /* ============================= FOOTER ============================= */
+  footer{
+    padding:44px 0 60px; text-align:center;
+    color:var(--ink-3); font-size:12px; font-family:var(--font-mono);
+  }
+  footer .glyph-small{ width:14px; height:14px; margin:0 auto 10px; fill:var(--capella); }
+  footer .foot-links{ margin-top:10px; }
+  footer .foot-links a{ color:var(--ink-2); text-decoration:none; border-bottom:1px solid var(--line-hair); }
+  footer .foot-links a:hover{ color:var(--capella); border-color:var(--capella-line); }
+  footer .foot-links .sep{ color:var(--line-hair); margin:0 8px; }
+
+  /* ============================= RESPONSIVE ============================= */
+  @media (max-width:640px){
+    .hero h1{ font-size:38px; }
+    .epic{ flex-wrap:wrap; }
+    .epic .meta{ width:100%; justify-content:space-between; margin-top:6px; }
+    .tl-row{ flex-direction:column; }
+    .tl-when{ width:auto; }
+    .plate-nav a{ padding:12px 12px 10px; }
+    .step{ flex-direction:column; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================================================= -->
+<!-- SHARED SVG DEFS -->
+<!-- ============================================================= -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="star4" viewBox="0 0 24 24">
+      <path d="M12 1.5 L14.4 9.6 L22.5 12 L14.4 14.4 L12 22.5 L9.6 14.4 L1.5 12 L9.6 9.6 Z"/>
+    </symbol>
+    <symbol id="warn-star" viewBox="0 0 24 24">
+      <path d="M12 2 L22 20 H2 Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      <circle cx="12" cy="15.2" r="1.1"/>
+      <rect x="11.2" y="9" width="1.6" height="4.4" rx=".8"/>
+    </symbol>
+  </defs>
+</svg>
+
+<div class="stage">
+  <canvas id="starfield"></canvas>
+
+  <!-- ============================================================= -->
+  <!-- MOCK BROWSER TAB CHROME -->
+  <!-- ============================================================= -->
+  <p class="chrome-caption">The mark, in a browser tab</p>
+  <div class="chrome-preview">
+    <div class="chrome-tabs">
+      <div class="chrome-tab active">
+        <svg class="fav" viewBox="0 0 100 100">
+          <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="3"/>
+          <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="3"/>
+          <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="3"/>
+          <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="3"/>
+          <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="3"/>
+          <circle cx="38" cy="30" r="9" fill="#f3c667"/>
+          <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+          <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+          <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+          <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+        </svg>
+        <span>Auriga — Router God of Pantheon</span>
+      </div>
+      <div class="chrome-tab"><span>Pantheon</span></div>
+      <div class="chrome-tab"><span>Multica</span></div>
+    </div>
+    <div class="chrome-bar">
+      <div class="chrome-dot"></div><div class="chrome-dot"></div><div class="chrome-dot"></div>
+      <div class="chrome-url">mdostal.github.io/auriga</div>
+    </div>
+  </div>
+
+  <!-- ============================================================= -->
+  <!-- HERO -->
+  <!-- ============================================================= -->
+  <header class="hero rail">
+    <svg class="hero-glyph" viewBox="0 0 100 100" aria-hidden="true">
+      <line x1="38" y1="30" x2="62" y2="32" stroke="var(--capella-line)" stroke-width="1"/>
+      <line x1="62" y1="32" x2="66" y2="58" stroke="var(--capella-line)" stroke-width="1"/>
+      <line x1="66" y1="58" x2="50" y2="82" stroke="var(--capella-line)" stroke-width="1"/>
+      <line x1="50" y1="82" x2="22" y2="62" stroke="var(--capella-line)" stroke-width="1"/>
+      <line x1="22" y1="62" x2="38" y2="30" stroke="var(--capella-line)" stroke-width="1"/>
+      <circle cx="33" cy="22" r="1.3" fill="var(--ink-2)"/>
+      <circle cx="30" cy="27" r="1.1" fill="var(--ink-2)"/>
+      <circle cx="36" cy="17" r="1" fill="var(--ink-2)"/>
+      <circle cx="38" cy="30" r="4.8" fill="var(--capella)" filter="drop-shadow(0 0 7px rgba(243,198,103,.7))"/>
+      <circle cx="62" cy="32" r="3" fill="var(--ink-1)"/>
+      <circle cx="66" cy="58" r="2.6" fill="var(--ink-1)"/>
+      <circle cx="50" cy="82" r="3" fill="var(--ink-1)"/>
+      <circle cx="22" cy="62" r="2.7" fill="var(--ink-1)"/>
+    </svg>
+    <p class="eyebrow">Pantheon · Router &amp; Dispatch</p>
+    <h1>Auriga</h1>
+    <p class="sub">The Charioteer senses the work board and dispatches every ticket to the lane and agent best able to do it — the router god of Pantheon's agent swarm. Open source and standalone-capable.</p>
+    <div class="rule"></div>
+    <p class="sync">Sample board shown below — a static illustration, not a live feed. Run Auriga locally against your own data.</p>
+    <div class="cta-row" style="justify-content:center;">
+      <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">Read the docs <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="#install">Get started <span class="arrow">↓</span></a>
+    </div>
+  </header>
+
+  <!-- ============================================================= -->
+  <!-- ABOUT — what Auriga is & why orchestration needs it (added content) -->
+  <!-- ============================================================= -->
+  <section id="about" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">About</p>
+      <h2>The router god of Pantheon</h2>
+      <p class="desc">What Auriga actually is, and why a multi-agent swarm building software needs something like it.</p>
+    </div>
+
+    <h3 class="prose-h">What Auriga is</h3>
+    <p class="lede">Auriga is the router god of <a href="https://github.com/mdostal/pantheon-v2" target="_blank" rel="noopener" style="color:var(--capella); border-bottom:1px solid var(--capella-line); text-decoration:none;">Pantheon</a> — a swarm of coordinated agents building software together. Auriga senses the state of the shared work board and dispatches each unit of work to the right lane and agent: the PM/router of the Pantheon SDLC pipeline. It's one plugin god bound into the Pantheon host, alongside siblings like Minerva (planning, upstream of Auriga), Heimdall (lane gateway / token routing), Hellsing (zombie/worker reaping), Consus (ideation → sign-off), and Argus (observability).</p>
+    <p class="lede">It also runs standalone — its own repo, its own process — with a small, zero-dependency router at its core (plain Node, no framework) that talks to the board through an adapter-interface boundary rather than a hardcoded backend. That boundary is what lets the routing policy evolve, get tested, and get swapped independently of the agents it dispatches to, and it's the same seam that will eventually let Auriga route boards other than Multica.</p>
+
+    <h3 class="prose-h">Why orchestration needs a router</h3>
+    <p class="lede">A swarm of agents building software needs a single thing deciding <em>who</em> does <em>what</em> and <em>when</em> — otherwise tickets pile up unassigned, hive-authored stories get routed to runtimes that can't run them, and a single overloaded runtime collapses throughput to zero. Auriga is that decision layer.</p>
+    <p class="lede">Concretely, each cycle it: recovers zombies (stale or failed in-progress work), advances issue status from verifiable board facts alone — a finished run moves a ticket to review, but only a <em>merged</em> pull request marks it done, run status is never trusted on its own — then selects a small, capacity-capped batch of unassigned todos and routes each one by capability, respecting per-agent and per-runtime caps so it never mass-flips the board. Work flagged for a human is filtered out before any of that logic runs. Auriga only ever assigns and re-runs work; it never deletes or cancels — and every routing decision underneath is pure, deterministic, and unit-tested against mocked board state, not left to chance.</p>
+
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">github.com/mdostal/auriga <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">README &amp; architecture <span class="arrow">↗</span></a>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- PLATE NAV -->
+  <!-- ============================================================= -->
+  <nav class="plate-nav">
+    <ul>
+      <li><a href="#epics" data-target="epics" class="is-active"><span class="num">Plate I</span><span class="lbl">The Board</span></a></li>
+      <li><a href="#story" data-target="story"><span class="num">Plate II</span><span class="lbl">Star Chart</span></a></li>
+      <li><a href="#activity" data-target="activity"><span class="num">Plate III</span><span class="lbl">Observation Log</span></a></li>
+    </ul>
+  </nav>
+
+  <!-- ============================================================= -->
+  <!-- PLATE I — EPICS -->
+  <!-- ============================================================= -->
+  <section id="epics" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Plate I</p>
+      <h2>The Board</h2>
+      <p class="desc">Every epic Auriga is tracking, charted by status. Story count shown as apparent magnitude — the more stories, the brighter the point.</p>
+    </div>
+
+    <div class="status-legend">
+      <div class="chip"><svg class="glyph pending"><use href="#star4"/></svg><span class="t"><span class="name">Pending</span><span class="hint">unlit — awaiting dispatch</span></span></div>
+      <div class="chip"><span class="glyph-nebula"></span><span class="t"><span class="name">Planning</span><span class="hint">nebulous — still forming</span></span></div>
+      <div class="chip"><svg class="glyph in-progress"><use href="#star4"/></svg><span class="t"><span class="name">In Progress</span><span class="hint">burning — actively worked</span></span></div>
+      <div class="chip"><svg class="glyph done"><use href="#star4"/></svg><span class="t"><span class="name">Done</span><span class="hint">fixed — settled in the chart</span></span></div>
+    </div>
+
+    <div class="epics">
+      <div class="epic">
+        <span class="mark"><svg class="glyph pending" style="width:22px;height:22px"><use href="#star4"/></svg></span>
+        <div class="body">
+          <p class="id">p1-dispatch-throughput</p>
+          <h3>P1: Convert Dispatch Throughput to DONE Throughput</h3>
+        </div>
+        <div class="meta">
+          <span class="magnitude"><svg viewBox="0 0 24 24"><use href="#star4"/></svg>11 stories</span>
+          <span class="pill pending">Pending</span>
+        </div>
+      </div>
+
+      <div class="epic">
+        <span class="mark"><svg class="glyph done" style="width:22px;height:22px"><use href="#star4"/></svg></span>
+        <div class="body">
+          <p class="id">p2-adapter-interface</p>
+          <h3>P2: Adapter‑Interface Extraction — backlogAdapter + spawnAdapter + pantheon‑v2‑l2 stub</h3>
+        </div>
+        <div class="meta">
+          <span class="magnitude"><svg viewBox="0 0 24 24"><use href="#star4"/></svg>5 stories</span>
+          <span class="pill done">Done</span>
+        </div>
+      </div>
+
+      <div class="epic">
+        <span class="mark"><svg class="glyph done" style="width:22px;height:22px"><use href="#star4"/></svg></span>
+        <div class="body">
+          <p class="id">p3-auriga-ui</p>
+          <h3>P3: Auriga UI — a clean, read‑only operator dashboard</h3>
+        </div>
+        <div class="meta">
+          <span class="magnitude"><svg viewBox="0 0 24 24"><use href="#star4"/></svg>4 stories</span>
+          <span class="pill done">Done</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- PLATE II — STORY DETAIL -->
+  <!-- ============================================================= -->
+  <section id="story" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Plate II</p>
+      <h2>Star Chart Detail</h2>
+      <p class="desc">A single story, plotted with its dependencies, acceptance criteria and known risks.</p>
+    </div>
+
+    <p class="breadcrumb">
+      <span>p2-adapter-interface</span><span class="sep">›</span><span class="here">p2-router-cutover</span>
+    </p>
+
+    <h3 class="story-title">Rewire cycle() and all mcaImpl.* call sites to the backlog/spawn adapter boundary</h3>
+
+    <div class="story-meta">
+      <span class="pill done"><svg class="glyph done" style="width:11px;height:11px"><use href="#star4"/></svg>Done</span>
+      <span class="meter"><span class="lbl">Complexity</span><span class="dots"><i class="on"></i><i class="on"></i><i class="on"></i></span></span>
+      <span class="tag-method">method · classic</span>
+    </div>
+
+    <div class="constellation-wrap">
+      <p class="cap">Dependency constellation</p>
+      <svg class="dep-diagram" viewBox="0 0 400 170">
+        <line class="link" x1="200" y1="120" x2="80" y2="46"/>
+        <line class="link" x1="200" y1="120" x2="320" y2="46"/>
+        <circle class="node-c" cx="200" cy="120" r="7"/>
+        <circle cx="80" cy="46" r="4.5" fill="var(--star-done)" opacity=".85"/>
+        <circle cx="320" cy="46" r="4.5" fill="var(--star-done)" opacity=".85"/>
+        <text class="node-lbl center" x="200" y="145" text-anchor="middle">p2-router-cutover</text>
+        <text class="tag-lbl" x="200" y="158" text-anchor="middle" fill="var(--star-done)">this story</text>
+        <text class="node-lbl" x="80" y="30" text-anchor="middle">p2-multica-backlog-adapter</text>
+        <text class="tag-lbl" x="80" y="18" text-anchor="middle">resolved dependency</text>
+        <text class="node-lbl" x="320" y="30" text-anchor="middle">p2-multica-spawn-adapter</text>
+        <text class="tag-lbl" x="320" y="18" text-anchor="middle">resolved dependency</text>
+      </svg>
+    </div>
+
+    <div class="section-block">
+      <p class="cap">Log entry</p>
+      <div class="log-entry">
+        <p>The concentrated-risk cutover: rewire <code>auriga-router.mjs</code>'s <code>cycle()</code> options bag from <code>mca</code> to <code>backlog</code> + <code>spawn</code> (typed adapter instances), and re-point all ~25 <code>mcaImpl.*</code> call sites across the unblock pass, cascade re-dispatch pass, false-done/review-scan pass, dispatch pass, and review lane to the new adapter methods. <code>main()</code> defaults to <code>createMulticaBacklogAdapter()</code>/<code>createMulticaSpawnAdapter()</code>, preserving today's live supervised behavior with zero config changes required. <code>lib/core.mjs</code> is NOT touched — every call into it is unchanged.</p>
+      </div>
+    </div>
+
+    <div class="section-block">
+      <p class="cap">Acceptance criteria</p>
+      <div class="ac-list">
+        <div class="ac-item">
+          <svg class="ac-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="none" stroke="var(--star-done)" stroke-width="1.4"/><path d="M7 12.5 L10.3 16 L17 8.5" fill="none" stroke="var(--star-done)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>Given <code>cycle(opts)</code> is called, when opts is inspected, then it accepts <code>{ backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }</code> — no <code>mca</code> parameter remains</p>
+        </div>
+        <div class="ac-item">
+          <svg class="ac-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="none" stroke="var(--star-done)" stroke-width="1.4"/><path d="M7 12.5 L10.3 16 L17 8.5" fill="none" stroke="var(--star-done)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>Given <code>npm test</code> runs from repo root, then all 6 pre-existing test files pass with their existing assertions about ROUTING DECISIONS unchanged</p>
+        </div>
+        <div class="ac-item">
+          <svg class="ac-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="none" stroke="var(--star-done)" stroke-width="1.4"/><path d="M7 12.5 L10.3 16 L17 8.5" fill="none" stroke="var(--star-done)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <p>Given the new <code>cutover-e2e.test.mjs</code> runs, when <code>cycle()</code> is driven end-to-end..., then it completes correctly with zero external process calls attempted</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-block">
+      <p class="cap">Cross-cutting</p>
+      <div class="flag-card">
+        <p class="k">Documentation</p>
+        <p>README.md's quickstart section and src/router/README.md's Files/paths section reference lib/multica.mjs and lib/config.mjs by name — flag as stale after this cutover.</p>
+      </div>
+    </div>
+
+    <div class="section-block">
+      <p class="cap">Risks</p>
+      <div class="risk-card">
+        <p class="k"><svg viewBox="0 0 24 24"><use href="#warn-star"/></svg>High severity</p>
+        <p>A call site re-pointed to the wrong adapter method... could silently change WHICH issues get dispatched.</p>
+        <p><span class="mit-lbl">Mitigation</span>Full regression suite plus the new cutover-e2e test...</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- PLATE III — ACTIVITY LOG -->
+  <!-- ============================================================= -->
+  <section id="activity" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Plate III</p>
+      <h2>Observation Log</h2>
+      <p class="desc">A chronological trail of commits and process audits, most recent first.</p>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-item commit">
+        <div class="tl-row">
+          <div class="tl-when">Aug 17<b>21:26 UTC−05:00</b></div>
+          <div class="tl-main">
+            <p class="tl-kind">Commit <span class="tl-hash" title="d5d2f7235c6ffb92f7790c47e1d85ddbf48c1a60">d5d2f72</span></p>
+            <p class="tl-subject">Merge pull request #60 from mdostal/feat/p3-auriga-ui</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="tl-item commit">
+        <div class="tl-row">
+          <div class="tl-when">Aug 17<b>21:25 UTC−05:00</b></div>
+          <div class="tl-main">
+            <p class="tl-kind">Commit <span class="tl-hash" title="7d1d4012a89c673ea2d82e1062ab6726b63b4ad5">7d1d401</span></p>
+            <p class="tl-subject">[p3-auriga-ui] chore: add root test:all convenience script</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="tl-item commit">
+        <div class="tl-row">
+          <div class="tl-when">Aug 17<b>21:24 UTC−05:00</b></div>
+          <div class="tl-main">
+            <p class="tl-kind">Commit <span class="tl-hash" title="bcb3c183f229db09ee83214b69094dbcf39122c4">bcb3c18</span></p>
+            <p class="tl-subject">[p3-auriga-ui] fix: crash + path-traversal bugs from independent review</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="tl-item audit">
+        <div class="tl-row">
+          <div class="tl-when">Aug 16<b>16:13 UTC</b></div>
+          <div class="tl-main">
+            <p class="tl-kind">Audit record · execute</p>
+            <p class="tl-runid">p2-adapter-interface-execute-20260816T161309Z</p>
+            <div class="tl-stats">
+              <span>5 story specs produced</span>
+              <span>9 commits</span>
+              <span>46 files changed</span>
+              <span>157 tests passing</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tl-item commit">
+        <div class="tl-row">
+          <div class="tl-when">Aug 17<b>20:59 UTC−05:00</b></div>
+          <div class="tl-main">
+            <p class="tl-kind">Commit <span class="tl-hash" title="6b0eea735f82ba5450256bb3bc90f7f66f1e497f">6b0eea7</span></p>
+            <p class="tl-subject">[p3-auriga-ui] mark all 4 stories done</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- ICON SHOWCASE -->
+  <!-- ============================================================= -->
+  <section class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Mark</p>
+      <h2>The Charioteer's Pentagon</h2>
+      <p class="desc">The favicon plots Auriga's own asterism: Capella, Menkalinan, Theta Aurigae, El Nath and Iota Aurigae, joined in the traditional kite.</p>
+    </div>
+
+    <div class="icon-grid">
+      <div class="icon-card">
+        <div class="swatch" style="width:96px;height:96px;padding:14px">
+          <svg viewBox="0 0 100 100" width="100%" height="100%">
+            <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="2"/>
+            <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="2"/>
+            <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="2"/>
+            <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="2"/>
+            <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="2"/>
+            <circle cx="33" cy="22" r="1.6" fill="#a3abd1"/>
+            <circle cx="30" cy="27" r="1.3" fill="#a3abd1"/>
+            <circle cx="36" cy="17" r="1.2" fill="#a3abd1"/>
+            <circle cx="38" cy="30" r="6.4" fill="#f3c667"/>
+            <circle cx="62" cy="32" r="4" fill="#eef1fb"/>
+            <circle cx="66" cy="58" r="3.5" fill="#eef1fb"/>
+            <circle cx="50" cy="82" r="4" fill="#eef1fb"/>
+            <circle cx="22" cy="62" r="3.6" fill="#eef1fb"/>
+          </svg>
+        </div>
+        <p class="lbl">96 × 96</p>
+      </div>
+
+      <div class="icon-card">
+        <div class="swatch" style="width:32px;height:32px;padding:5px">
+          <svg viewBox="0 0 100 100" width="100%" height="100%">
+            <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+            <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+            <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+            <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+            <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+            <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+            <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+            <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+            <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+            <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+          </svg>
+        </div>
+        <p class="lbl">32 × 32 (tab)</p>
+      </div>
+
+      <div class="icon-card">
+        <div class="swatch" style="width:32px;height:32px;padding:5px;background:#0a0d18">
+          <svg viewBox="0 0 100 100" width="100%" height="100%">
+            <line x1="38" y1="30" x2="62" y2="32" stroke="#eef1fb" stroke-width="4"/>
+            <line x1="62" y1="32" x2="66" y2="58" stroke="#eef1fb" stroke-width="4"/>
+            <line x1="66" y1="58" x2="50" y2="82" stroke="#eef1fb" stroke-width="4"/>
+            <line x1="50" y1="82" x2="22" y2="62" stroke="#eef1fb" stroke-width="4"/>
+            <line x1="22" y1="62" x2="38" y2="30" stroke="#eef1fb" stroke-width="4"/>
+            <circle cx="38" cy="30" r="8" fill="#eef1fb"/>
+            <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+            <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+            <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+            <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+          </svg>
+        </div>
+        <p class="lbl">Monochrome</p>
+      </div>
+    </div>
+
+    <p class="icon-note"><b>Capella</b> — sixth-brightest star in the night sky — anchors the mark at full weight, gold against the four dimmer kite points. The three faint satellite dots at her shoulder are the <b>Haedi</b>, the Kids the Charioteer carries. Same pentagon, three treatments: full color for in-product chrome, a bolder stroke at 32px for tab legibility, and a single-ink mono variant for contexts that can't render color. This page's own tab favicon is the 32px treatment.</p>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- GET STARTED — real install instructions (added content) -->
+  <!-- ============================================================= -->
+  <section id="install" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Field Guide</p>
+      <h2>Get started</h2>
+      <p class="desc">Auriga is open source and standalone-runnable: clone it, verify the router's decision logic, then optionally build and serve the operator dashboard locally. No external services required.</p>
+    </div>
+
+    <div class="install-steps">
+      <div class="step">
+        <span class="step-num">1</span>
+        <div class="step-body">
+          <p class="step-title">Clone the repo</p>
+          <pre class="code-block"><span class="c"># requires Node 24+</span>
+git clone https://github.com/mdostal/auriga.git
+cd auriga</pre>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="step-num">2</span>
+        <div class="step-body">
+          <p class="step-title">Verify the router</p>
+          <p class="step-hint">The router at <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">src/router/</code> is plain Node with zero dependencies — its decision logic is pure and unit-tested against mocked board state.</p>
+          <pre class="code-block">cd src/router
+npm test</pre>
+        </div>
+      </div>
+
+      <div class="step">
+        <span class="step-num">3</span>
+        <div class="step-body">
+          <p class="step-title">Build and run the operator dashboard (optional)</p>
+          <p class="step-hint">The dashboard is a separate, isolated Vite + Tailwind + shadcn/ui package, served by a small read-only <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">node:http</code> JSON API over this repo's own <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">.pHive/</code> planning state. Neither package is a dependency of the router.</p>
+          <pre class="code-block">cd ../ui
+npm install
+npm run build
+
+cd ../server
+npm install
+node index.mjs
+<span class="c"># → http://localhost:8787</span></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">Full README <span class="arrow">↗</span></a>
+    </div>
+  </section>
+
+  <footer>
+    <svg class="glyph-small" viewBox="0 0 24 24"><use href="#star4"/></svg>
+    Auriga · Pantheon Router — public showcase
+    <div class="foot-links">
+      <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+      <span class="sep">·</span>
+      <a href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">README</a>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  // ---- ambient starfield (deterministic, redraws on resize) ----
+  var canvas = document.getElementById('starfield');
+  var ctx = canvas.getContext('2d');
+  var seed = 918273;
+  function rand(){ seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
+
+  function draw(){
+    var w = canvas.width = window.innerWidth;
+    var h = canvas.height = window.innerHeight;
+    ctx.clearRect(0,0,w,h);
+    seed = 918273;
+    var count = Math.round((w*h)/9000);
+    for(var i=0;i<count;i++){
+      var x = rand()*w, y = rand()*h, r = rand()*1.15+0.2;
+      var b = rand();
+      var a = 0.25 + b*0.55;
+      ctx.beginPath();
+      ctx.arc(x,y,r,0,Math.PI*2);
+      ctx.fillStyle = 'rgba(238,241,251,' + a.toFixed(2) + ')';
+      ctx.fill();
+      if(b > 0.985){
+        ctx.beginPath();
+        ctx.arc(x,y,r*2.4,0,Math.PI*2);
+        ctx.fillStyle = 'rgba(243,198,103,0.18)';
+        ctx.fill();
+      }
+    }
+  }
+  draw();
+  var t;
+  window.addEventListener('resize', function(){
+    clearTimeout(t);
+    t = setTimeout(draw, 150);
+  });
+
+  // ---- active plate-nav highlighting ----
+  var links = document.querySelectorAll('.plate-nav a');
+  var sections = Array.prototype.map.call(links, function(a){
+    return document.getElementById(a.dataset.target);
+  });
+  if('IntersectionObserver' in window){
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(entry){
+        if(entry.isIntersecting){
+          var id = entry.target.id;
+          links.forEach(function(a){
+            a.classList.toggle('is-active', a.dataset.target === id);
+          });
+        }
+      });
+    }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
+    sections.forEach(function(s){ if(s) io.observe(s); });
+  }
+})();
+</script>
+</body>
+</html>

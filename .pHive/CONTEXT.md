@@ -27,16 +27,21 @@ standalone, adapter-based top-level orchestrator any project can consume.
 - `src/router/agents/*.instructions.md` — agent instruction prompts for build/review lanes.
 - `src/engine/` (on branch `feat/routing-engine`, not merged) — a TypeScript board-state consumer recovered from the legacy `pantheon-orchestrator`; a design source for the adapter work, not a running component.
 - `.pHive/epics/p1-dispatch-throughput/` — prior epic converting dispatch throughput to done-throughput (capability routing, state machine, human filter, etc.) — largely describes what VISION.md §① calls "current, what actually runs today."
+- `src/server/` — Node HTTP read-API serving `.pHive/` epic/story/activity state to the dashboard; also serves `src/ui/dist/` as static files once built (`p3-auriga-ui`).
+- `src/ui/` — the operator dashboard (Vite/React/Tailwind/shadcn), tab-based nav (Epics/Activity, Story via drill-down), Star Atlas visual language (`p3-auriga-ui`, restyled in `p4-auriga-branding`).
+- `docs/index.html` — public GitHub Pages showcase page (marketing/demo, not the operator dashboard; illustrative sample data, not live-fetched) (`p4-auriga-branding`).
 
 ## Conventions
 
 - Pure-core / thin-shell split: routing/capacity/state-machine decisions live in pure, mockable functions in `lib/core.mjs`; all I/O (Multica CLI calls, config) stays outside it.
 - Never squash-merge unless deliberately killing off history — prefer real merge commits (`hive.config.yaml -> developer.pr_style: atomic-prs`).
 - Root `package.json` exists solely so the generic CI gate (`ci.yml`) finds a Node `test` script at repo root; the real module lives in `src/router/` with its own `package.json`.
+- **Local validation is the merge gate, not GitHub Actions.** Run the full local suite (`npm run test:all` at repo root, plus each subpackage's own lint/test) before merging; merge with `gh pr merge --admin` rather than waiting on a GHA check. GHA workflows in `.github/workflows/` are convenience/backstop only — they are not required checks and are not the source of truth for whether a change is safe to merge. (Standing operator directive; previously stated verbally across `p3-auriga-ui` and `p4-auriga-branding` but never written down until now.)
 
 ## Canonical references
 
 - `README.md` — architecture diagram, quickstart, sibling-gods overview.
 - `VISION.md` — three-rung trajectory (① current ② near-term ③ long-term adapter-based any-board routing) — the direct precursor to this kickoff's north_star.
 - `docs/review-squad.md` — review squad design + live proof.
+- `docs/index.html` — public showcase page (see Key paths above).
 - `.pHive/project-profile.yaml -> north_star` — the standalone/adapter-interface goal this kickoff captured.

@@ -1,0 +1,81 @@
+id: p4-github-pages-showcase
+epic: p4-auriga-branding
+title: Public GitHub Pages showcase page (Star Atlas, near-as-is + real marketing content)
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Build the public-facing showcase page for Auriga at docs/index.html (GitHub Pages,
+  served from the docs/ folder on main). This is the "advertises and puts out auriga"
+  surface — a public demo/marketing page, NOT the operator dashboard. Take Concept B
+  (Star Atlas) almost as-is: same long single-page scroll structure (hero title card →
+  Plate I "The Board" → Plate II "Star Chart Detail" → Plate III "Observation Log" →
+  Mark/icon showcase), same visual language (deep-space palette, serif/geometric-sans/
+  mono type pairing, constellation motifs). Add real marketing content on top: what
+  Auriga actually is, why it's used for orchestration, a link to docs, a link to the
+  GitHub repo, and an install button/instructions section.
+
+acceptance_criteria:
+  - "Given docs/index.html exists, when opened, then it visually matches Concept B's structure and style (hero, 3 plates, mark showcase) — same palette/type/motifs, not a reinterpretation"
+  - "Given the page, when read, then it includes real prose describing what Auriga is (router/orchestrator god of Pantheon) and why orchestration/multi-agent dispatch needs something like it — not placeholder text"
+  - "Given the page, when inspected, then it has a real link to GitHub (github.com/mdostal/auriga) and a real link to docs (README.md or the docs/ tree)"
+  - "Given the page, when inspected, then it has an install/get-started section with real, correct instructions (clone the repo, npm install/build steps for src/router and src/ui as applicable) — not vague 'coming soon' text"
+  - "Given the page's data content (epics/stories/activity), when compared to the design-concept-b-celestial.html source, then it may stay as the same illustrative sample data used in the design exploration — this is a showcase, not a live-data page, and does not need to fetch from a real server"
+  - "Given the favicon, when inspected, then it uses Concept B's Charioteer's Pentagon mark"
+
+steps:
+  - id: research
+    description: Read design-concept-b-celestial.html in full to understand its exact structure/style/tokens before adapting it; read README.md and VISION.md for accurate "what is Auriga / why orchestration" content to draw from
+    agent: researcher
+  - id: implement
+    description: Build docs/index.html per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Manually verify the page renders correctly (visual check via Playwright MCP tooling if available) and all links/content are real, not placeholder
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the page matches Concept B's design source of truth and that marketing content is accurate (not overstated/invented claims about Auriga)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p4-auriga-branding
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: static HTML/CSS/JS, no build step
+  key_files:
+    - path: /private/tmp/claude-501/-Users-mdostal-Documents-work-pantheon-auriga/bd037f63-4e19-4e9b-badf-ba861fe9ccb8/scratchpad/design-concept-b-celestial.html
+      purpose: "Design source of truth — the exact visual/structural reference to adapt, not reinterpret"
+    - path: README.md
+      purpose: "Real 'what is Auriga' content to draw from for the added marketing prose"
+    - path: VISION.md
+      purpose: "Real 'why orchestration' context to draw from"
+
+files_to_modify:
+  - file: docs/index.html
+    change: "CREATE — the public showcase page, adapted from design-concept-b-celestial.html plus added marketing sections (what/why, docs link, GitHub link, install button)"
+
+design_decisions:
+  - decision: "Served via GitHub Pages from the docs/ folder on main, not a separate gh-pages branch"
+    rationale: "Simplest setup, no separate publish step/CI needed; docs/review-squad.md already lives in docs/ and isn't prominently linked from index.html, low risk of confusion"
+  - decision: "Illustrative/sample data (not live-fetched) is acceptable for this showcase page"
+    rationale: "This is a public marketing page with no backend to talk to — it's not the operator dashboard; showing the same real-looking sample data used in the design exploration is honest and sufficient"
+
+cross_cutting: []
+
+risks:
+  - severity: low
+    description: "Marketing prose could overstate what Auriga currently does (e.g. implying the self-building UI / LLM chat exists) if not grounded in the real README/VISION content"
+    mitigation: "Acceptance criteria require real prose drawn from README.md/VISION.md, reviewed for accuracy before commit"
+
+references:
+  - path: .pHive/epics/p4-auriga-branding/epic.yaml
+    relevant_excerpt: |
+      Full synthesis context and both reference artifact paths.

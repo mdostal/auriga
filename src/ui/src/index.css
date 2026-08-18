@@ -2,59 +2,83 @@
 @tailwind components;
 @tailwind utilities;
 
+/* =============================================================
+   Star Atlas theme tokens — deep-space palette + Capella gold
+   accent, adapted from the p4-auriga-branding design reference
+   (Concept B — "Star Atlas"). Same custom-property NAMES the
+   shadcn/ui primitives already read (--background, --card, etc.)
+   so Card/Table/Badge keep working unmodified; values are now
+   plain hex (not HSL triples) — see tailwind.config.js, which
+   wraps them as `var(--x)` instead of `hsl(var(--x))`.
+   ============================================================= */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
-    --radius: 0.5rem;
-  }
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
+    /* -- shadcn/ui structural tokens, mapped onto Star Atlas hex -- */
+    --background: #0a0d18;
+    --foreground: #eef1fb;
+    --card: #10152a;
+    --card-foreground: #eef1fb;
+    --popover: #161d38;
+    --popover-foreground: #eef1fb;
+    --primary: #f3c667;
+    --primary-foreground: #0a0d18;
+    --secondary: #161d38;
+    --secondary-foreground: #eef1fb;
+    --muted: #0c1024;
+    --muted-foreground: #6d7599;
+    --accent: #161d38;
+    --accent-foreground: #eef1fb;
+    --destructive: #e2555f;
+    --destructive-foreground: #eef1fb;
+    --border: #2a3155;
+    --input: #2a3155;
+    --ring: #f3c667;
+    --chart-1: #f3c667;
+    --chart-2: #bcd6ff;
+    --chart-3: #f0954a;
+    --chart-4: #a390d8;
+    --chart-5: #e2555f;
+    --radius: 0.3125rem;
+
+    /* -- Star Atlas palette (raw), for bespoke plate/constellation UI -- */
+    --bg-void: #0a0d18;
+    --bg-void-2: #0d1120;
+    --bg-plate: #10152a;
+    --bg-plate-raised: #161d38;
+    --bg-inset: #0c1024;
+
+    --line-hair: #2a3155;
+    --line-hair-soft: #1b2140;
+    --line-hair-faint: #171c38;
+
+    --ink-1: #eef1fb;
+    --ink-2: #a3abd1;
+    --ink-3: #6d7599;
+
+    --capella: #f3c667;
+    --capella-soft: rgba(243, 198, 103, 0.14);
+    --capella-line: rgba(243, 198, 103, 0.35);
+
+    /* 4-state status color mapping, matching the reference's glyphs/pills */
+    --star-done: #bcd6ff;
+    --star-done-soft: rgba(188, 214, 255, 0.14);
+    --star-pending: #747da3;
+    --star-pending-soft: rgba(116, 125, 163, 0.14);
+    --star-progress: #f0954a;
+    --star-progress-soft: rgba(240, 149, 74, 0.16);
+    --star-planning: #a390d8;
+    --star-planning-soft: rgba(163, 144, 216, 0.16);
+
+    --nova-high: #e2555f;
+    --nova-high-soft: rgba(226, 85, 95, 0.14);
+    --nova-mid: #e0b155;
+    --nova-mid-soft: rgba(224, 177, 85, 0.14);
+    --nova-low: #7fae8e;
+    --nova-low-soft: rgba(127, 174, 142, 0.14);
+
+    --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, 'URW Palladio L', Georgia, serif;
+    --font-ui: Optima, Futura, 'Century Gothic', 'URW Gothic', 'Avenir Next', -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   }
 }
 
@@ -62,8 +86,22 @@
   * {
     @apply border-border;
   }
+  html {
+    background: var(--bg-void);
+  }
   body {
     @apply bg-background text-foreground;
     margin: 0;
+    font-family: var(--font-ui);
+    /* Faint fixed nebula wash behind every plate — a static stand-in for
+       the reference's animated canvas starfield, kept purely in CSS. */
+    background-image:
+      radial-gradient(ellipse 900px 500px at 15% -10%, rgba(163, 144, 216, 0.08), transparent 60%),
+      radial-gradient(ellipse 800px 600px at 100% 0%, rgba(243, 198, 103, 0.06), transparent 55%);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
   }
 }

@@ -95,12 +95,12 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
           <button
             type="button"
             onClick={() => setSelectedEpicId(null)}
-            className="text-sm text-muted-foreground hover:text-foreground hover:underline w-fit"
+            className="text-sm text-ink-3 hover:text-capella hover:underline w-fit"
           >
             ← Back to epics
           </button>
-          <CardTitle>{epicDetail ? epicDetail.title : selectedEpicId}</CardTitle>
-          <CardDescription className="font-mono text-xs">{selectedEpicId}</CardDescription>
+          <CardTitle className="text-xl mt-1">{epicDetail ? epicDetail.title : selectedEpicId}</CardTitle>
+          <CardDescription className="font-mono text-xs text-ink-3">{selectedEpicId}</CardDescription>
         </CardHeader>
         <CardContent>
           {epicError && (
@@ -109,10 +109,10 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
             </p>
           )}
           {!epicError && epicDetail === null && (
-            <p className="text-sm text-muted-foreground">Loading stories…</p>
+            <p className="text-sm text-ink-2">Loading stories…</p>
           )}
           {!epicError && epicDetail !== null && (!epicDetail.stories || epicDetail.stories.length === 0) && (
-            <p className="text-sm text-muted-foreground">No stories found for this epic.</p>
+            <p className="text-sm text-ink-2">No stories found for this epic.</p>
           )}
           {!epicError && epicDetail !== null && epicDetail.stories && epicDetail.stories.length > 0 && (
             <Table>
@@ -131,12 +131,12 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
                     className="cursor-pointer"
                     onClick={() => onSelectStory?.(selectedEpicId, story.id)}
                   >
-                    <TableCell className="font-mono text-xs">{story.id}</TableCell>
-                    <TableCell>{story.title}</TableCell>
+                    <TableCell className="font-mono text-xs text-ink-3">{story.id}</TableCell>
+                    <TableCell className="text-ink-1">{story.title}</TableCell>
                     <TableCell>
                       <StatusBadge status={story.status} />
                     </TableCell>
-                    <TableCell>{story.complexity || '—'}</TableCell>
+                    <TableCell className="text-ink-2">{story.complexity || '—'}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -150,7 +150,8 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
   return (
     <Card className="w-full max-w-4xl mx-auto text-left">
       <CardHeader>
-        <CardTitle>Epics</CardTitle>
+        <p className="font-ui text-[11px] tracking-[0.14em] uppercase text-capella mb-1">Plate I · The Board</p>
+        <CardTitle className="text-2xl">Epics</CardTitle>
         <CardDescription>
           Live epic list from this repo&apos;s .pHive/epics/ state.
         </CardDescription>
@@ -162,10 +163,10 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
           </p>
         )}
         {!error && epics === null && (
-          <p className="text-sm text-muted-foreground">Loading epics…</p>
+          <p className="text-sm text-ink-2">Loading epics…</p>
         )}
         {!error && epics !== null && epics.length === 0 && (
-          <p className="text-sm text-muted-foreground">No epics found.</p>
+          <p className="text-sm text-ink-2">No epics found.</p>
         )}
         {!error && epics !== null && epics.length > 0 && (
           <Table>
@@ -184,12 +185,12 @@ export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
                   className="cursor-pointer"
                   onClick={() => setSelectedEpicId(epic.id)}
                 >
-                  <TableCell className="font-mono text-xs">{epic.id}</TableCell>
-                  <TableCell>{epic.title}</TableCell>
+                  <TableCell className="font-mono text-xs text-ink-3">{epic.id}</TableCell>
+                  <TableCell className="text-ink-1 font-medium">{epic.title}</TableCell>
                   <TableCell>
                     <StatusBadge status={epic.status} />
                   </TableCell>
-                  <TableCell className="text-right">{epic.story_count}</TableCell>
+                  <TableCell className="text-right font-mono text-ink-2">{epic.story_count}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
