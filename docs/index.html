@@ -182,14 +182,6 @@
     color:var(--ink-3);
     letter-spacing:.02em;
   }
-  .hero .sync b{ color:var(--star-progress); font-weight:600; }
-  .hero .sync .dot{
-    display:inline-block; width:6px; height:6px; border-radius:50%;
-    background:var(--star-progress); margin-right:7px;
-    animation:pulse 2.4s ease-in-out infinite;
-  }
-  @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.35; } }
-  @media (prefers-reduced-motion:reduce){ .hero .sync .dot{ animation:none; } }
 
   /* ============================= PLATE NAV ============================= */
   .plate-nav{
@@ -633,9 +625,9 @@
     </svg>
     <p class="eyebrow">Pantheon · Router &amp; Dispatch</p>
     <h1>Auriga</h1>
-    <p class="sub">The Charioteer senses the work board and dispatches every ticket to the lane and agent best able to do it — the router god of Pantheon's agent swarm. Open source, standalone-capable, and running live.</p>
+    <p class="sub">The Charioteer senses the work board and dispatches every ticket to the lane and agent best able to do it — the router god of Pantheon's agent swarm. Open source and standalone-capable.</p>
     <div class="rule"></div>
-    <p class="sync"><span class="dot"></span>Last board sync <b>2026-08-17 · 21:26 UTC−05:00</b></p>
+    <p class="sync">Sample board shown below — a static illustration, not a live feed. Run Auriga locally against your own data.</p>
     <div class="cta-row" style="justify-content:center;">
       <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
       <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">Read the docs <span class="arrow">↗</span></a>
