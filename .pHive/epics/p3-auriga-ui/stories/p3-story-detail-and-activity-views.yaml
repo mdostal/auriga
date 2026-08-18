@@ -1,7 +1,7 @@
 id: p3-story-detail-and-activity-views
 epic: p3-auriga-ui
 title: Story detail + activity views — v1 feature-complete
-status: pending
+status: done
 complexity: medium
 methodology: classic
 depends_on: [p3-frontend-scaffold-epics-list]
