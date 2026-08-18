@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listEpics, getEpic, getStory, listActivity } from './lib/read.mjs';
+import { isPathContained } from './lib/paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // src/server/ -> src/ui/dist — the isolated frontend package's build output.
@@ -40,6 +41,25 @@ const MIME_TYPES = {
   '.txt': 'text/plain; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
 };
+
+/**
+ * decodeURIComponent() throws a synchronous URIError on malformed
+ * percent-encoding (e.g. `%E0%A4`, an incomplete UTF-8 sequence) — and
+ * node:http does NOT catch synchronous throws inside a request callback, so
+ * an uncaught throw here would crash the whole process on a single bad
+ * request. Every call site decodes through this helper instead of calling
+ * decodeURIComponent() directly.
+ * @param {string} raw
+ * @returns {string|undefined} the decoded string, or undefined if `raw` is
+ *   malformed (caller must check for undefined and bail out with 400).
+ */
+function safeDecode(raw) {
+  try {
+    return decodeURIComponent(raw);
+  } catch (e) {
+    return undefined;
+  }
+}
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -67,14 +87,25 @@ function sendFile(res, filePath) {
  * so a hard refresh on a client route doesn't 404. Guards against path
  * traversal escaping UI_DIST_DIR. Returns true if it wrote a response,
  * false if the caller should fall through to its own 404 (e.g. dist/
- * doesn't exist because the frontend hasn't been built yet).
+ * doesn't exist because the frontend hasn't been built yet). Malformed
+ * percent-encoding in `pathname` (decodeURIComponent throwing) writes a 400
+ * and returns true — it counts as "wrote a response" for the caller's
+ * purposes, never propagates as an uncaught throw.
  * @param {import('node:http').ServerResponse} res
  * @param {string} pathname decoded-URL-free request path (url.pathname)
  * @returns {boolean}
  */
 function serveStatic(res, pathname) {
-  const requested = path.normalize(path.join(UI_DIST_DIR, decodeURIComponent(pathname)));
-  if (!requested.startsWith(UI_DIST_DIR)) return false;
+  const decoded = safeDecode(pathname);
+  if (decoded === undefined) {
+    sendJson(res, 400, { error: 'bad request: malformed URI encoding' });
+    return true;
+  }
+  const requested = path.normalize(path.join(UI_DIST_DIR, decoded));
+  // isPathContained (not a bare string startsWith) — a naive prefix check
+  // is bypassable by a sibling directory sharing UI_DIST_DIR's name as a
+  // string prefix (e.g. dist-evil/ next to dist/); see lib/paths.mjs.
+  if (!isPathContained(requested, UI_DIST_DIR)) return false;
 
   try {
     let stat = fs.statSync(requested);
@@ -127,7 +158,9 @@ export function createServer() {
 
     // GET /api/epics/:id
     if (parts.length === 3 && parts[0] === 'api' && parts[1] === 'epics') {
-      const epic = getEpic(decodeURIComponent(parts[2]));
+      const id = safeDecode(parts[2]);
+      if (id === undefined) { sendJson(res, 400, { error: 'bad request: malformed URI encoding' }); return; }
+      const epic = getEpic(id);
       if (!epic) { sendJson(res, 404, { error: 'epic not found' }); return; }
       sendJson(res, 200, epic);
       return;
@@ -135,7 +168,13 @@ export function createServer() {
 
     // GET /api/epics/:id/stories/:storyId
     if (parts.length === 5 && parts[0] === 'api' && parts[1] === 'epics' && parts[3] === 'stories') {
-      const story = getStory(decodeURIComponent(parts[2]), decodeURIComponent(parts[4]));
+      const epicId = safeDecode(parts[2]);
+      const storyId = safeDecode(parts[4]);
+      if (epicId === undefined || storyId === undefined) {
+        sendJson(res, 400, { error: 'bad request: malformed URI encoding' });
+        return;
+      }
+      const story = getStory(epicId, storyId);
       if (!story) { sendJson(res, 404, { error: 'story not found' }); return; }
       sendJson(res, 200, story);
       return;

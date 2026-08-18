@@ -24,6 +24,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { isPathContained } from './paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // lib/ -> server/ -> src/ -> repo root
@@ -159,7 +160,15 @@ export function listEpics(root = DEFAULT_PHIVE_ROOT) {
  * @param {string} [root]
  */
 export function getEpic(id, root = DEFAULT_PHIVE_ROOT) {
-  const epicDir = path.join(root, 'epics', id);
+  const epicsRoot = path.join(root, 'epics');
+  const epicDir = path.join(epicsRoot, id);
+  if (!isPathContained(epicDir, epicsRoot)) {
+    // A traversal-shaped id (e.g. "../../../../etc") resolves outside the
+    // epics root entirely — reject exactly like a nonexistent epic (null,
+    // which index.mjs turns into a 404), never attempt the read.
+    process.stderr.write(`getEpic(${id}): rejected — resolves outside the epics root\n`);
+    return null;
+  }
   let epic;
   try {
     epic = readEpicYaml(epicDir);
@@ -211,7 +220,18 @@ export function getEpic(id, root = DEFAULT_PHIVE_ROOT) {
  * @param {string} [root]
  */
 export function getStory(epicId, storyId, root = DEFAULT_PHIVE_ROOT) {
-  const storyPath = path.join(root, 'epics', epicId, 'stories', `${storyId}.yaml`);
+  const epicsRoot = path.join(root, 'epics');
+  const epicDir = path.join(epicsRoot, epicId);
+  if (!isPathContained(epicDir, epicsRoot)) {
+    process.stderr.write(`getStory(${epicId}, ${storyId}): rejected — epicId resolves outside the epics root\n`);
+    return null;
+  }
+  const storiesDir = path.join(epicDir, 'stories');
+  const storyPath = path.join(storiesDir, `${storyId}.yaml`);
+  if (!isPathContained(storyPath, storiesDir)) {
+    process.stderr.write(`getStory(${epicId}, ${storyId}): rejected — storyId resolves outside the stories dir\n`);
+    return null;
+  }
   try {
     return readStoryYaml(storyPath);
   } catch (e) {

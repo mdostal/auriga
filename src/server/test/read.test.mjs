@@ -46,9 +46,12 @@ test('listEpics() returns real epics from .pHive/epics/*/epic.yaml', () => {
   assert.equal(p2.docs_path, path.join('.pHive', 'epics', 'p2-adapter-interface', 'docs'));
 
   const p3 = epics.find((e) => e.id === 'p3-auriga-ui');
-  // Every story in p3-auriga-ui is status: pending on disk (this story's own
-  // status doesn't flip to done until this epic's own integrate step lands).
-  assert.equal(p3.status, 'pending');
+  // Every story in p3-auriga-ui is status: done on disk (this epic's stories
+  // were all marked done post-review — see the "mark all 4 stories done"
+  // commit). Was asserted as 'pending' pre-existing to that commit; this
+  // test just fell out of sync with real repo data, not a code bug — fixed
+  // here to match current reality rather than leaving a stale assertion.
+  assert.equal(p3.status, 'done');
   assert.equal(p3.story_count, 4);
 });
 
@@ -295,6 +298,102 @@ test('listEpics()/listActivity() degrade to [] rather than throwing on a missing
   const activity = listActivity(nonexistentRoot, REPO_ROOT);
   assert.ok(Array.isArray(activity));
   assert.ok(activity.every((a) => a.type === 'commit'));
+});
+
+// ---------------------------------------------------------------------------
+// Path traversal (bug #2): id/storyId are joined straight into filesystem
+// paths. Each test plants a real "secret" file OUTSIDE the intended root but
+// reachable via a computed relative-traversal id, and asserts the read layer
+// never reaches it — proving real containment, not just "the crafted id
+// happened not to resolve to an existing file".
+// ---------------------------------------------------------------------------
+
+test('getEpic(): a traversal-shaped id is rejected and never escapes the epics root', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const epicsDir = path.join(tmpRoot, 'epics');
+  fs.mkdirSync(epicsDir, { recursive: true });
+
+  const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-secret-'));
+  t.after(() => fs.rmSync(secretDir, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(secretDir, 'epic.yaml'),
+    'name: secret-epic\ntitle: Should never be reachable via traversal\n',
+  );
+
+  // A real relative path from epicsDir to secretDir — exactly the shape a
+  // "../../../..."-style traversal id would need to resolve to it.
+  const traversalId = path.relative(epicsDir, secretDir);
+
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = () => true;
+  let result;
+  try {
+    result = getEpic(traversalId, tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(result, null, 'a traversal-shaped id must be rejected, never read the secret file outside epics/');
+});
+
+test('getStory(): a traversal-shaped storyId is rejected and never escapes the stories dir', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const epicDir = path.join(tmpRoot, 'epics', 'traversal-epic');
+  const storiesDir = path.join(epicDir, 'stories');
+  fs.mkdirSync(storiesDir, { recursive: true });
+  fs.writeFileSync(path.join(epicDir, 'epic.yaml'), 'name: traversal-epic\ntitle: Traversal Epic\n');
+
+  const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-secret-'));
+  t.after(() => fs.rmSync(secretDir, { recursive: true, force: true }));
+  fs.writeFileSync(
+    path.join(secretDir, 'secret.yaml'),
+    'id: secret\nepic: none\ntitle: Should never be reachable via traversal\nstatus: pending\n',
+  );
+
+  // storyId is joined as `${storyId}.yaml`, so compute a relative traversal
+  // path with the .yaml extension already stripped off the target filename.
+  const traversalStoryId = path.join(path.relative(storiesDir, secretDir), 'secret');
+
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = () => true;
+  let result;
+  try {
+    result = getStory('traversal-epic', traversalStoryId, tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(result, null, 'a traversal-shaped storyId must be rejected, never read the secret file');
+});
+
+test('getStory(): a traversal-shaped epicId is rejected before ever touching a stories dir', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const epicsDir = path.join(tmpRoot, 'epics');
+  fs.mkdirSync(epicsDir, { recursive: true });
+
+  const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-secret-'));
+  t.after(() => fs.rmSync(secretDir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(secretDir, 'stories'), { recursive: true });
+  fs.writeFileSync(
+    path.join(secretDir, 'stories', 'secret.yaml'),
+    'id: secret\nepic: none\ntitle: Should never be reachable via traversal\nstatus: pending\n',
+  );
+
+  const traversalEpicId = path.relative(epicsDir, secretDir);
+
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = () => true;
+  let result;
+  try {
+    result = getStory(traversalEpicId, 'secret', tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(result, null, 'a traversal-shaped epicId must be rejected, never read the secret story file');
 });
 
 test('DEFAULT_PHIVE_ROOT resolves to this repo\'s real .pHive directory', () => {
