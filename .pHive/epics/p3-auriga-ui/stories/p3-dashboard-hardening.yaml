@@ -1,0 +1,79 @@
+id: p3-dashboard-hardening
+epic: p3-auriga-ui
+title: Hardening — malformed/missing data, empty states
+status: pending
+complexity: low
+methodology: classic
+depends_on: [p3-story-detail-and-activity-views]
+
+description: |
+  Make the dashboard trustworthy for everyday use, not just demo-shaped: handle a
+  freshly-initialized .pHive/ with zero epics, an epic with zero stories, a story
+  missing optional fields, and any read-layer error surfacing as a sane UI state
+  instead of a blank page or crash. Also close out the documentation cross-cutting
+  items flagged by earlier stories in this epic.
+
+acceptance_criteria:
+  - "Given .pHive/epics/ is empty, when the dashboard loads, then EpicsListView shows an explicit empty state, not a blank page or error"
+  - "Given an epic has zero stories, when its detail is viewed, then it shows an explicit empty state for the stories list"
+  - "Given a story YAML is missing an optional field (e.g. no cross_cutting), when StoryDetailView renders it, then that section is omitted or shows 'none' rather than rendering broken/undefined"
+  - "Given the read layer's node:test suite runs with an empty-.pHive/ fixture and a malformed-YAML fixture, then both produce the documented graceful-degradation behavior end-to-end (API layer through to a rendered UI state, via Playwright)"
+  - "Given README.md and src/router/README.md, when read, then they reference the new src/server/ and src/ui/ directories (closing the documentation cross-cutting item flagged in prior stories)"
+
+steps:
+  - id: research
+    description: Enumerate every data path across all 3 views + 4 API endpoints that assumes non-empty/well-formed data, using the acceptance criteria above as the checklist
+    agent: researcher
+  - id: implement
+    description: Add error/empty-state handling across the read layer and frontend views; update README.md and src/router/README.md with pointers to the new directories
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Add the empty-.pHive/ and malformed-YAML end-to-end Playwright scenarios; extend node:test coverage for the read layer's edge cases
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm v1 is genuinely done per design-discussion.md's full scope — no chat/LLM/interaction scope crept in anywhere across the epic
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p3-auriga-ui — this is the epic's closing commit
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    frontend: "Vite + React + Tailwind CSS + shadcn/ui"
+  key_files:
+    - path: src/server/lib/read.mjs
+      purpose: "Where empty/malformed-data handling needs to be genuinely correct, not just at the UI layer papering over bad data"
+
+files_to_modify:
+  - file: src/server/lib/read.mjs
+    change: "MODIFY — explicit empty-array/graceful-degradation handling for all 4 read functions"
+  - file: src/ui/src/views/EpicsListView.*
+    change: "MODIFY — empty state"
+  - file: src/ui/src/views/StoryDetailView.*
+    change: "MODIFY — optional-field omission handling"
+  - file: README.md
+    change: "MODIFY — pointer to src/server/ and src/ui/"
+  - file: src/router/README.md
+    change: "MODIFY — pointer to the new sibling modules"
+
+design_decisions: []
+
+cross_cutting:
+  - concern: documentation
+    action: "This story closes out the documentation cross-cutting item flagged by p3-read-layer-and-api and p3-frontend-scaffold-epics-list — README.md and src/router/README.md both get real pointer updates here"
+
+risks:
+  - severity: low
+    description: "Hardening work is easy to under-scope by only testing the happy path a second time instead of genuinely adversarial edge cases"
+    mitigation: "Acceptance criteria explicitly name the specific edge cases (empty .pHive/, zero-story epic, missing optional fields) rather than a vague 'add error handling' instruction"
+
+references:
+  - path: .pHive/epics/p3-auriga-ui/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 4 — "what makes v1 actually trustworthy to open day-to-day, not just a
+      demo."

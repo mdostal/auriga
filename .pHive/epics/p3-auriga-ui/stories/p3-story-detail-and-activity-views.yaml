@@ -1,0 +1,76 @@
+id: p3-story-detail-and-activity-views
+epic: p3-auriga-ui
+title: Story detail + activity views — v1 feature-complete
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p3-frontend-scaffold-epics-list]
+
+description: |
+  Add StoryDetailView (acceptance criteria, cross_cutting, status, dependencies) and
+  ActivityView (chronological feed of real git commits + post-run audit records), plus
+  basic navigation between all three views (EpicsList, StoryDetail, Activity). This
+  completes v1's full read-only feature set exactly as scoped in design-discussion.md §1.
+
+acceptance_criteria:
+  - "Given the epics list, when an epic is clicked, then its real stories render with correct status badges"
+  - "Given a story is clicked from an epic's detail, when StoryDetailView loads, then it shows that story's REAL acceptance_criteria text (fetched from /api/epics/:id/stories/:storyId, not truncated/summarized)"
+  - "Given cross_cutting entries exist on a story, when displayed, then both the concern name and its action text are shown"
+  - "Given ActivityView loads, when GET /api/activity's response is rendered, then a real, recent commit from this repo's own git log appears in the feed"
+  - "Given navigation between the three views, when used, then it works without a full page reload (client-side routing) or, if simplest, via plain links — either is fine as long as it's real and not broken"
+
+steps:
+  - id: research
+    description: Read p3-read-layer-and-api's getStory() and listActivity() actual return shapes to build the views against the real contract
+    agent: researcher
+  - id: implement
+    description: Build StoryDetailView and ActivityView, add navigation, per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Extend the Playwright suite to click through epics list -> story detail (real acceptance criteria text) and load the activity view (real commit appears)
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that all displayed data is real (fetched, not hardcoded/mocked) and that this fully satisfies v1's scope per design-discussion.md §1 (no scope creep toward interaction/action)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p3-auriga-ui
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    frontend: "Vite + React + Tailwind CSS + shadcn/ui (established in prior story)"
+  key_files:
+    - path: src/server/lib/read.mjs
+      purpose: "getStory() and listActivity()'s real return shapes — the exact contract these two views render"
+    - path: .pHive/epics/p2-adapter-interface/stories/p2-router-cutover.yaml
+      purpose: "A real, rich example story YAML (acceptance_criteria, cross_cutting, risks) to use as a manual test case while building StoryDetailView"
+
+files_to_modify:
+  - file: src/ui/src/views/StoryDetailView.*
+    change: "CREATE — acceptance criteria, cross_cutting, status, dependencies display"
+  - file: src/ui/src/views/ActivityView.*
+    change: "CREATE — chronological feed of commits + audit records"
+  - file: src/ui/src/App.*
+    change: "MODIFY — add navigation between the three views"
+
+design_decisions:
+  - decision: "Navigation can be plain links if client-side routing adds complexity without clear benefit for 3 views"
+    rationale: "v1 is small and read-only — a routing library is optional complexity, not a requirement; the acceptance criteria explicitly allow either approach"
+
+cross_cutting: []
+
+risks:
+  - severity: low
+    description: "Real story YAMLs vary a lot in richness (some have 5 acceptance criteria and rich cross_cutting, others are minimal) — a view built against only one example story might not handle the full variety gracefully"
+    mitigation: "Manually test StoryDetailView against several real stories from p1 and p2's epics during review, not just one fixture"
+
+references:
+  - path: .pHive/epics/p3-auriga-ui/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 3 — full acceptance bar: v1 feature-complete, click-through Playwright
+      verification against real story content.

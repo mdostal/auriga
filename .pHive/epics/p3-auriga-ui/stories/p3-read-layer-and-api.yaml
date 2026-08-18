@@ -1,0 +1,90 @@
+id: p3-read-layer-and-api
+epic: p3-auriga-ui
+title: Read layer + minimal JSON API over .pHive/ state
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Build a pure read layer over .pHive/ state (epics, story YAMLs, post-run audit
+  records, recent git log) plus a small node:http server exposing it as 4 JSON GET
+  endpoints. No frontend, no static file serving yet — curl-testable only. This is the
+  foundation everything else in the epic builds on. Read-only: no write endpoints of
+  any kind, ever, in this epic.
+
+acceptance_criteria:
+  - "Given .pHive/epics/*/epic.yaml exist, when GET /api/epics is called, then it returns [{id, title, status, story_count, docs_path}] built from real files on disk"
+  - "Given an epic id, when GET /api/epics/:id is called, then it returns that epic's stories[] (id, title, status, complexity, depends_on) and a list of its docs"
+  - "Given an epic id and story id, when GET /api/epics/:id/stories/:storyId is called, then it returns that story's full YAML content"
+  - "Given GET /api/activity is called, then it returns recent git log entries merged with .pHive/audits/post-run/*.yaml records, sorted by time"
+  - "Given a malformed or unreadable YAML file exists among the epics/stories being scanned, when any endpoint is called, then that one file is skipped (with a stderr log) and the rest of the response is unaffected — no 500 for the whole listing"
+
+steps:
+  - id: research
+    description: Read src/router/lib/adapters/multica/backlog.mjs for the established synchronous-CLI-wrapper convention (execFileSync, no async), and .pHive/epics/*/epic.yaml + stories/*.yaml + audits/post-run/*.yaml shapes directly to ground the read functions in real file shapes
+    agent: researcher
+  - id: implement
+    description: Implement src/server/lib/read.mjs (listEpics/getEpic/getStory/listActivity) and src/server/index.mjs (the 4 GET endpoints via node:http), per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write src/server/test/read.test.mjs and src/server/test/api.test.mjs, including the malformed-YAML graceful-degradation case
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review for read-only enforcement (no write endpoints), graceful degradation, and consistency with the router's synchronous-CLI convention
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p3-auriga-ui (real merge commit, not squashed, per developer.pr_style)
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript
+    runtime: "node 22+ (ESM, node:http, node:test, zero new runtime deps for this story)"
+  key_files:
+    - path: .pHive/epics/p2-adapter-interface/epic.yaml
+      purpose: "Real example epic.yaml shape to parse — use this repo's own real epics as the read layer's actual test fixtures, not synthetic ones"
+    - path: .pHive/audits/post-run/
+      purpose: "Real audit record shape (run_id, skill, timestamp, story_specs_produced, etc.) that listActivity() must merge with git log"
+    - path: src/router/lib/adapters/multica/backlog.mjs
+      purpose: "Established convention for a plain factory-function module wrapping synchronous CLI calls (execFileSync) — git log reads should follow the same pattern, not introduce a new async style"
+
+files_to_modify:
+  - file: src/server/lib/read.mjs
+    change: "CREATE — listEpics(), getEpic(id), getStory(epicId, storyId), listActivity()"
+  - file: src/server/index.mjs
+    change: "CREATE — node:http server, 4 GET endpoints, routes to read.mjs functions"
+  - file: src/server/package.json
+    change: "CREATE — own test script (node --test src/server/test/*.test.mjs), zero dependencies"
+  - file: src/server/test/read.test.mjs
+    change: "CREATE — tests against this repo's REAL .pHive/ epics (not mocks) plus a synthetic malformed-YAML fixture"
+  - file: src/server/test/api.test.mjs
+    change: "CREATE — HTTP-level tests for the 4 endpoints (status codes, JSON shapes)"
+
+design_decisions:
+  - decision: "git log access uses execFileSync, matching the router's established synchronous-CLI-wrapper convention"
+    rationale: "src/router/lib/adapters/multica/*.mjs already establishes this pattern for this codebase; no reason to introduce a different async style for a new module"
+  - decision: "Zero write endpoints — read-only enforced at the API surface, not just by convention"
+    rationale: "design-discussion.md §1/§3: v1 is display-only by explicit decision, not an oversight to fix later"
+
+cross_cutting:
+  - concern: documentation
+    action: "New src/server/ directory + package.json is a new directory structure — flag for src/router/README.md-style documentation in a later story or as a fast-follow (not blocking this story)"
+
+risks:
+  - severity: low
+    description: "A malformed YAML file in .pHive/epics/ could crash the whole /api/epics response if not handled per-file"
+    mitigation: "Explicit acceptance criterion + test case for graceful per-file degradation"
+
+references:
+  - path: .pHive/epics/p3-auriga-ui/docs/horizontal-plan.md
+    relevant_excerpt: |
+      Layer: Read — full function list and data sources for this story.
+  - path: .pHive/epics/p3-auriga-ui/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 1 — full acceptance bar: curl-testable API, no frontend yet.

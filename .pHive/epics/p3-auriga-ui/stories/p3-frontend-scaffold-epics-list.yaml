@@ -1,0 +1,91 @@
+id: p3-frontend-scaffold-epics-list
+epic: p3-auriga-ui
+title: Frontend scaffold (Vite+Tailwind+shadcn) + epics list view wired to the real API
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p3-read-layer-and-api]
+
+description: |
+  Scaffold the isolated src/ui/ frontend package (Vite + React + Tailwind + shadcn/ui),
+  wire it to the p3-read-layer-and-api server's /api/epics endpoint, and build the
+  EpicsListView — the first real, visual proof this is working. Wire src/server/index.mjs
+  to serve the built frontend as static files. This is the epic's first-ever build-tooling
+  adoption in this repo; keep it isolated (src/ui/'s own package.json, own lint config)
+  per the design discussion's explicit isolation decision.
+
+acceptance_criteria:
+  - "Given `npm install && npm run build` runs in src/ui/, then it produces a dist/ output with no errors"
+  - "Given the server serves the built dist/, when a browser navigates to the dashboard, then the epics list renders real epic IDs/titles/statuses from THIS repo's .pHive/epics/ (not fixture/mock data)"
+  - "Given src/ui/'s scaffold, when inspected, then Tailwind + shadcn/ui are configured and at least one shadcn component (e.g. Table or Card, and Badge for status) is in real use on the epics list"
+  - "Given the epics list, when a story count differs from zero, then it's displayed accurately per epic"
+
+steps:
+  - id: research
+    description: Read shadcn/ui's Vite installation docs' current requirements (Tailwind version, path aliases) and p3-read-layer-and-api's actual /api/epics response shape (the real contract to build the frontend against)
+    agent: researcher
+  - id: implement
+    description: Scaffold src/ui/ (Vite+React+Tailwind+shadcn init), build EpicsListView fetching from /api/epics, wire src/server/index.mjs to serve dist/ as static files
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write a Playwright test that launches the server and asserts the epics list renders real data from this repo
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review that src/ui/ is fully isolated (no leakage into the root or src/router/ package.json), and that the build actually produces working output
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p3-auriga-ui
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: javascript/typescript (frontend package only)
+    frontend: "Vite + React + Tailwind CSS + shadcn/ui"
+  key_files:
+    - path: src/server/lib/read.mjs
+      purpose: "The real listEpics() shape this view fetches and renders — read the actual return shape, don't assume it"
+    - path: src/server/index.mjs
+      purpose: "Needs a static-file-serving branch added here to serve src/ui/'s built dist/ output"
+
+files_to_modify:
+  - file: src/ui/package.json
+    change: "CREATE — Vite, React, Tailwind, shadcn-managed component deps, isolated from root/router package.json"
+  - file: src/ui/vite.config.*
+    change: "CREATE — dev server + build config, proxies /api to the Node server in dev mode"
+  - file: src/ui/tailwind.config.*
+    change: "CREATE — scoped to src/ui/ only"
+  - file: src/ui/components.json
+    change: "CREATE — shadcn config"
+  - file: src/ui/src/views/EpicsListView.*
+    change: "CREATE — fetches /api/epics, renders via shadcn Table/Card + Badge"
+  - file: src/server/index.mjs
+    change: "MODIFY — add static file serving for src/ui/dist/"
+
+design_decisions:
+  - decision: "src/ui/ is a fully isolated package — its own package.json, own lint/format config"
+    rationale: "design-discussion.md §3.2: first-ever build-tooling adoption stays isolated so the router's zero-dep backend is untouched and anyone who doesn't care about the UI never installs anything for it"
+  - decision: "No client-state library (Redux/Zustand) — plain React state + fetch-on-mount"
+    rationale: "v1 is read-only with 3 simple views; a state management library would be unused complexity (horizontal-plan.md's own note)"
+
+cross_cutting:
+  - concern: documentation
+    action: "New src/ui/ directory structure — flag for README.md/src/router/README.md-style pointer updates, can land in this story or p3-dashboard-hardening"
+
+risks:
+  - severity: low
+    description: "Tailwind v4's CLI auto-detection has known issues in some setups per research (GitHub issue), which could cause setup friction"
+    mitigation: "vertical-plan.md's own moldability note: pin an older, more stable Tailwind/shadcn version if bleeding-edge tooling fights back, rather than losing time fighting it"
+
+references:
+  - path: .pHive/epics/p3-auriga-ui/docs/vertical-plan.md
+    relevant_excerpt: |
+      Slice 2 — full acceptance bar: first visual proof, real data, Playwright-verified.
+  - path: .pHive/epics/p3-auriga-ui/docs/research-brief.md
+    relevant_excerpt: |
+      §3: shadcn/ui mechanics — CLI copies source into the repo, requires Tailwind +
+      React + path aliases, Vite has first-class support.
