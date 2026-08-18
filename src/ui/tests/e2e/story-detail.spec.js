@@ -41,3 +41,32 @@ test('epics list -> epic -> story detail renders real acceptance criteria and cr
   await expect(page.locator('body')).toContainText('p2-multica-backlog-adapter')
   await expect(page.locator('body')).toContainText('p2-multica-spawn-adapter')
 })
+
+// Regression test for a post-review fix: StoryDetailView's "← Back to
+// {epicId}" button used to always reset navigation to the TOP-LEVEL epics
+// list (losing the drill-down), even though its own label promises
+// returning to that epic's story list. Clicking it must land back on the
+// SAME epic's story list, not the top-level epics table.
+test('StoryDetailView\'s "Back to {epic}" button returns to that epic\'s story list, not the top-level epics list', async ({ page }) => {
+  await page.goto('/')
+
+  const p2Row = page.getByRole('row', { name: /p2-adapter-interface/ })
+  await expect(p2Row).toBeVisible()
+  await p2Row.click()
+
+  const storyRow = page.getByRole('row', { name: /p2-router-cutover/ })
+  await expect(storyRow).toBeVisible()
+  await storyRow.click()
+
+  await expect(page.getByRole('heading', { name: 'Acceptance Criteria' })).toBeVisible()
+
+  const backButton = page.getByRole('button', { name: /Back to p2-adapter-interface/ })
+  await expect(backButton).toBeVisible()
+  await backButton.click()
+
+  // Must land on p2-adapter-interface's OWN story list (not the top-level
+  // epics table) — the same story row is visible again, and the top-level
+  // epics list's description text (unique to the non-drilled view) is gone.
+  await expect(page.getByRole('row', { name: /p2-router-cutover/ })).toBeVisible()
+  await expect(page.getByText("Live epic list from this repo's .pHive/epics/ state.")).not.toBeVisible()
+})

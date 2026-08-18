@@ -396,6 +396,85 @@ test('getStory(): a traversal-shaped epicId is rejected before ever touching a s
   assert.equal(result, null, 'a traversal-shaped epicId must be rejected, never read the secret story file');
 });
 
+// ---------------------------------------------------------------------------
+// Bug #6: empty-string required fields must be distinguished from genuinely
+// absent (undefined/null) ones in the error/log message — both are still
+// rejected the same way, but the message must not lie about which happened.
+// ---------------------------------------------------------------------------
+
+test('readEpicYaml (via listEpics): an empty (present but blank) name logs "empty", not "missing"', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const epicsDir = path.join(tmpRoot, 'epics');
+  fs.mkdirSync(path.join(epicsDir, 'empty-name-epic'), { recursive: true });
+  fs.writeFileSync(
+    path.join(epicsDir, 'empty-name-epic', 'epic.yaml'),
+    'name: ""\ntitle: Has an empty name field, not an absent one\n',
+  );
+
+  const stderrLines = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+  let epics;
+  try {
+    epics = listEpics(tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(epics.length, 0, 'an empty name is still rejected, same as before');
+  assert.ok(
+    stderrLines.some((l) => l.includes('empty') && !l.includes('missing')),
+    `expected an "empty" (not "missing") message, got: ${stderrLines.join('')}`,
+  );
+});
+
+test('readEpicYaml (via listEpics): a genuinely absent name still logs "missing"', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const epicsDir = path.join(tmpRoot, 'epics');
+  fs.mkdirSync(path.join(epicsDir, 'no-name-epic'), { recursive: true });
+  fs.writeFileSync(path.join(epicsDir, 'no-name-epic', 'epic.yaml'), 'title: Has no name field at all\n');
+
+  const stderrLines = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+  let epics;
+  try {
+    epics = listEpics(tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(epics.length, 0);
+  assert.ok(stderrLines.some((l) => l.includes('missing')), `expected a "missing" message, got: ${stderrLines.join('')}`);
+});
+
+test('readStoryYaml (via getStory): an empty (present but blank) title logs "empty", not "missing"', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+  const storiesDir = path.join(tmpRoot, 'epics', 'e', 'stories');
+  fs.mkdirSync(storiesDir, { recursive: true });
+  fs.writeFileSync(path.join(tmpRoot, 'epics', 'e', 'epic.yaml'), 'name: e\ntitle: E\n');
+  fs.writeFileSync(path.join(storiesDir, 'empty-title.yaml'), 'id: empty-title\ntitle: ""\nstatus: pending\n');
+
+  const stderrLines = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+  let result;
+  try {
+    result = getStory('e', 'empty-title', tmpRoot);
+  } finally {
+    process.stderr.write = realWrite;
+  }
+
+  assert.equal(result, null, 'an empty title is still rejected, same as before');
+  assert.ok(
+    stderrLines.some((l) => l.includes('empty') && l.includes('title') && !l.includes('missing')),
+    `expected an "empty"+"title" (not "missing") message, got: ${stderrLines.join('')}`,
+  );
+});
+
 test('DEFAULT_PHIVE_ROOT resolves to this repo\'s real .pHive directory', () => {
   assert.equal(DEFAULT_PHIVE_ROOT, path.join(REPO_ROOT, '.pHive'));
   assert.ok(fs.existsSync(DEFAULT_PHIVE_ROOT));

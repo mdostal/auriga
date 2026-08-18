@@ -29,12 +29,19 @@ import StatusBadge from '@/components/StatusBadge'
  * files_to_modify (only StoryDetailView/ActivityView/App are top-level
  * views). Clicking a story row calls onSelectStory(epicId, storyId), which
  * App.jsx wires to navigating to StoryDetailView.
+ *
+ * `initialEpicId`: when App.jsx navigates back here from StoryDetailView (its
+ * "← Back to {epic}" button), it passes the epic that was drilled into so
+ * this view re-opens on that epic's story list instead of resetting to the
+ * top-level epics list — App.jsx remounts this component fresh on every
+ * transition back to the 'epics' route, so seeding useState's initial value
+ * is enough (no effect/sync needed).
  */
-export default function EpicsListView({ onSelectStory }) {
+export default function EpicsListView({ onSelectStory, initialEpicId = null }) {
   const [epics, setEpics] = useState(null)
   const [error, setError] = useState(null)
 
-  const [selectedEpicId, setSelectedEpicId] = useState(null)
+  const [selectedEpicId, setSelectedEpicId] = useState(initialEpicId)
   const [epicDetail, setEpicDetail] = useState(null)
   const [epicError, setEpicError] = useState(null)
 

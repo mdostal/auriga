@@ -41,13 +41,21 @@ function AuditRow({ item }) {
           {item.skill && <span className="text-muted-foreground"> · {item.skill}</span>}
         </p>
         <p className="text-xs text-muted-foreground">{formatTime(item.timestamp)}</p>
-        {item.work_artifacts && (
-          <p className="text-xs text-muted-foreground">
-            {item.work_artifacts.commits != null && `${item.work_artifacts.commits} commits`}
-            {item.work_artifacts.files_changed != null && `, ${item.work_artifacts.files_changed} files changed`}
-            {item.work_artifacts.tests_passing != null && `, ${item.work_artifacts.tests_passing} tests passing`}
-          </p>
-        )}
+        {item.work_artifacts && (() => {
+          // Every work_artifacts field is independently optional — build the
+          // summary as a joined list of only the fragments actually present,
+          // rather than string-concatenating a leading ", " onto later
+          // fragments under the assumption `commits` always renders first
+          // (it doesn't; any subset of these three fields can be present).
+          const fragments = [
+            item.work_artifacts.commits != null && `${item.work_artifacts.commits} commits`,
+            item.work_artifacts.files_changed != null && `${item.work_artifacts.files_changed} files changed`,
+            item.work_artifacts.tests_passing != null && `${item.work_artifacts.tests_passing} tests passing`,
+          ].filter(Boolean)
+          return fragments.length > 0 ? (
+            <p className="text-xs text-muted-foreground">{fragments.join(', ')}</p>
+          ) : null
+        })()}
       </div>
     </li>
   )

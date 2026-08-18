@@ -60,11 +60,30 @@ export const DEFAULT_PHIVE_ROOT = process.env.AURIGA_PHIVE_ROOT
 // exactly one error and skip-with-a-log per file.
 // ---------------------------------------------------------------------------
 
+// Distinguishes genuinely-absent (undefined/null — the field never appeared
+// in the YAML) from present-but-empty (an explicit `name: ""`) so error
+// logs describe which case actually happened instead of always saying
+// "missing" for both. Both cases are still rejected the same way — an empty
+// name/id/title isn't usable for display either — but the log message no
+// longer lies about which one occurred.
+function classifyField(value) {
+  if (value === undefined || value === null) return 'missing';
+  if (value === '') return 'empty';
+  return 'present';
+}
+
 function readEpicYaml(epicDir) {
   const raw = fs.readFileSync(path.join(epicDir, 'epic.yaml'), 'utf8');
   const parsed = parseYaml(raw);
-  if (!parsed || typeof parsed !== 'object' || !parsed.name) {
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('epic.yaml is empty or not a YAML mapping');
+  }
+  const state = classifyField(parsed.name);
+  if (state === 'missing') {
     throw new Error("epic.yaml missing required 'name' field");
+  }
+  if (state === 'empty') {
+    throw new Error("epic.yaml has an empty 'name' field (present but blank, not absent)");
   }
   return parsed;
 }
@@ -72,8 +91,16 @@ function readEpicYaml(epicDir) {
 function readStoryYaml(storyPath) {
   const raw = fs.readFileSync(storyPath, 'utf8');
   const parsed = parseYaml(raw);
-  if (!parsed || typeof parsed !== 'object' || !parsed.id || !parsed.title) {
-    throw new Error("story yaml missing required 'id'/'title' field");
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('story yaml is empty or not a YAML mapping');
+  }
+  const missing = ['id', 'title'].filter((f) => classifyField(parsed[f]) === 'missing');
+  const empty = ['id', 'title'].filter((f) => classifyField(parsed[f]) === 'empty');
+  if (missing.length > 0) {
+    throw new Error(`story yaml missing required field(s): ${missing.join(', ')}`);
+  }
+  if (empty.length > 0) {
+    throw new Error(`story yaml has empty required field(s) (present but blank, not absent): ${empty.join(', ')}`);
   }
   return parsed;
 }

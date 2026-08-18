@@ -51,6 +51,7 @@ function App() {
 
       {route.name === 'epics' && (
         <EpicsListView
+          initialEpicId={route.epicId}
           onSelectStory={(epicId, storyId) => setRoute({ name: 'story', epicId, storyId })}
         />
       )}
@@ -59,7 +60,11 @@ function App() {
         <StoryDetailView
           epicId={route.epicId}
           storyId={route.storyId}
-          onBack={() => setRoute({ name: 'epics' })}
+          // Back returns to THIS epic's drilled-in story list, not the
+          // top-level epics list — carrying epicId forward is what lets
+          // EpicsListView re-initialize its drill-down state instead of
+          // resetting to the top level (see EpicsListView's initialEpicId).
+          onBack={() => setRoute({ name: 'epics', epicId: route.epicId })}
         />
       )}
 
