@@ -78,24 +78,33 @@ reading alone).
 
 **Slice 2 — The registry itself.** A new `src/router/lib/project-registry.mjs`
 (mirroring `agent-setup.mjs`'s injected-dependency shape for testability) backed by a
-new committed JSON file (e.g. `src/router/projects.json`) holding an ordered list of
-`{id, name, notes, registered_at}` entries. `config-substrate.mjs` is refactored to
-derive `PROJECT_NAMES`/`PROJECT_IDS` from this file at import time instead of hardcoded
-object literals — every existing consumer in `core.mjs`/`auriga-router.mjs` needs ZERO
-changes, since they only ever read the exported `PROJECT_NAMES`/`PROJECT_IDS` values,
-never the literal syntax that produces them. This is the single highest-leverage design
-choice in this epic: it makes the registry a pure storage-and-interface change, not a
-routing-logic change, which is what "Done" (§1) requires.
+new committed JSON file (`src/router/projects.json`) holding an ordered list of
+`{id, name, notes, lane, registered_at}` entries — `lane` is an optional array of
+candidate agent-lane names (mirroring `PROJECT_LANE`'s existing `[candidate-names]`
+shape per Open Question 3's resolution; absent/empty means "fall back to
+`DEFAULT_LANE`," unchanged from today). `config-substrate.mjs` is refactored to derive
+`PROJECT_NAMES`/`PROJECT_IDS`/`PROJECT_LANE` from this file at import time instead of
+hardcoded object literals — every existing consumer in `core.mjs`/`auriga-router.mjs`
+needs ZERO changes, since they only ever read the exported values, never the literal
+syntax that produces them. This is the single highest-leverage design choice in this
+epic: it makes the registry a pure storage-and-interface change, not a routing-logic
+change, which is what "Done" (§1) requires. `DEFAULT_LANE`/`HIVE_LANE` (the
+capability-aware review/hive-story overrides, not per-project assignments) stay as
+hardcoded exports, unaffected by the registry — Open Question 3's resolution is scoped
+to top-level per-project lane assignment only, not these global override lanes.
 
 **Slice 3 — CLI: `auriga project scan`/`add`/`remove`/`list`.** New dispatch branches
 in the existing `bin/auriga.mjs` (no new bin entry needed), calling into
 `project-registry.mjs`. `scan` calls `listAllProjects()` (falling back to
 `listAllProjectIds()` + raw-ID display if the adapter lacks the ported extra) and
 diffs against the registry, showing unregistered candidates — read-only, no mutation.
-`add <id> [--name ...] [--notes ...]` appends to the registry (validated against a
-fresh scan so a typo'd ID doesn't silently register nothing). `remove <id>` deletes the
-entry (and, if present, its `PROJECT_LANE` entry — see Open Question 3). `list` reads
-and displays the registry, read-only.
+`add <id> [--name ...] [--notes ...] [--lane <agent-name>[,<agent-name>...]]` appends to
+the registry (validated against a fresh scan so a typo'd ID doesn't silently register
+nothing) or, idempotently, updates name/notes/lane on an already-registered entry (Open
+Question 4's resolution). `remove <id>` deletes the entry entirely (identity, notes,
+AND lane assignment together — there's no longer a separate `PROJECT_LANE` entry to
+worry about since Slice 2 folds lane into the same registry record). `list` reads and
+displays the registry (including lane assignment), read-only.
 
 **Slice 4 — Notes update.** A way to attach/update notes on an already-registered
 project without a full remove+re-add — likely `auriga project notes <id> "<text>"` or
@@ -104,17 +113,20 @@ name/notes rather than erroring) — exact shape is Open Question 4.
 
 ## 4. What Could Go Wrong
 
-- **Medium — the `listAllProjectIds()` → `PROJECT_IDS` refactor touches the dispatch-
-  eligibility gate directly**, per research's own finding. A bug here doesn't just
-  break a cosmetic feature, it could silently exclude or wrongly include a project from
-  real dispatch. Mitigation: Slice 2's own acceptance bar must include a real
-  before/after diff — the derived `PROJECT_IDS` array from the new registry, loaded
-  with today's actual 4-entry hardcoded list migrated in as the registry's initial seed
-  data, must be byte-identical in order and content to the current hardcoded array, and
-  `core.mjs`'s existing dispatch-ordering tests must stay green unchanged. **Revised per
-  grill H3 (rollback path was unnamed): if this verification fails, the migration
-  blocks — Slice 2 is not done, ship is blocked, and the mismatch is diagnosed and
-  fixed before anything merges. This is a hard merge gate, not a soft warning.**
+- **Medium, now covering more surface (lane assignment brought in scope) — the
+  `PROJECT_IDS`/`PROJECT_LANE` refactor touches the dispatch-eligibility gate AND the
+  agent-routing table directly**, per research's own finding plus the operator's
+  Open Question 3 resolution bringing lane assignment into this epic. A bug here
+  doesn't just break a cosmetic feature, it could silently exclude a project from real
+  dispatch OR route it to the wrong agent. Mitigation: Slice 2's own acceptance bar
+  must include a real before/after diff on BOTH derived arrays — `PROJECT_IDS` must be
+  byte-identical in order/content to today's hardcoded 4 entries (now 5, with MINERVA
+  migrated per Open Question 2), and `PROJECT_LANE` must be byte-identical to today's
+  hardcoded 5-entry map, and `core.mjs`'s existing dispatch-ordering tests must stay
+  green unchanged. **Revised per grill H3 (rollback path was unnamed): if either
+  verification fails, the migration blocks — Slice 2 is not done, ship is blocked, and
+  the mismatch is diagnosed and fixed before anything merges. This is a hard merge
+  gate, not a soft warning.**
 - **Medium (raised per grill H2) — reading a JSON file at ESM top-level import time is
   a genuinely new pattern in this codebase, not a risk-free mechanical detail.** Grepped
   — zero existing top-level `readFileSync` anywhere in `src/router/lib/*.mjs` outside
@@ -191,15 +203,35 @@ name/notes rather than erroring) — exact shape is Open Question 4.
    `PROJECT_IDS` set) avoids `scan` perpetually flagging a project the routing table
    already knows about as if it were wholly undiscovered. This is a real judgment
    call, not obvious either way.
-3. **Is `PROJECT_LANE` (agent-lane assignment) in scope for this epic?** My lean: no —
-   it already degrades safely to `DEFAULT_LANE` when absent, and the operator's own
-   framing was about project identity + notes, not routing policy. Keep it a separate,
-   still-hand-edited concern; note this explicitly rather than silently expanding
-   scope.
+3. **RESOLVED (operator sign-off) — `PROJECT_LANE` (top-level lane assignment) IS in
+   scope.** Operator's reasoning, verbatim intent: Auriga's core orchestration job is
+   knowing "what repo to hand off to a director of that repo" — top-level lane
+   assignment is that, not a separate routing-policy concern. Explicitly OUT of scope,
+   by the same reasoning: the finer-grained hierarchy beneath that hand-off (a
+   director's own manager/coder/QA breakdown, "if we ran another auriga as that repo's
+   director") is that director's OWN configuration, not something this registry (or
+   Auriga generally) manages — it stays "configured" elsewhere, a separate future
+   concern entirely outside this epic. So: registering a project now optionally
+   includes which agent lane(s) handle it (mirroring `PROJECT_LANE`'s existing
+   `{project: [candidate-lane-names]}` shape), unset falls back to `DEFAULT_LANE`
+   exactly as today — no sub-routing/hierarchy concept is added.
 4. **Notes-update command shape**: a dedicated `auriga project notes <id> "..."`, or
    make `add` idempotent (re-add updates name/notes)? My lean: idempotent `add` — one
    fewer command to remember, and matches `agent init`'s own idempotency precedent from
    p5.
+
+## 6b. Future vision named, explicitly out of scope (operator sign-off context)
+
+The operator's Open Question 3 reasoning gestured at something larger worth recording
+even though it's not this epic's job: a registered project's "director" (the top-level
+lane this registry assigns) could itself be another Auriga instance, which would then
+own its own internal routing to manager/coder/QA-shaped sub-lanes — a recursive
+orchestration hierarchy. This epic does NOT build that — it stops at "which lane
+handles this project," exactly as `PROJECT_LANE` already does today, just made
+registry-driven instead of hardcoded. The recursive-director concept is real
+north_star-shaping context (see `project_auriga_standalone_orchestrator.md` in
+memory) but is future, separate-epic work, consistent with "no pre-emptive
+integrations."
 
 ## 7. Verification Strategy
 

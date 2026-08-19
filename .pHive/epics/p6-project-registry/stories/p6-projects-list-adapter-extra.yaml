@@ -1,0 +1,96 @@
+id: p6-projects-list-adapter-extra
+epic: p6-project-registry
+title: "listAllProjects() ported-extra adapter method (id+name, not just id)"
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  `backlogAdapter.listAllProjectIds()` returns bare IDs only — the real Multica CLI call
+  (`multica project list --output json`) is confirmed (by direct code read) to discard
+  every field but `.id` (`multica/backlog.mjs`'s `listAllProjectIds`:
+  `.map((p) => p && p.id).filter(Boolean)`). A useful `auriga project scan` (built in
+  p6-project-cli, which depends on this story) needs to show real project names, not
+  just raw UUIDs, so the operator can tell what they're registering.
+
+  Add a new `listAllProjects()` method to the REAL Multica backlog adapter
+  implementation only — a "ported extra," the exact same non-typedef, presence-checked
+  pattern this codebase already uses for `listAllIssues`/`listCandidatePullRequests`
+  (confirmed real precedent, not a new architectural concept: see
+  `lib/mcp/server.mjs`'s `scanAllIssues` helper, which already does
+  `typeof backlog.listAllIssues === 'function'` presence-checking for exactly this
+  shape). Do NOT add this to the `BacklogAdapter` typedef contract
+  (`backlog-adapter.mjs`) — an adapter without it (the stub, or a future adapter)
+  simply doesn't support name-enriched scan results, degrading to ID-only, same as
+  today.
+
+  CRITICAL: the real Multica project object's field name for "display name" (e.g.
+  `p.name`, `p.title`, something else) is NOT confirmed by any static code read in this
+  repo — grepped, no fixture or reference shows the full shape. This story's research
+  step MUST make a real, live `multica project list --output json` call on this
+  machine (not a guess, not a fixture) to determine the actual field name before
+  implementing.
+
+acceptance_criteria:
+  - "Given a real, live `multica project list --output json` call made during this story's research, then the actual field name(s) for a project's display name are confirmed from real output, not assumed"
+  - "Given `createMulticaBacklogAdapter()`, when `.listAllProjects` is checked, then it is a function returning `[{id, name}, ...]` for every real project, using the field name(s) confirmed above"
+  - "Given the stub adapter, then it does NOT implement `listAllProjects` (no `.listAllProjects` property at all) — matching how it also lacks `listAllIssues`/`listCandidatePullRequests` today, confirmed by an explicit test"
+  - "Given `BacklogAdapter`'s typedef (`backlog-adapter.mjs`), then `listAllProjects` is NOT added to it — this stays a ported extra, not a contract method"
+  - "Given a project whose real Multica object is missing a name field entirely (defensive case), then `listAllProjects()` returns that entry with a safe fallback (e.g. `name: null` or the raw id), never throwing"
+
+steps:
+  - id: research
+    description: Make a real, live `multica project list --output json` call on this machine to confirm the actual field name for a project's display name; also re-read listAllIssues in multica/backlog.mjs as the exact pattern to mirror
+    agent: researcher
+  - id: implement
+    description: Add listAllProjects() to the real Multica backlog adapter per files_to_modify below, using the confirmed real field name; do not add it to the stub or the typedef
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit test listAllProjects() against a mocked CLI response shaped like the real confirmed output; explicit test confirming the stub adapter lacks this method
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the real field name was verified live (not guessed), confirm this is not added to the typedef contract, confirm the stub is untouched
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p6-project-registry
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/adapters/multica/backlog.mjs
+      purpose: "listAllProjectIds() (the method being extended-alongside, not replaced) and listAllIssues() (the exact ported-extra pattern to mirror) both live here"
+    - path: src/router/lib/adapters/backlog-adapter.mjs
+      purpose: "The typedef contract — listAllProjects must NOT be added here, same as listAllIssues/listCandidatePullRequests aren't"
+    - path: src/router/lib/mcp/server.mjs
+      purpose: "scanAllIssues()'s typeof-function presence-check is the exact calling convention a consumer of this new ported extra should follow"
+
+files_to_modify:
+  - file: src/router/lib/adapters/multica/backlog.mjs
+    change: "MODIFY — add listAllProjects() alongside the existing listAllProjectIds(), following the exact same run()/error-handling shape as that method and listAllIssues()"
+  - file: src/router/test/multica-backlog.test.mjs
+    change: "MODIFY (or CREATE if this test file doesn't exist yet — check first) — unit tests for listAllProjects() against a mocked CLI"
+
+design_decisions:
+  - decision: "listAllProjects() is a ported extra, not a typedef method"
+    rationale: "Exact precedent already established by listAllIssues/listCandidatePullRequests — an adapter without it degrades gracefully via presence-checking, matching this codebase's own convention and the adapter-boundary-integrity concern's spirit (no speculative contract expansion)."
+
+cross_cutting:
+  - concern: adapter-boundary-integrity
+    action: "New method lives only on the real Multica adapter implementation, never called directly from core.mjs or auriga-router.mjs — only through the adapter's typed interface, and is presence-checked by any consumer (p6-project-cli's scan command)"
+
+risks:
+  - severity: medium
+    description: "The real Multica project object's field name for 'name' could turn out to be nested, absent for some projects, or named unexpectedly"
+    mitigation: "This story's research step makes a REAL live call before implementation, not a guess — acceptance criteria require this explicitly"
+
+references:
+  - path: .pHive/epics/p6-project-registry/docs/research-brief.md
+    relevant_excerpt: |
+      Section 2 — listAllProjectIds() discards all fields but .id; the ported-extra
+      precedent from listAllIssues/listCandidatePullRequests.

@@ -1,0 +1,147 @@
+id: p6-registry-core
+epic: p6-project-registry
+title: Project registry storage + config-substrate.mjs derivation (PROJECT_NAMES/IDS/LANE)
+status: pending
+complexity: high
+methodology: classic
+depends_on: [p6-projects-list-adapter-extra]
+
+description: |
+  Replace `config-substrate.mjs`'s hardcoded `PROJECT_NAMES`/`PROJECT_IDS`/
+  `PROJECT_LANE` object literals with values derived from a new committed registry
+  file, `src/router/projects.json` (operator sign-off on location: sibling to
+  `package.json`, a router-level concern like the p5 CLI's harness registrations, not
+  buried under `lib/adapters/`).
+
+  THIS TOUCHES THE REAL DISPATCH-ELIGIBILITY GATE. Research confirmed `PROJECT_IDS` is
+  not cosmetic — `core.mjs`'s `selectAssignments` and `detectCascadeDispatch` both
+  filter to `PROJECT_IDS`-aligned projects only, and a project missing from it is
+  SILENTLY excluded from real dispatch (no log line fires). `PROJECT_IDS`'s array
+  ORDER also determines dispatch priority (`core.mjs` sorts by
+  `PROJECT_IDS.indexOf(...)`). `PROJECT_LANE` (now in scope per operator sign-off —
+  see design-discussion.md Open Question 3, resolved: top-level "which agent lane
+  handles this project" assignment is core to Auriga's orchestration job, though the
+  finer-grained hierarchy beneath a director is explicitly out of scope) already
+  degrades safely to `DEFAULT_LANE` when a project is unmapped — that safe-degrade
+  behavior must be preserved exactly.
+
+  Registry entry shape: `{id, name, notes, lane, registered_at}` — `lane` is an
+  optional array of candidate agent-lane names (mirroring `PROJECT_LANE`'s existing
+  `[candidate-names]` value shape exactly), absent/empty meaning "fall back to
+  `DEFAULT_LANE`," unchanged from today's behavior. `DEFAULT_LANE`/`HIVE_LANE`
+  (global override lanes, not per-project assignments) stay as hardcoded exports,
+  untouched by this story.
+
+  MIGRATION (operator sign-off, design-discussion.md Open Question 2, resolved): seed
+  the new registry with exactly 5 entries — the 4 real `PROJECT_IDS` entries
+  (Auriga `d78a9f5d-8792-45e8-89e0-bd7b916564ca`, Heimdall `8cb0298a-8a45-45c2-8d09-bc219e2d8a82`,
+  Consus `282343e2-b741-4438-bc80-b93c34819a96`, Pantheon Core
+  `d8ecfab4-79bd-4290-8127-290885f01f38`) PLUS Minerva
+  (`6327fdaf-789e-4290-ab41-1421957b55c6`) — Minerva is excluded from today's
+  `PROJECT_IDS` (not dispatch-eligible) but IS one of `PROJECT_LANE`'s only 5
+  hardcoded entries today (routing-policy-load-bearing, pinned by
+  `spawn-adapter.test.mjs`'s "exactly 5 mapped project UUIDs" assertion) — migrating
+  it avoids `scan` (p6-project-cli, a later story) perpetually flagging a project the
+  routing table already knows about as if wholly undiscovered. The other ~12 names
+  currently in `PROJECT_NAMES` but not migrated here are left for `scan` to
+  re-surface as real candidates later, NOT silently dropped or silently auto-added.
+
+  HARD MERGE GATE (operator sign-off on grill finding H3's rollback-path gap): the
+  migrated `PROJECT_IDS` array MUST be byte-identical in order and content to today's
+  hardcoded 4-entry array (Minerva is additional registry data but must NOT be added
+  to the derived `PROJECT_IDS` set — it stays dispatch-ineligible exactly as today,
+  only its lane assignment is preserved), and the migrated `PROJECT_LANE` object MUST
+  be byte-identical to today's hardcoded 5-entry map. If either check fails, this
+  story is NOT done and does not merge — diagnose and fix the mismatch, do not ship
+  with a known discrepancy.
+
+  GRACEFUL DEGRADE REQUIRED (grill finding H2): reading `projects.json` happens at ES
+  module import time in `config-substrate.mjs` — a genuinely new pattern in this
+  codebase (grepped: zero existing top-level `readFileSync` outside test files).
+  `spawn-adapter.test.mjs` directly imports `PROJECT_LANE` etc. from this module —
+  after this refactor, that UNRELATED existing test must not start failing to even
+  load the module. A missing or malformed `projects.json` MUST log a loud warning and
+  fall back to an empty project list (matching this codebase's own
+  `listAllProjectIds()` try/catch-and-return-`[]` convention), never throw and crash
+  module import.
+
+acceptance_criteria:
+  - "Given the new registry seeded with the 5 migrated entries, when config-substrate.mjs is loaded, then the derived PROJECT_IDS array is byte-identical (order and content) to today's hardcoded 4-entry array — verified by an explicit test, not eyeballed"
+  - "Given the same seeded registry, then the derived PROJECT_LANE object is byte-identical to today's hardcoded 5-entry map — verified by an explicit test"
+  - "Given src/router/test/spawn-adapter.test.mjs (an EXISTING test, not new to this story), when run after this refactor, then its deepEqual(lanes.projectLane, PROJECT_LANE) and exact-5-key-count assertions against config-substrate.mjs's real exports still pass, unchanged"
+  - "Given projects.json is missing or contains invalid JSON, when config-substrate.mjs is imported, then it does NOT throw — it logs a loud warning and derives an empty PROJECT_IDS/PROJECT_LANE, verified by an explicit test that deletes/corrupts the file and confirms the module still loads"
+  - "Given the full existing router test suite, when run after this story's changes, then it stays green with zero unrelated regressions"
+  - "Given the project-registry.mjs module, then its file-touching functions take an injected read/write dependency (mirroring agent-setup.mjs's injected-execFileSync pattern) so tests never touch the real filesystem"
+
+steps:
+  - id: research
+    description: Read every real PROJECT_IDS/PROJECT_LANE/PROJECT_NAMES call site in core.mjs and auriga-router.mjs (already catalogued in research-brief.md, re-verify against current HEAD) and read agent-setup.mjs's injected-dependency pattern to mirror for project-registry.mjs
+    agent: researcher
+  - id: implement
+    description: Create projects.json seeded with the 5 migrated entries, create lib/project-registry.mjs, refactor config-substrate.mjs to derive PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE from it with a graceful-degrade fallback on a missing/malformed file, per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write the byte-identical migration tests (hard gate), the graceful-degrade test, and confirm spawn-adapter.test.mjs's existing assertions still pass unchanged; run the full existing suite
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the migration is byte-identical (both PROJECT_IDS and PROJECT_LANE), confirm graceful degrade is real and tested (not just claimed), confirm spawn-adapter.test.mjs passes unchanged, confirm no consumer outside src/router is affected (config-substrate.mjs has zero external consumers per research — re-verify this is still true)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p6-project-registry
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/config-substrate.mjs
+      purpose: "The file being refactored — PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE object literals become derived exports"
+    - path: src/router/lib/core.mjs
+      purpose: "selectAssignments and detectCascadeDispatch are the real dispatch-eligibility gate consumers of PROJECT_IDS; chooseAgentForProject is PROJECT_LANE's consumer with its existing DEFAULT_LANE fallback — all three must see IDENTICAL derived values to today's hardcoded ones"
+    - path: src/router/test/spawn-adapter.test.mjs
+      purpose: "EXISTING test with real (non-fixture) assertions against config-substrate.mjs's exports — must pass unchanged after this refactor, named explicitly per grill finding U2"
+    - path: src/router/lib/agent-setup.mjs
+      purpose: "The injected-dependency testability pattern (execFileSync as first param to any function touching the outside world) to mirror for project-registry.mjs's file I/O"
+
+files_to_modify:
+  - file: src/router/projects.json
+    change: "CREATE — the new registry file, seeded with the 5 migrated entries (4 real PROJECT_IDS + Minerva) including their current PROJECT_LANE assignments"
+  - file: src/router/lib/project-registry.mjs
+    change: "CREATE — read/write/derive logic for the registry, injected-dependency pattern for testability"
+  - file: src/router/lib/config-substrate.mjs
+    change: "MODIFY — PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE become derived from project-registry.mjs's read of projects.json, with graceful degrade on a missing/malformed file; DEFAULT_LANE/HIVE_LANE stay hardcoded, untouched"
+  - file: src/router/test/project-registry.test.mjs
+    change: "CREATE — the byte-identical migration tests, graceful-degrade test, and registry CRUD logic tests"
+
+design_decisions:
+  - decision: "Registry file at src/router/projects.json, sibling to package.json"
+    rationale: "Operator sign-off — a router-level concern, parallel to how the p5 CLI's harness registrations aren't buried under lib/adapters/."
+  - decision: "Migrate 5 entries (4 real PROJECT_IDS + Minerva), not just 4 or all 17"
+    rationale: "Operator sign-off, resolving grill finding H1 — Minerva is dispatch-ineligible but routing-policy-load-bearing; migrating it avoids scan perpetually flagging an already-known project as undiscovered, without changing dispatch eligibility (it still isn't added to the derived PROJECT_IDS set)."
+  - decision: "PROJECT_LANE (top-level per-project lane assignment) is in scope; deeper director-internal hierarchy is not"
+    rationale: "Operator sign-off — Auriga's core orchestration job is knowing which lane/director handles a project's work; a director's own internal manager/coder/QA routing is that director's own configuration, a separate future concern."
+  - decision: "Graceful degrade (warn + empty list) on a missing/malformed registry file, never throw"
+    rationale: "Grill finding H2 — an unrelated existing test (spawn-adapter.test.mjs) imports this module directly; a new hard-crash failure mode for unrelated code would be a real regression, not an acceptable side effect of this epic."
+
+cross_cutting:
+  - concern: adapter-boundary-integrity
+    action: "This story touches config.mjs (via config-substrate.mjs), triggering the concern per its own applies_when. Walked: the registry's add/remove/list operations are pure local state with no external-system call; the only external call (scan, in a later story) goes through the already-adapter-boundary-compliant listAllProjects() from p6-projects-list-adapter-extra. This relocates hardcoded values into a smaller, operator-mutable surface rather than eliminating hardcoding as a category — an honest framing, not an overclaim (grill U1)."
+  - concern: documentation
+    action: "New files (projects.json, project-registry.mjs) and a changed config-substrate.mjs behavior — add a .pHive/CONTEXT.md Key paths entry for the new registry files once landed"
+
+risks:
+  - severity: high
+    description: "A migration bug in PROJECT_IDS or PROJECT_LANE could silently change real dispatch behavior or agent routing on the very first run after this ships"
+    mitigation: "Hard merge gate: byte-identical verification tests for BOTH derived arrays, explicitly required by acceptance criteria, not optional or soft-failing"
+  - severity: medium
+    description: "Reading a file at ES module import time is a new pattern with no precedent; a crash here would break an unrelated existing test (spawn-adapter.test.mjs) that has nothing to do with this feature"
+    mitigation: "Graceful degrade (warn + empty list, never throw) is a required, explicitly tested acceptance criterion, not an assumption"
+
+references:
+  - path: .pHive/epics/p6-project-registry/docs/design-discussion.md
+    relevant_excerpt: |
+      Slice 2, and the §4 risk revisions for grill H1/H2/H3, and Open Question 2/3's
+      resolutions.

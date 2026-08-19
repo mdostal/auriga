@@ -1,0 +1,100 @@
+id: p6-project-cli
+epic: p6-project-registry
+title: "auriga project scan/add/remove/list CLI commands"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p6-registry-core]
+
+description: |
+  New `project` subcommand family in the existing `auriga` CLI (`src/router/bin/auriga.mjs`,
+  no new bin entry needed — mirrors exactly how `agent init`/`agent status`/`mcp` are
+  dispatched today), calling into `project-registry.mjs` (from p6-registry-core).
+
+  `auriga project scan` — discovers what's out there to register. Calls
+  `listAllProjects()` (from p6-projects-list-adapter-extra) if the active adapter
+  supports it (real Multica adapter does; stub doesn't — degrade to ID-only display via
+  `listAllProjectIds()` if absent, same presence-check-and-fallback shape used
+  throughout this codebase), diffs against the registry, and shows unregistered
+  candidates. READ-ONLY — never auto-registers anything, matching the operator's
+  explicit original framing ("offer the scan as an initial... and then any time a new
+  one joins we do add").
+
+  `auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent-name>[,<agent-name>...]]`
+  — registers a project, or (IDEMPOTENT, per operator sign-off on design-discussion.md
+  Open Question 4) updates name/notes/lane on an already-registered one instead of
+  erroring, matching `agent init`'s own idempotency precedent from p5. Validates the
+  given `<id>` against a fresh scan so a typo'd UUID doesn't silently register a
+  non-existent project. `--lane` is optional — omitted means "fall back to
+  DEFAULT_LANE," exactly as an unmapped project does today.
+
+  `auriga project remove <id>` — deletes the registry entry entirely (identity, notes,
+  and lane assignment together, since p6-registry-core folds them into one record).
+
+  `auriga project list` — reads and displays the full registry (id, name, notes, lane),
+  READ-ONLY, zero side effects.
+
+acceptance_criteria:
+  - "Given `auriga project scan` against the real Multica adapter, then it shows real, unregistered projects with real names (via listAllProjects()) and makes zero registry mutations"
+  - "Given `auriga project scan` against the stub adapter (no listAllProjects()), then it degrades to showing raw unregistered IDs without erroring"
+  - "Given `auriga project add <id>` for a project not yet registered, then it appends a new entry to the registry"
+  - "Given `auriga project add <id> --notes \"...\"` for an ALREADY-registered project, then it updates that entry's notes in place rather than erroring or creating a duplicate — the idempotency requirement"
+  - "Given `auriga project add <fake-id-not-on-the-board>`, then it fails with a clear error rather than silently registering a bogus entry"
+  - "Given `auriga project remove <id>`, then the entry (including any lane assignment) is fully removed, and a subsequent `auriga project list` no longer shows it"
+  - "Given `auriga project list`, then it is read-only and displays every registered project's id/name/notes/lane"
+  - "Given a real add -> list -> notes-update-via-add -> remove -> list cycle run on this machine against the real registry file, then each step's effect is confirmed by actually reading the file back afterward, not just trusting in-memory state within one process"
+
+steps:
+  - id: research
+    description: Re-read bin/auriga.mjs's exact dispatch/argv-parsing shape and agent-setup.mjs's separation-of-concerns convention (argv parsing in the bin script, logic in the lib module) to mirror precisely for the project subcommand family
+    agent: researcher
+  - id: implement
+    description: Add project scan/add/remove/list dispatch branches to bin/auriga.mjs, calling project-registry.mjs's functions, per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests against an injected registry dependency (no real file I/O in unit tests), PLUS a real add/list/remove cycle run on this machine confirming the actual projects.json file changes as expected
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm scan is truly read-only, confirm add's idempotency, confirm remove fully clears lane assignment too, confirm the real end-to-end cycle was actually run and verified against disk, not just unit-tested
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p6-project-registry
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/bin/auriga.mjs
+      purpose: "Existing CLI dispatcher — agent init/status/mcp's exact if(cmd===X && sub===Y) dispatch shape to mirror for project scan/add/remove/list"
+    - path: src/router/lib/agent-setup.mjs
+      purpose: "The lib-module-owns-logic, bin-script-owns-argv convention to mirror in project-registry.mjs (from p6-registry-core, already built by the time this story runs)"
+
+files_to_modify:
+  - file: src/router/bin/auriga.mjs
+    change: "MODIFY — add `project scan`/`project add`/`project remove`/`project list` dispatch branches"
+  - file: src/router/test/project-cli.test.mjs
+    change: "CREATE — CLI-level tests for the new dispatch branches"
+
+design_decisions:
+  - decision: "add is idempotent (updates on re-registration) rather than erroring"
+    rationale: "Operator sign-off, design-discussion.md Open Question 4 — one fewer command to remember, matches agent init's own idempotency precedent."
+  - decision: "scan never auto-registers"
+    rationale: "Operator's original explicit framing: scan is offered as a starting point/suggestion, registration is always a deliberate, separate operator action."
+
+cross_cutting:
+  - concern: documentation
+    action: "New CLI subcommands — worth a one-line mention in README.md or CONTEXT.md once landed, alongside the existing agent init/status/mcp documentation from p5"
+
+risks:
+  - severity: low
+    description: "A typo'd project id in `add` could silently register a bogus, non-existent project if not validated against a real scan"
+    mitigation: "Acceptance criteria require add to validate against a fresh scan and fail clearly on an unrecognized id"
+
+references:
+  - path: .pHive/epics/p6-project-registry/docs/design-discussion.md
+    relevant_excerpt: |
+      Slice 3 — the full CLI command shape and idempotency/lane-flag design.
