@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils'
 import EpicsListView from '@/views/EpicsListView'
 import StoryDetailView from '@/views/StoryDetailView'
 import ActivityView from '@/views/ActivityView'
+import InstallCard from '@/components/InstallCard'
 
 // Plain state-based navigation between the three top-level views (EpicsList,
 // StoryDetail, Activity) — no client-side routing library. Per this story's
@@ -42,6 +43,7 @@ function App() {
         <p className="text-sm text-ink-2 mt-2 mb-5 max-w-[46ch]">
           Read-only operator dashboard over this repo&apos;s .pHive/ state.
         </p>
+        <InstallCard />
         <nav className="flex gap-1 -ml-3 border-b border-hairline">
           <NavButton active={route.name === 'epics'} onClick={() => setRoute({ name: 'epics' })}>
             Epics

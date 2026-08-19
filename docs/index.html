@@ -530,6 +530,50 @@
   }
   pre.code-block .c{ color:var(--ink-3); }
 
+  /* ============================= AGENT/MCP INSTALL DISCLOSURE (added content) =============================
+     Plain <details>/<summary> — no JS. Matches the .step visual language
+     above (same plate background, hairline border, capella step-num badge)
+     but stays collapsed by default since it's the second, more-specialized
+     install path, additive to the three numbered steps above it. */
+  .agent-disclosure{
+    margin-top:16px;
+    max-width:var(--measure);
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    overflow:hidden;
+  }
+  .agent-disclosure > summary{
+    display:flex; align-items:center; gap:14px;
+    padding:16px 20px;
+    cursor:pointer;
+    list-style:none;
+    font-family:var(--font-ui); font-size:14.5px; font-weight:600; color:var(--ink-1);
+  }
+  .agent-disclosure > summary::-webkit-details-marker{ display:none; }
+  .agent-disclosure > summary .step-num{
+    flex:none; width:28px; height:28px;
+    display:flex; align-items:center; justify-content:center;
+    border-radius:50%;
+    background:var(--capella-soft);
+    color:var(--capella);
+    border:1px solid var(--capella-line);
+    font-family:var(--font-mono); font-size:11px; font-weight:700;
+  }
+  .agent-disclosure > summary .disclosure-title{ flex:1; }
+  .agent-disclosure > summary .disclosure-hint{
+    font-family:var(--font-ui); font-size:12.5px; font-weight:400; color:var(--ink-3);
+  }
+  .agent-disclosure > summary .chevron{
+    font-family:var(--font-mono); font-size:12px; color:var(--ink-3);
+    transition:transform .15s ease;
+  }
+  .agent-disclosure[open] > summary .chevron{ transform:rotate(90deg); }
+  .agent-disclosure .disclosure-body{
+    padding:0 20px 20px 62px;
+  }
+  .agent-disclosure .step-hint{ margin-bottom:10px; }
+
   /* ============================= FOOTER ============================= */
   footer{
     padding:44px 0 60px; text-align:center;
@@ -996,6 +1040,20 @@ node index.mjs
         </div>
       </div>
     </div>
+
+    <details class="agent-disclosure">
+      <summary>
+        <span class="step-num">＋</span>
+        <span class="disclosure-title">Install &amp; interact from an AI agent (Claude Code / Codex)</span>
+        <span class="disclosure-hint">one command</span>
+        <span class="chevron">▸</span>
+      </summary>
+      <div class="disclosure-body">
+        <p class="step-hint">A separate, faster path alongside the clone above: one command installs the same <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">auriga</code> CLI and registers Auriga's read-only MCP server with whatever agent CLI is already on your machine — so your own Claude Code or Codex session can query this board's real state directly, no dashboard required.</p>
+        <pre class="code-block">curl -fsSL https://mdostal.github.io/auriga/install.sh | bash</pre>
+        <p class="step-hint" style="margin-top:10px;margin-bottom:0;">Under the hood this clones the repo, links the <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">auriga</code> command onto <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">$PATH</code>, then runs <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">auriga agent init</code> to detect and wire up Claude Code / Codex — idempotent, safe to re-run any time. Run <code style="font-family:var(--font-mono);color:var(--ink-1);background:var(--bg-inset);padding:.1em .35em;border-radius:3px;">auriga agent status</code> afterward to see what got registered.</p>
+      </div>
+    </details>
 
     <div class="cta-row">
       <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
