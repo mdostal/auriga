@@ -1,0 +1,113 @@
+id: p5-agent-cli
+epic: p5-agent-mcp-integration
+title: "auriga agent init / agent status / mcp CLI commands"
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p5-mcp-server]
+
+description: |
+  New CLI surface mirroring Portunus's `portunus agent init`/`agent status` pattern
+  exactly (real code read during research, not the verbal description): `auriga agent
+  init [--harness claude|codex]` detects Claude Code / Codex CLI on the machine and
+  registers Auriga's MCP server (from p5-mcp-server) with each detected/targeted
+  harness; `auriga agent status [--harness ...]` reports registration state read-only,
+  no side effects; `auriga mcp` starts the MCP server itself (the command the
+  registration points at).
+
+  Detection: presence on `$PATH` only (mirrors Portunus's `shutil.which`), nothing
+  deeper. Registration check MUST use the targeted lookup Portunus already learned the
+  hard way: `claude mcp get auriga` (NOT `claude mcp list`, which health-checks every
+  registered MCP server — 30+ seconds on a machine with several configured, confirmed
+  by research as a real bug Portunus hit and fixed). Codex's `mcp list` was not found
+  to be slow in the same way, so `codex mcp list` is fine there — do not
+  over-generalize the Claude-specific fix to Codex. Registration is a pure CLI
+  shell-out (`claude mcp add --scope user auriga -- auriga mcp` / `codex mcp add
+  auriga -- auriga mcp`), no direct config-file writes — same as Portunus.
+
+  Init attempts every detected (or explicitly `--harness`-listed) harness
+  independently — one failing must never block another. Idempotent: re-running init
+  when already registered is a no-op, not an error.
+
+  KNOWN SEQUENCING NOTE (grill finding U1, resolved in design-discussion.md): `claude
+  mcp add ... -- auriga mcp` requires `auriga` to already resolve on `$PATH` at
+  registration time. This story's own verification uses `npm link` (from
+  `src/router/`) as the interim dev-install step — the standard Node mechanism for
+  putting a local package's bin on `$PATH` — rather than waiting for p5-install-script
+  (which provides the PUBLIC install path, a separate later story) to exist.
+
+acceptance_criteria:
+  - "Given `auriga agent status` on a machine with no Auriga MCP server registered, then it reports unregistered for each detected harness and makes zero mutations"
+  - "Given `auriga agent init` run via `npm link`-installed auriga on this real machine, when Claude Code and/or Codex CLI is actually present, then the MCP server registers for real (verified via the harness's own inspection, e.g. `claude mcp get auriga` reporting it registered) — not just a mocked subprocess call"
+  - "Given `auriga agent init` is run a second time when already registered, then it is a no-op (idempotent) and does not error or re-register"
+  - "Given `--harness claude` or `--harness codex` is passed to either command, then only that harness is targeted, the other is untouched"
+  - "Given the registration-status check specifically for Claude Code, then it uses `claude mcp get auriga` (a targeted lookup), never `claude mcp list` (which is confirmed slow — do not reintroduce the exact bug Portunus already found and fixed)"
+  - "Given a real init -> status -> re-init (idempotency check) -> teardown -> status cycle run on this machine, then it is run human-watched (not as part of an unattended automated test pass, per design-discussion.md's revised risk mitigation), and teardown is independently confirmed by re-checking status afterward, not assumed successful because the command exited 0"
+
+steps:
+  - id: research
+    description: Re-confirm Portunus's exact mcp_registered/register_mcp/detect_harnesses shape (git show 9621eb2:src/portunus/agent_setup.py) to model the Node equivalent precisely, and confirm src/router/package.json's existing bin field/type:module setup for adding a second bin entry
+    agent: researcher
+  - id: implement
+    description: Build the new bin script + CLI subcommand parsing (agent init, agent status, mcp) per files_to_modify below, calling the p5-mcp-server module's exported start function for the mcp subcommand
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Unit tests for harness detection and the targeted-lookup logic (mocked subprocess layer), PLUS the real human-watched machine verification cycle described in acceptance criteria using npm link
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the Claude-specific mcp-get-not-list fix is present and correct, confirm idempotency, confirm --harness narrowing works, confirm status never mutates
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p5-agent-mcp-integration
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    runtime: "Node.js, ESM"
+  key_files:
+    - path: src/router/package.json
+      purpose: "Already has bin: {auriga-router: ./auriga-router.mjs}, type: module — add a second bin entry here for the new auriga command, do not create a separate package"
+    - path: src/router/auriga-router.mjs
+      purpose: "Existing CLI reference for repo conventions — note it uses flat manual process.argv parsing with no subcommand concept; the new auriga bin needs its own subcommand dispatch (agent init / agent status / mcp), not an extension of this file's flag pattern"
+
+files_to_modify:
+  - file: src/router/bin/auriga.mjs
+    change: "CREATE — the new auriga CLI: subcommand dispatch for `agent init`, `agent status`, `mcp` (which calls p5-mcp-server's exported start function)"
+  - file: src/router/lib/agent-setup.mjs
+    change: "CREATE — detectHarnesses(), mcpRegistered(harness) [claude: `claude mcp get auriga`, codex: `codex mcp list`], registerMcp(harness), agentInit(), agentStatus() — mirrors Portunus's agent_setup.py shape adapted to Node"
+  - file: src/router/package.json
+    change: "MODIFY — add `auriga: ./bin/auriga.mjs` to the existing bin field"
+  - file: src/router/test/agent-setup.test.mjs
+    change: "CREATE — unit tests against a mocked subprocess layer for detection/registration logic"
+
+design_decisions:
+  - decision: "Registration check for Claude Code uses `claude mcp get auriga`, not `claude mcp list`"
+    rationale: "Portunus already hit and fixed this exact bug — `mcp list` health-checks every registered MCP server, 30+ seconds on a machine with several configured. Confirmed via research reading Portunus's actual code and comments. No need to rediscover this."
+  - decision: "Verification for this story uses `npm link`, not the public install.sh path"
+    rationale: "Resolves grill finding U1 (real chicken-and-egg: install.sh, which provides the public PATH-provisioning, is a later story). npm link is the standard Node mechanism for local dev-time PATH provisioning and does not block this story on p5-install-script."
+
+cross_cutting:
+  - concern: documentation
+    action: "This introduces a genuinely new file (the auriga CLI bin) worth a Key paths entry in .pHive/CONTEXT.md once landed"
+
+risks:
+  - severity: medium
+    description: "claude mcp add / codex mcp add mutate the operator's real, live, already-in-daily-use tool config; an interrupted cycle (crash, timeout) could leave it half-registered"
+    mitigation: "Verification runs human-watched, not unattended. Teardown is independently re-verified via a follow-up status check, not assumed successful from exit code alone."
+  - severity: low
+    description: "Operator's ~/.claude or codex config may be under external management (sync tooling, policy) not accounted for here"
+    mitigation: "Not deeply investigated — named as a live assumption. If registration behaves unexpectedly on this machine, surface it rather than silently retrying or working around it."
+
+references:
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/research-brief.md
+    relevant_excerpt: |
+      Section 1 — Portunus's exact detect_harnesses/mcp_registered/register_mcp code,
+      including the targeted-lookup fix and its rationale, quoted in full.
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/design-discussion.md
+    relevant_excerpt: |
+      Slice 3 note resolving grill U1 via npm link for dev-time verification.

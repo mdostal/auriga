@@ -1,0 +1,114 @@
+id: p5-mcp-server
+epic: p5-agent-mcp-integration
+title: Operator-side MCP server (read-only query tools)
+status: pending
+complexity: high
+methodology: classic
+depends_on: []
+
+description: |
+  Build a new Auriga MCP server so the operator's own Claude Code / Codex CLI session
+  can query Auriga's board directly as tool calls (list epics/stories with status, get
+  story detail, check what's blocked/in-flight) without opening the dashboard UI. This
+  is the FIRST use of an MCP SDK in this codebase (`@modelcontextprotocol/sdk`,
+  confirmed real and published, v1.30.0). v1 ships FULLY READ-ONLY per explicit
+  operator sign-off (design-discussion.md Open Question 1, resolved) — no write tools
+  of any kind, including the pre-existing `backlogAdapter.setIssueStatus`/
+  `commentOnIssue` methods. This sidesteps an unresolved safety question the grill
+  raised (any Claude/Codex session, including an unattended one, could otherwise
+  mutate the live board via a tool call the operator never directly typed) rather than
+  accepting it silently. Write capability is explicitly out of scope for this epic —
+  do not add it "while we're in here."
+
+  The server calls `backlogAdapter` directly, in-process — NOT through `src/server/`'s
+  existing HTTP API, which is confirmed (research-brief.md §2) to be a separate,
+  hard-coded read-only layer over local `.pHive/*.yaml` planning docs, not the live
+  Multica board, and cannot serve this purpose. This mirrors Portunus's own MCP server
+  design decision (calls its library directly in-process, no subprocess/HTTP boundary)
+  — consistent architecture, not a deviation.
+
+  Uses stdio transport (matching Portunus's `mcp.run()` shape). Real adapter
+  (`createMulticaBacklogAdapter`) by default, matching `auriga-router.mjs`'s own
+  default; the stub is available via the SAME env-var switch `p2-adapter-interface`
+  already established for the router — do not invent a new switching mechanism.
+
+acceptance_criteria:
+  - "Given the MCP server started via stdio, when a tool-listing request is made, then it reports exactly the read-only query tools (list epics/stories with status, get story detail, check what's blocked/in-flight) and NO write/mutate tools of any kind"
+  - "Given a real Claude Code or Codex CLI session with the server registered (via `npm link` for this story's own verification — see below), when a tool call like 'what's blocked' is made, then it returns real data from this repo's actual backlogAdapter state, not mocked/hardcoded data"
+  - "Given the stub adapter is selected via the existing p2-adapter-interface env-var switch, then the MCP server runs and answers tool calls using the stub's in-memory data with zero live external systems present — same standalone guarantee the router already has"
+  - "Given a slow backlogAdapter method is called from a tool handler (e.g. a board-wide scan), then the actual latency is measured against the real Multica adapter (not just the fast stub) and reported in this story's verification writeup — not assumed acceptable"
+  - "Given `npm run test:all` at repo root, then all existing tests still pass, plus new unit tests for the MCP server's tool handlers against the stub adapter"
+
+steps:
+  - id: research
+    description: Read Portunus's real mcp_server.py (git show 9621eb2 or main, whichever has it) for the FastMCP/tool-registration shape, and Auriga's backlog-adapter.mjs contract + multica/backlog.mjs + stub/backlog.mjs to confirm the exact 6 methods available to build read tools from
+    agent: researcher
+  - id: implement
+    description: Build the new MCP server module using @modelcontextprotocol/sdk with stdio transport, calling backlogAdapter directly per files_to_modify below; read-only tools only, real adapter default with existing env-var stub switch
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write unit tests against the stub adapter, measure real latency against the live Multica adapter for the slowest methods, and verify a real round-trip via `npm link` from an actual Claude Code or Codex session on this machine (human-watched, not unattended — see risk mitigation in design-discussion.md)
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the server exposes ONLY read tools (no write capability slipped in), confirm it calls backlogAdapter directly (not src/server/'s HTTP layer, not Multica directly), confirm adapter-boundary-integrity's checklist is satisfied
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p5-agent-mcp-integration
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    runtime: "Node.js, ESM (type: module)"
+    new_dependency: "@modelcontextprotocol/sdk (first use in this repo; confirmed real, published, v1.30.0)"
+  key_files:
+    - path: src/router/lib/adapters/backlog-adapter.mjs
+      purpose: "The 6-method contract this server's tools are built on: listIssues, listAllProjectIds, getIssueRuns, getIssuePullRequests, setIssueStatus, commentOnIssue. Only the 4 READ methods are used by this story's tools."
+    - path: src/router/lib/adapters/multica/backlog.mjs
+      purpose: "Real implementation — note listAllIssues/listCandidatePullRequests do paginated multi-subprocess scans; measure their real latency when wrapped as a tool handler"
+    - path: src/router/lib/adapters/stub/backlog.mjs
+      purpose: "In-memory stub for unit tests and the standalone-with-zero-external-systems guarantee"
+    - path: src/server/lib/read.mjs
+      purpose: "DO NOT reuse this — confirmed read-only over local .pHive/*.yaml planning docs, not live board state. Referenced here only to document why it was ruled out."
+
+files_to_modify:
+  - file: src/router/lib/mcp/server.mjs
+    change: "CREATE — the MCP server module: tool registration (read-only), stdio transport, backlogAdapter wiring, exports a startable server function the CLI's `mcp` subcommand (p5-agent-cli) will call"
+  - file: src/router/package.json
+    change: "MODIFY — add @modelcontextprotocol/sdk dependency"
+  - file: src/router/test/mcp-server.test.mjs
+    change: "CREATE — unit tests against the stub adapter"
+
+design_decisions:
+  - decision: "v1 is fully read-only — no write tools of any kind"
+    rationale: "Explicit operator sign-off after the grill surfaced an unresolved safety question: any Claude/Codex session, including an unattended one, could otherwise mutate the live board via a tool call the operator never directly typed. Sidestepping the question by shipping nothing to mutate, rather than accepting the risk silently. See design-discussion.md Open Question 1."
+  - decision: "Calls backlogAdapter directly, in-process — never src/server/'s HTTP API"
+    rationale: "src/server/ is confirmed read-only over local planning YAML, not live board state, and is GET-only by hard design. Mirrors Portunus's own MCP server design decision (direct in-process calls, no subprocess/HTTP boundary)."
+  - decision: "Real Multica-backed adapter by default; stub via the existing p2-adapter-interface env-var switch"
+    rationale: "Matches auriga-router.mjs's own default rather than inventing a new switching mechanism. Operator sign-off, design-discussion.md Open Question 2."
+
+cross_cutting:
+  - concern: adapter-boundary-integrity
+    action: "No direct import of multica.mjs or any vendor-specific module outside the adapter's own implementation; server calls only backlogAdapter's typed interface; stub adapter exercised by real unit tests so the feature works with zero live external systems present"
+
+risks:
+  - severity: high
+    description: "Autonomous/unattended board mutation via an LLM tool call — the exact risk this story sidesteps by shipping read-only, but a future write-capability epic must not silently reopen it without a real answer"
+    mitigation: "This story ships zero write tools. Any future epic adding write tools must explicitly re-address this risk, not treat 'v1 was fine' as precedent that it's already solved"
+  - severity: medium
+    description: "Synchronous, subprocess-heavy backlogAdapter calls (listAllIssues, listCandidatePullRequests) running inside an MCP tool handler could stall multiple seconds, with unknown behavior against the harness's own tool-call timeout"
+    mitigation: "Measure real latency against the live Multica adapter (not just the fast stub) before calling this story done; report actual numbers in the verification writeup"
+
+references:
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/design-discussion.md
+    relevant_excerpt: |
+      Slice 2 — The MCP server itself... calling backlogAdapter directly in-process...
+      Open Question 1 resolved: fully read-only v1.
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/research-brief.md
+    relevant_excerpt: |
+      Section 1 (Portunus's MCP server, FastMCP, stdio, direct in-process calls) and
+      Section 2 (the confirmed backlogAdapter gap and src/server/ unsuitability).

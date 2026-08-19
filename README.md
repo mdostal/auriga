@@ -1,3 +1,7 @@
+```bash
+curl -fsSL https://mdostal.github.io/auriga/install.sh | bash
+```
+
 # Auriga
 
 **The router god of [Pantheon](https://github.com/mdostal/pantheon-v2).** Auriga senses board

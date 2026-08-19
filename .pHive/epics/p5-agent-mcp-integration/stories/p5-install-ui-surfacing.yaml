@@ -1,0 +1,96 @@
+id: p5-install-ui-surfacing
+epic: p5-agent-mcp-integration
+title: Collapsible install/interact surface in dashboard + showcase page
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p5-install-script]
+
+description: |
+  A prominent "install & interact" surface in TWO places, both top-and-forward so
+  it's the first thing someone installing/working with Auriga sees, per the
+  operator's original ask.
+
+  (1) The real operator dashboard (`src/ui/src/App.jsx`'s header) — a dismissible
+  card showing the real curl-pipe-bash install one-liner (from p5-install-script) and
+  a one-line description of what `auriga agent init` does. Confirmed by research: NO
+  existing dismiss/collapse/localStorage pattern exists anywhere in `src/ui/src/` —
+  this is net-new UI work, not an extension of something that already exists. Must
+  remember dismissed state across page loads via `localStorage`.
+
+  (2) The public showcase page (`docs/index.html`'s `#install` section, lines
+  953-1004) — a new subsection alongside the existing clone+npm-install steps (does
+  NOT replace them — this ADDS the agent/MCP install path). Per operator sign-off
+  (design-discussion.md Open Question 4), collapse mechanism is a plain
+  `<details>`/`<summary>` disclosure — zero JS, consistent with the page's existing
+  static, zero-client-state design. Does not need to remember dismissal across visits.
+
+acceptance_criteria:
+  - "Given the dashboard on first load, then an install/interact card is visible at the top, showing the real (not placeholder) curl-pipe-bash install command from p5-install-script"
+  - "Given the dashboard install card is dismissed, when the page is reloaded, then it stays dismissed (localStorage-backed), matching the 'collapse after first view' requirement"
+  - "Given docs/index.html's #install section, then a new subsection using a plain <details>/<summary> disclosure presents the agent/MCP install path, without removing or replacing the existing clone+npm-install steps"
+  - "Given all existing Playwright specs (epics-list, story-detail, activity, plus the 4 hardening specs), when run against the dashboard with the new install card, then they still pass — update selectors if needed, do not change asserted scenarios"
+  - "Given `npm run build` in src/ui/, then it still succeeds with no errors after this change"
+  - "Given oxlint in src/ui/, then it passes (matching the existing 1 pre-existing non-blocking warning baseline, no new warnings introduced by this story)"
+
+steps:
+  - id: research
+    description: Read src/ui/src/App.jsx's current header structure and confirm zero existing dismiss/localStorage pattern; read docs/index.html's #install section structure to plan where the new <details> subsection fits without disrupting the existing steps
+    agent: researcher
+  - id: implement
+    description: Build the dismissible dashboard card (new component + localStorage-backed dismiss state) and the showcase page's new <details> subsection, per files_to_modify below
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Run the existing Playwright suite plus new coverage for the dismiss-and-remember behavior; visually verify via Playwright MCP screenshots on both surfaces
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm both surfaces show the REAL install command (not a placeholder), confirm the dashboard card's dismiss state persists, confirm the showcase page gained zero new JS
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p5-agent-mcp-integration
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    frontend: "Vite + React + Tailwind CSS + shadcn/ui (existing, from p3-auriga-ui/p4-auriga-branding)"
+  key_files:
+    - path: src/ui/src/App.jsx
+      purpose: "Header (lines 37-53) is the slot for the new dismissible card — confirmed zero existing dismiss pattern to extend, this is net-new"
+    - path: docs/index.html
+      purpose: "#install section (lines 953-1004) — existing .install-steps/.step-num pattern to extend with a new <details> subsection, not replace"
+
+files_to_modify:
+  - file: src/ui/src/components/InstallCard.jsx
+    change: "CREATE — the dismissible install/interact card, localStorage-backed dismiss state"
+  - file: src/ui/src/App.jsx
+    change: "MODIFY — render InstallCard in the header, above the nav"
+  - file: docs/index.html
+    change: "MODIFY — add a new <details>/<summary> subsection to #install for the agent/MCP install path, alongside the existing clone+npm steps"
+  - file: src/ui/tests/e2e/*.spec.js
+    change: "MODIFY (only if needed) — update selectors broken by the new header markup; do not change asserted scenarios"
+
+design_decisions:
+  - decision: "Dashboard card is dismissible with localStorage; showcase page uses a plain <details> disclosure with no persisted state"
+    rationale: "Operator sign-off, design-discussion.md Open Question 4 — the dashboard already has React/JS runtime and this matches how a real app should behave; the showcase page is static HTML with zero client-side state today and should stay that way rather than gaining its first-ever JS for this alone."
+  - decision: "The showcase page's new subsection ADDS to #install, does not replace the existing clone+npm-install steps"
+    rationale: "Both install paths are real and valid — the agent/MCP path is a convenience on top of the base install, not a replacement for it."
+
+cross_cutting:
+  - concern: documentation
+    action: "docs/index.html is modified (already listed in CONTEXT.md's Key paths from p4-auriga-branding, no new entry needed); src/ui/src/components/InstallCard.jsx is a new file worth noting if CONTEXT.md's Key paths gets a src/ui/ internals section in the future — not required for this story"
+
+risks:
+  - severity: low
+    description: "Restyling/adding to App.jsx's header could silently break existing Playwright selectors"
+    mitigation: "Acceptance criteria require the full existing suite to keep passing, with selector updates allowed but asserted scenarios unchanged — same rule used throughout this project's prior UI work (p4-auriga-branding)"
+
+references:
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/research-brief.md
+    relevant_excerpt: |
+      Section 4 — UI surfaces, confirming zero existing dismiss pattern in src/ui/ and
+      docs/index.html's exact #install section line range/structure.
