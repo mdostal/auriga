@@ -24,7 +24,7 @@
 // listAllProjects(): try/catch, log a loud stderr warning, return an empty
 // result — never throw).
 
-import { readFileSync as realReadFileSync } from 'node:fs';
+import { readFileSync as realReadFileSync, writeFileSync as realWriteFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -180,4 +180,142 @@ export function loadRegistryConfig(readFileSync, path = DEFAULT_REGISTRY_PATH) {
 export function loadRealRegistryConfig() {
   const path = process.env[REGISTRY_PATH_ENV_VAR] || DEFAULT_REGISTRY_PATH;
   return loadRegistryConfig(realReadFileSync, path);
+}
+
+// ---- CLI-facing operations (p6-project-cli) --------------------------------
+//
+// scan/add/remove/list all live here, not in bin/auriga.mjs, per this
+// codebase's established bin-owns-argv/lib-owns-logic split (see
+// agent-setup.mjs's own header comment). Every function below is a plain,
+// synchronous, dependency-free (or injected-dependency) function so it's
+// unit-testable with zero real filesystem or subprocess access — bin/
+// auriga.mjs's dispatch just calls these and formats the result.
+
+/**
+ * Real-fs read of the registry file, honoring the same test-only
+ * AURIGA_PROJECTS_REGISTRY_PATH override as loadRealRegistryConfig() above.
+ * Unlike loadRegistryConfig()/loadRealRegistryConfig(), this does NOT
+ * degrade on failure (missing/malformed file) — a CLI command (`project
+ * add`/`remove`/`list`) needs to surface a bad registry file as a real
+ * error, not silently treat it as empty and risk clobbering it on write.
+ * @returns {{ dispatch_order?: string[], projects?: object[] }}
+ */
+export function readRealRegistryFile() {
+  const path = process.env[REGISTRY_PATH_ENV_VAR] || DEFAULT_REGISTRY_PATH;
+  return readRegistryFile(realReadFileSync, path);
+}
+
+/**
+ * Real-fs write of the registry file, honoring the same test-only path
+ * override. Mirrors readRealRegistryFile()'s shape.
+ * @param {{ dispatch_order?: string[], projects?: object[] }} data
+ */
+export function writeRealRegistryFile(data) {
+  const path = process.env[REGISTRY_PATH_ENV_VAR] || DEFAULT_REGISTRY_PATH;
+  writeRegistryFile(realWriteFileSync, data, path);
+}
+
+/**
+ * Every real project the active backlog adapter currently knows about, as
+ * [{id, name}]. Prefers `listAllProjects()` (the name-enriched "ported
+ * extra" — the real Multica adapter has it, p6-projects-list-adapter-extra)
+ * when the adapter exposes it; falls back to `listAllProjectIds()` + raw-id
+ * display when it doesn't (the stub adapter, and any future adapter that
+ * hasn't grown the extra) — same presence-check-and-fallback shape as
+ * lib/mcp/server.mjs's scanAllIssues()/getStoryPullRequests().
+ * @param {{ listAllProjects?: () => {id: string, name: string}[], listAllProjectIds: () => string[] }} backlog
+ * @returns {{id: string, name: string}[]}
+ */
+export function listBoardProjects(backlog) {
+  if (typeof backlog.listAllProjects === 'function') {
+    return backlog.listAllProjects();
+  }
+  return backlog.listAllProjectIds().map((id) => ({ id, name: id }));
+}
+
+/**
+ * Board projects not yet present in the registry's `projects` list —
+ * `auriga project scan`'s candidates. READ-ONLY: never mutates `data`, never
+ * touches the registry file, never registers anything.
+ * @param {{ listAllProjects?: () => {id: string, name: string}[], listAllProjectIds: () => string[] }} backlog
+ * @param {{ projects?: object[] }} data
+ * @returns {{id: string, name: string}[]}
+ */
+export function scanUnregisteredProjects(backlog, data) {
+  const registered = new Set(((data && data.projects) || []).map((p) => p && p.id).filter(Boolean));
+  return listBoardProjects(backlog).filter((p) => p && p.id && !registered.has(p.id));
+}
+
+/**
+ * Is `id` a real project on the board right now, per a fresh scan? Used by
+ * `auriga project add` to reject a typo'd/nonexistent id before it's ever
+ * written to the registry (this story's own risk mitigation — see
+ * p6-project-cli.yaml's risks section).
+ * @param {{ listAllProjects?: () => {id: string, name: string}[], listAllProjectIds: () => string[] }} backlog
+ * @param {string} id
+ * @returns {boolean}
+ */
+export function isKnownBoardProject(backlog, id) {
+  return listBoardProjects(backlog).some((p) => p.id === id);
+}
+
+/**
+ * Registers `id`, or — idempotently, matching `agent init`'s own
+ * idempotency precedent (design-discussion.md Open Question 4) — updates an
+ * already-registered entry's name/notes/lane IN PLACE instead of erroring or
+ * duplicating it. Only the fields explicitly passed (not `undefined`) are
+ * changed on update; omitted fields are left exactly as they were. On first
+ * registration, an omitted `name` falls back to `id` (mirrors
+ * deriveProjectNames' own fallback), omitted `notes` falls back to `''`, and
+ * omitted `lane` falls back to `[]` (falls back to DEFAULT_LANE downstream,
+ * unchanged from today per deriveProjectLane's own contract).
+ *
+ * Pure: returns a NEW data object, never mutates the `data` argument.
+ * @param {{ dispatch_order?: string[], projects?: object[] }} data
+ * @param {{ id: string, name?: string, notes?: string, lane?: string[] }} fields
+ * @param {string} [now] ISO timestamp for a NEW registration's `registered_at` — injectable for tests
+ * @returns {{ dispatch_order?: string[], projects: object[] }}
+ */
+export function upsertProject(data, fields, now = new Date().toISOString()) {
+  const { id, name, notes, lane } = fields;
+  const projects = [...((data && data.projects) || [])];
+  const idx = projects.findIndex((p) => p && p.id === id);
+  if (idx === -1) {
+    projects.push({
+      id,
+      name: name || id,
+      notes: notes || '',
+      lane: lane || [],
+      registered_at: now,
+    });
+  } else {
+    const existing = projects[idx];
+    projects[idx] = {
+      ...existing,
+      name: name !== undefined ? name : existing.name,
+      notes: notes !== undefined ? notes : existing.notes,
+      lane: lane !== undefined ? lane : existing.lane,
+    };
+  }
+  return { ...data, projects };
+}
+
+/**
+ * Fully removes a registered project — identity, notes, AND lane assignment
+ * together, since p6-registry-core folds them into one record — plus any
+ * stray `dispatch_order` entry for the same id (defensive cleanup;
+ * deriveProjectIds() already filters dispatch_order to known-registered ids,
+ * so a lingering entry would be harmless, but leaving one behind on removal
+ * would be a confusing dangling reference in the committed file).
+ *
+ * Pure: returns a NEW data object, never mutates the `data` argument.
+ * @param {{ dispatch_order?: string[], projects?: object[] }} data
+ * @param {string} id
+ * @returns {{ removed: boolean, data: { dispatch_order?: string[], projects: object[] } }}
+ */
+export function removeProject(data, id) {
+  const before = (data && data.projects) || [];
+  const projects = before.filter((p) => p && p.id !== id);
+  const dispatch_order = ((data && data.dispatch_order) || []).filter((x) => x !== id);
+  return { removed: projects.length !== before.length, data: { ...data, projects, dispatch_order } };
 }
