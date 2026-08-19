@@ -1,0 +1,90 @@
+id: p5-install-script
+epic: p5-agent-mcp-integration
+title: docs/install.sh published via GitHub Pages + README top line
+status: pending
+complexity: low
+methodology: classic
+depends_on: [p5-agent-cli]
+
+description: |
+  A real `docs/install.sh` mirroring Portunus's shape (bash, `set -euo pipefail`,
+  installs the package then runs `auriga agent init` automatically), adapted for
+  Node/npm instead of Python/pipx. Published via the SAME GitHub Pages setup
+  `p4-auriga-branding` already stood up (`/docs` on `main`) — confirmed by research to
+  be simpler than Portunus's own separate `gh-pages`-branch setup: any file added to
+  `docs/` and pushed to `main` is immediately live at
+  `https://mdostal.github.io/auriga/install.sh`, no extra publish step needed.
+
+  Per operator sign-off (design-discussion.md Open Question 3), NO npm publish is in
+  scope for this epic — install.sh installs from the GitHub repo directly, mirroring
+  Portunus's own current (also-not-yet-actually-published) approach. Package name
+  `pantheon-auriga` (confirmed free on npm, mirrors Portunus's own
+  `portunus`->`pantheon-portunus` rename) is reserved for a future npm-publish epic,
+  not used here since there's no publish yet.
+
+  README.md's top line becomes the curl-pipe-bash one-liner:
+  `curl -fsSL https://mdostal.github.io/auriga/install.sh | bash`
+
+acceptance_criteria:
+  - "Given docs/install.sh, when run on a clean machine (or a machine without auriga installed), then it clones/installs the router+CLI package from GitHub and successfully runs `auriga agent init` at the end, matching Portunus's install.sh's own end-of-script behavior"
+  - "Given docs/install.sh is committed to main and pushed, then it is reachable at https://mdostal.github.io/auriga/install.sh (verify with a real curl against the live URL, not just a local file check)"
+  - "Given README.md, then its top line is the real curl-pipe-bash one-liner, matching install.sh's actual real behavior (not aspirational/future-tense text)"
+  - "Given the script is run twice in a row (idempotency), then the second run does not error or duplicate any installed state"
+
+steps:
+  - id: research
+    description: Read Portunus's real scripts/install.sh (git show 9621eb2:scripts/install.sh) in full for the exact structure to adapt, and confirm the current docs/ Pages setup from p4-auriga-branding
+    agent: researcher
+  - id: implement
+    description: Write docs/install.sh adapted for Node/npm (git clone or npm install from GitHub, then run `auriga agent init`), update README.md's top line
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Run the script for real on this machine (or a clean-enough simulation), verify idempotency, verify the live Pages URL actually serves it after push
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Confirm the script matches install.sh's real, verified behavior (no aspirational steps), confirm README's top line is accurate
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feat/p5-agent-mcp-integration
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  tech_stack:
+    language: "bash"
+  key_files:
+    - path: docs/index.html
+      purpose: "Already live via the same /docs-on-main Pages setup this story reuses — confirms the mechanism works without change"
+    - path: README.md
+      purpose: "Top line gets replaced with the real install one-liner"
+
+files_to_modify:
+  - file: docs/install.sh
+    change: "CREATE — the canonical install script, published as-is to GitHub Pages"
+  - file: README.md
+    change: "MODIFY — top line becomes the curl-pipe-bash one-liner"
+
+design_decisions:
+  - decision: "No npm publish this epic — install from GitHub directly"
+    rationale: "Operator sign-off, design-discussion.md Open Question 3. Mirrors Portunus's own current approach (its own npm-equivalent publish is also still pending)."
+  - decision: "Reuse the existing /docs-on-main Pages mechanism, no new branch/workflow"
+    rationale: "Confirmed by research to already work with zero extra setup, unlike Portunus's own gh-pages-branch approach which appears to need a manual/undiscovered publish step"
+
+cross_cutting:
+  - concern: documentation
+    action: "README.md's top line changes (user-facing behavior change) and a new public reference document (docs/install.sh) is added — both squarely inside this concern's applies_when"
+
+risks:
+  - severity: low
+    description: "install.sh running on a machine that already has a conflicting global `auriga` command (e.g. the unrelated npm package of the same name found during research) could collide"
+    mitigation: "Script should detect and warn on a pre-existing, different `auriga` on PATH rather than silently overwriting it"
+
+references:
+  - path: .pHive/epics/p5-agent-mcp-integration/docs/research-brief.md
+    relevant_excerpt: |
+      Section 1 — Portunus's install.sh full structure, and Section 5 — GitHub Pages
+      publishing mechanism comparison (Auriga's /docs-on-main is simpler).

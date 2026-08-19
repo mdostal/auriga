@@ -200,7 +200,25 @@ client-side state today and shouldn't gain a JS runtime just for this).
 - New runtime dependency: `@modelcontextprotocol/sdk` in `src/router/` (or wherever
   Slice 2 lands) — first new dependency since `p2-adapter-interface`.
 
-## 6. Open Questions
+## 6. Open Questions — RESOLVED (2026-08-18, operator sign-off, all as-recommended)
+
+1. **Write scope: fully read-only v1.** No write tools of any kind — not `createIssue`
+   (Slice 1 dropped entirely from this epic), not the pre-existing
+   `setIssueStatus`/`commentOnIssue`. Query tools only: list epics/stories with status,
+   get story detail, check what's blocked/in-flight. The unresolved autonomous-mutation
+   safety question (grill H1) is sidestepped by having nothing to mutate — a follow-on
+   epic can revisit write capability once that question has an actual answer.
+2. **Adapter target: real Multica-backed adapter by default**, matching
+   `auriga-router.mjs`'s own default. Stub available via the existing
+   `p2-adapter-interface` env-var switch for local dev — no new mechanism.
+3. **npm publish: out of scope.** `docs/install.sh` installs from GitHub directly,
+   mirroring Portunus's own current (also-not-yet-published) approach. No new
+   account/CI setup.
+4. **Showcase collapse: plain `<details>`/`<summary>` disclosure.** Zero JS, matches
+   the page's existing zero-client-state design. Does not remember dismissal across
+   visits — acceptable per operator sign-off.
+
+## 6 (superseded — original text kept for record)
 
 1. **Revised per grill V1/H1 — what write capability, if any, does the MCP server
    expose in v1?** Three real options, not two: **(a) fully read-only** — no write
