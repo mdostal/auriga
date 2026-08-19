@@ -113,6 +113,35 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
   }
 
+  // Every project in the workspace, as [{id, name}, ...] — a "ported extra"
+  // alongside listAllProjectIds above (NOT part of the BacklogAdapter typedef
+  // contract; see this file's header note and listAllIssues below for the
+  // established precedent). listAllProjectIds() discards every field but
+  // `.id`; this method keeps the display name too, confirmed via a real,
+  // live `multica project list --output json` call (p6-projects-list-
+  // adapter-extra's research step) to carry the field `title` — NOT `name`
+  // or `description` (neither exists on the real project object; the real
+  // shape is `{id, title, description, icon, status, created_at,
+  // updated_at, done_count, issue_count, lead_id, lead_type, priority,
+  // resource_count, workspace_id}`). Defensively falls back to the raw id
+  // when a project is somehow missing a title (never throws, never
+  // fabricates a name). Same run()/error-handling shape as
+  // listAllProjectIds: returns [] on any CLI failure so a caller (e.g.
+  // p6-project-cli's `auriga project scan`) can fall back to ID-only
+  // display.
+  function listAllProjects() {
+    try {
+      const res = run(['project', 'list', '--output', 'json']);
+      const ps = Array.isArray(res) ? res : (res && res.projects) || [];
+      return ps
+        .filter((p) => p && p.id)
+        .map((p) => ({ id: p.id, name: p.title || p.id }));
+    } catch (e) {
+      process.stderr.write('listAllProjects failed: ' + e.message + '\n');
+      return [];
+    }
+  }
+
   // Board-wide aggregate over listIssues. NOT part of the BacklogAdapter
   // typedef contract (that only requires per-project listIssues), but ported
   // verbatim from lib/multica.mjs's listAllIssues (per this story's
@@ -337,5 +366,6 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     // listCandidatePullRequests above) ----
     listAllIssues,
     listCandidatePullRequests,
+    listAllProjects,
   });
 }

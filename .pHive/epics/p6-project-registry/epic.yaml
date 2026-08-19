@@ -1,0 +1,60 @@
+name: p6-project-registry
+title: "P6: Standalone project registry — replaces hardcoded PROJECT_NAMES/IDS/LANE"
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+notes: |
+  Closes an already-documented gap: config-substrate.mjs's own "KNOWN GAP" comment
+  (from p1-router-capability-routing) says unmapped projects need "reconciliation
+  with Minerva/operator before this part of the epic can be completed." This epic is
+  that reconciliation mechanism — real auriga project scan/add/remove/list CLI
+  commands replacing hand-edited PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE object
+  literals, plus freeform per-project notes, all owned and stored by Auriga itself,
+  standalone (no Mnemosyne/pantheon-v2-l2 coupling — explicit operator constraint,
+  grounded in this repo's real "no pre-emptive integrations" rule and the
+  already-fully-stubbed pantheon-v2-l2 adapter as precedent for that boundary).
+
+  Full research/design-discussion/grill ceremony run. Research found PROJECT_NAMES is
+  purely cosmetic but PROJECT_IDS is the real, silent dispatch-eligibility gate
+  (order-sensitive), while PROJECT_LANE already degrades safely to DEFAULT_LANE when
+  unmapped. Grill (7 findings, 0 critical, 2 close to blocking) caught: the "4
+  active / 13 inert" migration framing missed that MINERVA is excluded from
+  PROJECT_IDS but load-bearing in PROJECT_LANE (pinned by an existing test's
+  exact-count assertion); reading the new registry file at ESM import time is a
+  genuinely new pattern with no precedent, and needs a real graceful-degrade path
+  since an unrelated existing test imports this module directly. Both resolved before
+  story decomposition.
+
+  Operator sign-off, resolving all open questions: registry file at
+  src/router/projects.json; migrate 5 entries (the 4 real PROJECT_IDS plus MINERVA,
+  per the PROJECT_LANE finding above); PROJECT_LANE (top-level "which agent lane
+  handles this project" assignment) IS in scope — operator's reasoning: Auriga's core
+  orchestration job is knowing what repo/director to hand a project's work to, which
+  is exactly what lane assignment is; the finer-grained hierarchy beneath that (a
+  director's own manager/coder/QA breakdown) is explicitly OUT of scope, staying that
+  receiving director's own configuration, not Auriga's to manage; `add` is idempotent
+  (re-running updates name/notes/lane rather than erroring, matching agent init's own
+  precedent from p5).
+
+  See docs/research-brief.md, docs/design-discussion.md, docs/grill-record.md for full
+  detail.
+
+stories:
+  - id: p6-projects-list-adapter-extra
+    title: "listAllProjects() ported-extra adapter method (id+name, not just id)"
+    complexity: low
+    depends_on: []
+  - id: p6-registry-core
+    title: Project registry storage + config-substrate.mjs derivation (PROJECT_NAMES/IDS/LANE)
+    complexity: high
+    depends_on: [p6-projects-list-adapter-extra]
+  - id: p6-project-cli
+    title: "auriga project scan/add/remove/list CLI commands"
+    complexity: medium
+    depends_on: [p6-registry-core]

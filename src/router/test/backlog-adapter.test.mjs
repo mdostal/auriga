@@ -337,6 +337,77 @@ test('getIssuePullRequests: a PR matching ONLY via a short story-key (never the 
   assert.deepEqual(backlog.getIssuePullRequests('PAN-1234'), [], 'the raw-identifier-only heuristic must miss a slug-only-matching PR (documents the gap; router call sites no longer rely on this method for matching)');
 });
 
+// ---- listAllProjects (ported extra, p6-projects-list-adapter-extra): keeps
+// the display-name field listAllProjectIds() discards. Mocked shape below is
+// the REAL confirmed `multica project list --output json` response (live
+// call made during this story's research step) — every project object
+// actually carries `title` as its display-name field (not `name`, not
+// `description`; the real object also has description/icon/status/
+// created_at/updated_at/done_count/issue_count/lead_id/lead_type/priority/
+// resource_count/workspace_id, none of which listAllProjects needs to keep).
+
+test('listAllProjects (ported extra): returns [{id, name}] using the real confirmed `title` field', async (t) => {
+  makeExecMock(t, {
+    multica: () => [
+      {
+        id: '915ec7de-f13c-4bf3-b666-1f2d7d25ce16',
+        title: 'Mnemosyne',
+        description: 'the Memory god',
+        icon: '\u{1F9E0}',
+        status: 'planned',
+        created_at: '2026-07-27T16:26:07Z',
+        updated_at: '2026-07-27T16:26:07Z',
+        done_count: 24,
+        issue_count: 38,
+        lead_id: null,
+        lead_type: null,
+        priority: 'none',
+        resource_count: 1,
+        workspace_id: '7feca4c9-01be-4b1a-826f-50c560a58d43',
+      },
+      {
+        id: 'aeb1033d-4ab9-4da6-b798-8dc569e75cc9',
+        title: 'Tools',
+        description: 'deployable domain/business tool plugins',
+      },
+    ],
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.deepEqual(backlog.listAllProjects(), [
+    { id: '915ec7de-f13c-4bf3-b666-1f2d7d25ce16', name: 'Mnemosyne' },
+    { id: 'aeb1033d-4ab9-4da6-b798-8dc569e75cc9', name: 'Tools' },
+  ]);
+});
+
+test('listAllProjects parses either a bare array or a {projects:[...]} envelope, same as listAllProjectIds', async (t) => {
+  makeExecMock(t, { multica: () => ({ projects: [{ id: 'p1', title: 'Project One' }] }) });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.deepEqual(backlog.listAllProjects(), [{ id: 'p1', name: 'Project One' }]);
+});
+
+test('listAllProjects: a project missing `title` entirely falls back to its raw id, never throws', async (t) => {
+  makeExecMock(t, { multica: () => [{ id: 'no-title-proj' }] });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.deepEqual(backlog.listAllProjects(), [{ id: 'no-title-proj', name: 'no-title-proj' }]);
+});
+
+test('listAllProjects degrades to [] (does not throw) on CLI failure', async (t) => {
+  makeExecMock(t, { multica: () => new Error('multica: unauthorized') });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.deepEqual(backlog.listAllProjects(), []);
+});
+
+test('listAllProjects: the stub adapter does NOT implement this ported extra (no .listAllProjects property at all), matching listAllIssues/listCandidatePullRequests', async (t) => {
+  const { createStubBacklogAdapter } = await import('../lib/adapters/stub/backlog.mjs');
+  const stub = createStubBacklogAdapter();
+  assert.equal('listAllProjects' in stub, false);
+  assert.equal(typeof stub.listAllProjects, 'undefined');
+});
+
 // ---- listCandidatePullRequests: the raw, UNFILTERED board-wide scan that
 // auriga-router.mjs's cycle() now calls ONCE per cycle and reuses across
 // every issue, applying core.mjs's own prMatchesStory/prIdentityMatchesStory

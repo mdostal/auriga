@@ -10,6 +10,10 @@
 // byte-identical values, including the KNOWN GAP comment below. This is
 // explicitly a move, not a fix: see design_decisions in
 // .pHive/epics/p2-adapter-interface/stories/p2-multica-backlog-adapter.yaml.
+//
+// PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE are now DERIVED (p6-registry-core),
+// not hardcoded — see the registry-derivation block below, after AGENTS.
+import { loadRealRegistryConfig } from './project-registry.mjs';
 
 // Project -> agent-lane map, agent metadata, and caps.
 // All IDs verified live against workspace Pantheon (7feca4c9-...).
@@ -74,34 +78,41 @@ export const AGENTS = {
   },
 };
 
-// Project UUID -> title (for logs/lane names).
-// ORDER MATTERS: selection scans in this order. Aligned Codex/Opencode lanes
-// first (real, meaningful completions), Consus (Claude) LAST so it is drained
-// sparingly only after cheaper lanes are saturated.
-export const PROJECT_NAMES = {
-  'd78a9f5d-8792-45e8-89e0-bd7b916564ca': 'Auriga',        // -> auriga-dev (Codex, aligned repo)
-  '8cb0298a-8a45-45c2-8d09-bc219e2d8a82': 'Heimdall',      // -> heimdall-dev(Opencode)+codex (aligned repo)
-  '6327fdaf-789e-4290-ab41-1421957b55c6': 'Minerva',       // -> auriga-dev (Codex)
-  'd8ecfab4-79bd-4290-8127-290885f01f38': 'Pantheon Core',
-  '4f3f2ae9-cb56-4ef7-b731-50f61d79dddb': 'Janus',
-  '0f2eeb08-b0d4-49c3-be10-05301b5e0b32': 'Portunus',
-  '1759cd74-1723-4dfb-82cf-8b2696bf080b': 'Argus',
-  '4fcccf2f-cf19-46e1-a5f0-8303984e423a': 'Vesta',
-  '441b73b8-ee09-41fd-b8d2-1e18baa1d8cf': 'Votum',
-  'fcdf7fdf-9b87-4c4a-9a4c-e86471a0b2d9': 'Hellsing',
-  '66963847-df7e-46e8-b51a-82eebdf82208': 'Stimula',
-  'a0b04ced-5ad6-4249-bb1a-115b88c532d7': 'CADEX',
-  '6483d6e1-83eb-4c7d-822a-c2844087ff7f': 'Clients Dashboard',
-  '6d6a69b1-c279-4664-8da7-79cb067c28eb': 'Personal Dashboard',
-  '7dcbb8d1-e53e-4ac4-bfa5-2016c223bd32': 'House Hunting',
-  '1001f225-9c42-4b00-b50a-d16cd06fe181': 'Gig Radar',
-  '282343e2-b741-4438-bc80-b93c34819a96': 'Consus',        // -> consus-dev (Claude) LAST, sparing
-};
+// Project UUID -> title, all dispatch-eligible project ids (order-sensitive —
+// selection scans in this order), and project UUID -> ordered candidate agent
+// lanes are now DERIVED from the committed registry file (src/router/projects.json,
+// p6-registry-core) instead of hardcoded object literals — this is that
+// reconciliation mechanism the KNOWN GAP below used to say was still needed.
+// See lib/project-registry.mjs for the read/derive logic and that file's own
+// header comment for the injected-dependency testability pattern.
+//
+// GRACEFUL DEGRADE (grill finding H2, p6-registry-core): this read happens at
+// ES MODULE IMPORT TIME — a genuinely new pattern in this codebase. A missing
+// or malformed projects.json must NEVER throw and crash this import (an
+// unrelated existing test, test/spawn-adapter.test.mjs, imports PROJECT_LANE
+// etc. from this exact module) — loadRealRegistryConfig() below already
+// catches that internally, logs a loud stderr warning, and degrades to empty
+// PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE (see project-registry.mjs). Test-only
+// path override: AURIGA_PROJECTS_REGISTRY_PATH (see project-registry.mjs),
+// unset in production.
+const registryConfig = loadRealRegistryConfig();
 
-// All project IDs the router scans.
-export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', '282343e2-b741-4438-bc80-b93c34819a96', 'd8ecfab4-79bd-4290-8127-290885f01f38']; // Aligned lanes (Auriga/Heimdall/Consus) PLUS Pantheon Core (d8ecfab4): the Consus ideabox drops [idea] seeds here and they must be scanned so the router routes them to the Minerva planning lane (dogfood front-half loop, PAN-6646). Pantheon Core now closes the FULL loop: seeds -> minerva-dev planning, AND the decomposed non-seed child stories Minerva files back INTO this same project -> auriga-build (see PROJECT_LANE[PANTHEON_CORE]). The other unaligned projects still need agents+repos before their tickets do real work
+// Project UUID -> title (for logs/lane names). Cosmetic only — every real read
+// site (core.mjs) has a safe raw-UUID fallback (`cfg.PROJECT_NAMES[id] || id`).
+export const PROJECT_NAMES = registryConfig.PROJECT_NAMES;
 
-// KNOWN GAP (found during implementation of p1-router-capability-routing, not fixed here):
+// All project IDs the router scans — the REAL, order-sensitive dispatch-
+// eligibility gate (core.mjs's selectAssignments/detectCascadeDispatch filter
+// to this exact set; a project missing from it is silently excluded from real
+// dispatch, no log line fires). Sourced from projects.json's `dispatch_order`
+// (aligned lanes first — Auriga/Heimdall — PLUS Pantheon Core, the Consus
+// ideabox seed-drop project; Consus itself scanned LAST so it's drained
+// sparingly). See projects.json's own header comment for the full rationale.
+export const PROJECT_IDS = registryConfig.PROJECT_IDS;
+
+// KNOWN GAP (found during implementation of p1-router-capability-routing;
+// PARTIALLY reconciled by p6-registry-core, which turned the hand-edit into a
+// real, operator-driven registry — the underlying gap itself is unchanged):
 // the epic's plan named 8 "unmapped projects" needing PROJECT_LANE entries —
 // Tools, flayr, lct, il, ps, hf, analytics, tree — but only "Tools"
 // (aeb1033d-4ab9-4da6-b798-8dc569e75cc9) exists as a real Multica project; the
@@ -110,10 +121,10 @@ export const PROJECT_IDS = ['d78a9f5d-8792-45e8-89e0-bd7b916564ca', '8cb0298a-8a
 // is also not in PROJECT_IDS today (deliberately — see the ALIGNED-ONLY
 // comment above, "14 unaligned projects need agents+repos, Mathew AM
 // decision"). Fabricating routing entries for non-existent projects would be
-// wrong, and expanding PROJECT_IDS is a separate, already-gated decision.
-// Needs reconciliation with Minerva/operator before this part of the epic can
-// be completed. This same 7-unmapped-names gap carries through PROJECT_LANE
-// below, which also does not (and must not) have entries for those 7.
+// wrong, and expanding PROJECT_IDS is a separate, already-gated decision
+// (now: a separate `auriga project add` invocation, once p6-project-cli
+// lands). This same 7-unmapped-names gap carries through PROJECT_LANE below,
+// which also does not (and must not) have entries for those 7.
 
 // ============================================================================
 // LANE MAPS + RUNTIME_CAP (moved here VERBATIM from lib/config.mjs by
@@ -132,30 +143,30 @@ export const RUNTIME_CAP = {
   codex: 4,
 };
 
-// Project -> ordered candidate agent lanes.
-// Aligned lanes (agent repo matches the project) are preferred and listed first.
-// "Others" spread across the two Codex agents; Claude used sparingly (Consus only).
-const CONSUS = '282343e2-b741-4438-bc80-b93c34819a96';
-const HEIMDALL = '8cb0298a-8a45-45c2-8d09-bc219e2d8a82';
-const AURIGA = 'd78a9f5d-8792-45e8-89e0-bd7b916564ca';
-const MINERVA = '6327fdaf-789e-4290-ab41-1421957b55c6';
-const PANTHEON_CORE = 'd8ecfab4-79bd-4290-8127-290885f01f38';
-
-export const PROJECT_LANE = {
-  [CONSUS]: ['consus-dev'], // aligned repo; Claude — sparing
-  [HEIMDALL]: ['heimdall-dev', 'heimdall-dev-codex'], // aligned repo (Opencode + Codex)
-  [AURIGA]: ['auriga-dev'], // aligned repo (Codex)
-  [MINERVA]: ['auriga-dev'], // no dedicated agent; nearest Codex lane
-  // Pantheon Core is the dogfood seed drop (Consus ideabox) AND where Minerva now files the
-  // decomposed child stories of those seeds (a seed dropped here yields stories here — see
-  // Minerva's fileStoriesToMultica project resolution). Seeds themselves still route to
-  // minerva-dev (the isSeed check in core.mjs runs FIRST); this lane applies only to the
-  // NON-seed decomposed build-stories. They must never fall back to DEFAULT_LANE (codex/opencode
-  // have no plugin-hive and self-block on /hive:execute) — route them to the claude+hive BUILD
-  // lane. Minerva's stories are also hive-shaped, so isHiveStory routes most of them via
-  // HIVE_LANE anyway; this entry closes the gap for any decomposed story that isn't hive-shaped.
-  [PANTHEON_CORE]: ['auriga-build'],
-};
+// Project -> ordered candidate agent lanes. DERIVED (p6-registry-core) from
+// projects.json's per-project `lane` field — see registryConfig above and
+// project-registry.mjs's deriveProjectLane(). Aligned lanes (agent repo
+// matches the project) are preferred and listed first. "Others" spread across
+// the two Codex agents; Claude used sparingly (Consus only). Unchanged
+// semantics from the former hardcoded literal, including:
+//   - Minerva: no dedicated agent; nearest Codex lane (auriga-dev) — present
+//     here despite being ABSENT from PROJECT_IDS above (dispatch-ineligible
+//     but routing-policy-load-bearing; see projects.json's Minerva entry).
+//   - Pantheon Core: the dogfood seed drop (Consus ideabox) AND where Minerva
+//     now files the decomposed child stories of those seeds (a seed dropped
+//     here yields stories here — see Minerva's fileStoriesToMultica project
+//     resolution). Seeds themselves still route to minerva-dev (the isSeed
+//     check in core.mjs runs FIRST); this lane applies only to the NON-seed
+//     decomposed build-stories. They must never fall back to DEFAULT_LANE
+//     (codex/opencode have no plugin-hive and self-block on /hive:execute) —
+//     route them to the claude+hive BUILD lane. Minerva's stories are also
+//     hive-shaped, so isHiveStory routes most of them via HIVE_LANE anyway;
+//     this entry closes the gap for any decomposed story that isn't hive-shaped.
+// A project absent from this map (no `lane` in its registry entry, or
+// unregistered entirely) falls back to DEFAULT_LANE below — unconditional,
+// unchanged fallback (core.mjs's chooseAgentForProject:
+// `cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE`).
+export const PROJECT_LANE = registryConfig.PROJECT_LANE;
 
 // Fallback lane for every other project: spread across the two Codex agents.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.

@@ -1,0 +1,74 @@
+{
+  "//": [
+    "Standalone project registry (p6-registry-core). Replaces config-substrate.mjs's",
+    "hardcoded PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE object literals — that module now",
+    "derives those three exports from this file at import time (lib/project-registry.mjs).",
+    "Edit via `auriga project add/remove` (p6-project-cli) once that lands; hand-editing",
+    "this file directly works too (see design-discussion.md's HUMAN_NAMES precedent) but",
+    "is not concurrency-safe against a simultaneous CLI write (accepted low-probability",
+    "risk, grill finding H4 — single-operator tool, not a multi-writer service).",
+    "",
+    "`dispatch_order`: the real, order-sensitive dispatch-eligibility gate (mirrors",
+    "today's PROJECT_IDS exactly). A project id NOT in this list is SILENTLY excluded",
+    "from real dispatch/cascade — see core.mjs's selectAssignments/detectCascadeDispatch.",
+    "Order determines dispatch priority (aligned lanes first, Consus last so it's",
+    "drained sparingly). A project can be registered below (known to Auriga, has a",
+    "lane) without being dispatch-eligible — see the Minerva entry.",
+    "",
+    "`projects`: every project Auriga knows about. Each entry is",
+    "{id, name, notes, lane, registered_at}. `lane` is an optional array of candidate",
+    "agent-lane names (mirrors PROJECT_LANE's existing shape); absent/empty falls back",
+    "to DEFAULT_LANE, unchanged from today's behavior.",
+    "",
+    "Seeded 2026-08-19 by p6-registry-core: migrated verbatim from",
+    "config-substrate.mjs's hardcoded PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE (the 4 real",
+    "PROJECT_IDS entries plus Minerva, which is PROJECT_LANE-load-bearing but",
+    "dispatch-ineligible today — see that story's migration notes). The other ~12 names",
+    "formerly in PROJECT_NAMES are deliberately NOT migrated here — left for a future",
+    "`auriga project scan` to re-surface as real candidates, not silently dropped or",
+    "silently auto-added."
+  ],
+  "dispatch_order": [
+    "d78a9f5d-8792-45e8-89e0-bd7b916564ca",
+    "8cb0298a-8a45-45c2-8d09-bc219e2d8a82",
+    "282343e2-b741-4438-bc80-b93c34819a96",
+    "d8ecfab4-79bd-4290-8127-290885f01f38"
+  ],
+  "projects": [
+    {
+      "id": "d78a9f5d-8792-45e8-89e0-bd7b916564ca",
+      "name": "Auriga",
+      "notes": "Aligned repo, Codex lane (auriga-dev). Scanned first in dispatch order (aligned lanes first). Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
+      "lane": ["auriga-dev"],
+      "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "8cb0298a-8a45-45c2-8d09-bc219e2d8a82",
+      "name": "Heimdall",
+      "notes": "Aligned repo, Opencode + Codex lanes (heimdall-dev, heimdall-dev-codex). Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
+      "lane": ["heimdall-dev", "heimdall-dev-codex"],
+      "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "282343e2-b741-4438-bc80-b93c34819a96",
+      "name": "Consus",
+      "notes": "Aligned repo, Claude lane (consus-dev). Scanned LAST in dispatch order so it is drained sparingly, only after cheaper lanes are saturated. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
+      "lane": ["consus-dev"],
+      "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "d8ecfab4-79bd-4290-8127-290885f01f38",
+      "name": "Pantheon Core",
+      "notes": "Dogfood seed-drop project: Consus ideabox [idea] seeds land here and route to the minerva-dev planning lane; Minerva's decomposed non-seed child stories are filed back into this same project and route to the auriga-build (claude+hive) lane. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
+      "lane": ["auriga-build"],
+      "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "6327fdaf-789e-4290-ab41-1421957b55c6",
+      "name": "Minerva",
+      "notes": "Dispatch-ineligible today (deliberately absent from dispatch_order above, exactly as it was absent from the hardcoded PROJECT_IDS) but routing-policy-load-bearing: PROJECT_LANE routed it to auriga-dev (no dedicated agent, nearest Codex lane) and that lane assignment is preserved here. Registered so `auriga project scan` doesn't perpetually flag it as wholly undiscovered. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_LANE by p6-registry-core.",
+      "lane": ["auriga-dev"],
+      "registered_at": "2026-08-19T00:00:00Z"
+    }
+  ]
+}
