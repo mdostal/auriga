@@ -4,10 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Auriga auto-router: the decide+assign layer that self-drains the Multica board by routing unassigned todos to Pantheon swarm agents.",
-  "bin": { "auriga-router": "./auriga-router.mjs" },
+  "bin": {
+    "auriga-router": "./auriga-router.mjs"
+  },
   "scripts": {
     "test": "node --experimental-test-module-mocks --test test/*.test.mjs",
     "once": "node auriga-router.mjs --once",
     "dry": "node auriga-router.mjs --once --dry-run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
   }
 }
