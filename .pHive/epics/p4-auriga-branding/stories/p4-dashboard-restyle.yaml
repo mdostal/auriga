@@ -1,7 +1,9 @@
 id: p4-dashboard-restyle
 epic: p4-auriga-branding
 title: Restyle src/ui/ dashboard to Star Atlas visual language, keep tab navigation
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: medium
 methodology: classic
 depends_on: []

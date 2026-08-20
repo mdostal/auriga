@@ -1,7 +1,9 @@
 id: p3-read-layer-and-api
 epic: p3-auriga-ui
 title: Read layer + minimal JSON API over .pHive/ state
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: low
 methodology: classic
 depends_on: []

@@ -1,7 +1,9 @@
 id: p6-project-cli
 epic: p6-project-registry
 title: "auriga project scan/add/remove/list CLI commands"
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: medium
 methodology: classic
 depends_on: [p6-registry-core]

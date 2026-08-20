@@ -1,7 +1,9 @@
 id: p2-router-cutover
 epic: p2-adapter-interface
 title: Rewire cycle() and all mcaImpl.* call sites to the backlog/spawn adapter boundary
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: high
 methodology: classic
 depends_on: [p2-multica-backlog-adapter, p2-multica-spawn-adapter]

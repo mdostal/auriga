@@ -1,7 +1,9 @@
 id: p1-router-capability-routing
 epic: p1-dispatch-throughput
 title: Fix capability-aware routing for hive stories
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: medium
 methodology: classic
 depends_on: []

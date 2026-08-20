@@ -1,7 +1,9 @@
 id: p5-agent-cli
 epic: p5-agent-mcp-integration
 title: "auriga agent init / agent status / mcp CLI commands"
-status: complete
+status: shipped
+shipped_at: "2026-08-20T00:20:08Z"
+release_id: "v0.1.0"
 complexity: medium
 methodology: classic
 depends_on: [p5-mcp-server]
