@@ -1,7 +1,7 @@
 id: p6-project-cli
 epic: p6-project-registry
 title: "auriga project scan/add/remove/list CLI commands"
-status: pending
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p6-registry-core]

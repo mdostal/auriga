@@ -1,7 +1,7 @@
 id: p2-multica-spawn-adapter
 epic: p2-adapter-interface
 title: Port dispatch/assign/rerun + lane maps into createMulticaSpawnAdapter
-status: done
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p2-adapter-interfaces-and-stubs]

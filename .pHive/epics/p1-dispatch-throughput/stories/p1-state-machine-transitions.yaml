@@ -1,7 +1,7 @@
 id: p1-state-machine-transitions
 epic: p1-dispatch-throughput
 title: Implement pure-code state-machine transitions (todo→in_review→done)
-status: pending
+status: complete
 complexity: high
 methodology: classic
 depends_on: []

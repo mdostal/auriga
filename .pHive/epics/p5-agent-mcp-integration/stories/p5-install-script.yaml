@@ -1,7 +1,7 @@
 id: p5-install-script
 epic: p5-agent-mcp-integration
 title: docs/install.sh published via GitHub Pages + README top line
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: [p5-agent-cli]

@@ -1,7 +1,7 @@
 id: p1-router-human-filter
 epic: p1-dispatch-throughput
 title: Exclude human-todos from agent dispatch pool
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: []

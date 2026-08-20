@@ -1,7 +1,7 @@
 id: p1-triage-human-queue
 epic: p1-dispatch-throughput
 title: Move human-todos to human queue
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: [p1-router-human-filter]

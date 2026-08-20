@@ -1,7 +1,7 @@
 id: p2-adapter-interfaces-and-stubs
 epic: p2-adapter-interface
 title: Define backlogAdapter/spawnAdapter shapes and ship stub implementations
-status: done
+status: complete
 complexity: medium
 methodology: classic
 depends_on: []

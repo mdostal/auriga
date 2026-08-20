@@ -1,7 +1,7 @@
 id: p1-state-machine-auto-unblock
 epic: p1-dispatch-throughput
 title: Implement auto-unblock when dependencies reach done
-status: pending
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p1-state-machine-transitions]

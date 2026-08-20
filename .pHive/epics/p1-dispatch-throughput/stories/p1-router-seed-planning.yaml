@@ -1,7 +1,7 @@
 id: p1-router-seed-planning
 epic: p1-dispatch-throughput
 title: Route unplanned seeds to Minerva planning lane
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: []

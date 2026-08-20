@@ -1,7 +1,7 @@
 id: p1-triage-seeds-planning
 epic: p1-dispatch-throughput
 title: Route mis-dispatched seeds back to Minerva planning
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: [p1-router-seed-planning]

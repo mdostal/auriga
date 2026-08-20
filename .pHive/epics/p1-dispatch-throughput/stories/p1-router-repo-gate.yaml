@@ -1,7 +1,7 @@
 id: p1-router-repo-gate
 epic: p1-dispatch-throughput
 title: Add repo-provisioning gate to prevent dispatch failures
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: []

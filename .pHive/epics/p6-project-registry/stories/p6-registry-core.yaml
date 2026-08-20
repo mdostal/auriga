@@ -1,7 +1,7 @@
 id: p6-registry-core
 epic: p6-project-registry
 title: Project registry storage + config-substrate.mjs derivation (PROJECT_NAMES/IDS/LANE)
-status: pending
+status: complete
 complexity: high
 methodology: classic
 depends_on: [p6-projects-list-adapter-extra]

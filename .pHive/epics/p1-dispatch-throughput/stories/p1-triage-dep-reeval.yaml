@@ -1,7 +1,7 @@
 id: p1-triage-dep-reeval
 epic: p1-dispatch-throughput
 title: Re-evaluate dependency-wait blocks after state-machine lands
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: [p1-state-machine-auto-unblock]

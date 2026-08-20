@@ -1,7 +1,7 @@
 id: p5-mcp-server
 epic: p5-agent-mcp-integration
 title: Operator-side MCP server (read-only query tools)
-status: pending
+status: complete
 complexity: high
 methodology: classic
 depends_on: []

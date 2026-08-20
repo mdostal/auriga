@@ -1,7 +1,7 @@
 id: p2-multica-backlog-adapter
 epic: p2-adapter-interface
 title: Port lib/multica.mjs's issue CRUD + gh PR-discovery into createMulticaBacklogAdapter
-status: done
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p2-adapter-interfaces-and-stubs]

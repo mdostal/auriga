@@ -1,7 +1,7 @@
 id: p6-projects-list-adapter-extra
 epic: p6-project-registry
 title: "listAllProjects() ported-extra adapter method (id+name, not just id)"
-status: pending
+status: complete
 complexity: low
 methodology: classic
 depends_on: []

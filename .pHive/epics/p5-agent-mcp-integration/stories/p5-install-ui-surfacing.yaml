@@ -1,7 +1,7 @@
 id: p5-install-ui-surfacing
 epic: p5-agent-mcp-integration
 title: Collapsible install/interact surface in dashboard + showcase page
-status: pending
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p5-install-script]

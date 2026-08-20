@@ -1,7 +1,7 @@
 id: p3-frontend-scaffold-epics-list
 epic: p3-auriga-ui
 title: Frontend scaffold (Vite+Tailwind+shadcn) + epics list view wired to the real API
-status: done
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p3-read-layer-and-api]

@@ -1,7 +1,7 @@
 id: p1-triage-bulk-reassign
 epic: p1-dispatch-throughput
 title: Bulk reassign codex-self-blocked stories to claude+hive lanes
-status: pending
+status: complete
 complexity: medium
 methodology: classic
 depends_on: [p1-router-capability-routing, p1-state-machine-transitions]

@@ -1,7 +1,7 @@
 id: p1-validation-end-to-end
 epic: p1-dispatch-throughput
 title: Validate end-to-end — one build story produces real merged PR + reaches done
-status: pending
+status: complete
 complexity: high
 methodology: classic
 depends_on: [p1-router-capability-routing, p1-router-seed-planning, p1-router-repo-gate, p1-state-machine-transitions, p1-state-machine-auto-unblock, p1-router-human-filter]

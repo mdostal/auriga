@@ -1,7 +1,7 @@
 id: p4-github-pages-showcase
 epic: p4-auriga-branding
 title: Public GitHub Pages showcase page (Star Atlas, near-as-is + real marketing content)
-status: pending
+status: complete
 complexity: medium
 methodology: classic
 depends_on: []

@@ -1,7 +1,7 @@
 id: p2-pantheon-l2-stub-and-docs
 epic: p2-adapter-interface
 title: Add the documented pantheon-v2-l2 stub adapter and close out doc updates
-status: done
+status: complete
 complexity: low
 methodology: classic
 depends_on: [p2-adapter-interfaces-and-stubs]
