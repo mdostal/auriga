@@ -26,24 +26,38 @@
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
-import { createMulticaBacklogAdapter } from './lib/adapters/multica/backlog.mjs';
-import { createMulticaSpawnAdapter } from './lib/adapters/multica/spawn.mjs';
+import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
-// no CLI call happens until a method is actually invoked), exactly mirroring
-// the old `import * as mca from './lib/multica.mjs'` singleton-module
-// pattern. reviewRepoOwner/reviewSearchRepos are wired from cfg so the
-// backlog adapter's internal gh-based PR discovery (which folded in what
-// used to be the router's own ghListRepos/ghOpenPrs/ghPrs calls) searches
-// the SAME repo set live behavior already depended on — omitting these would
-// silently break PR discovery (false-done + review-dispatch would find no
-// PRs). verifyDelayMs/lane-map fields mirror the router's live CAPS/lane
-// config so a future describeLanes() consumer sees byte-identical values.
-const defaultBacklog = createMulticaBacklogAdapter({
-  reviewRepoOwner: cfg.REVIEW_REPO_OWNER,
-  reviewSearchRepos: cfg.REVIEW_SEARCH_REPOS,
-});
-const defaultSpawn = createMulticaSpawnAdapter({
+// no HTTP call happens until a method is actually invoked), exactly
+// mirroring the old `import * as mca from './lib/multica.mjs'`
+// singleton-module pattern. verifyDelayMs/lane-map fields mirror the
+// router's live CAPS/lane config so a future describeLanes() consumer sees
+// byte-identical values.
+//
+// Cutover (pantheon-owns-multica-board-bridge epic): these were
+// createMulticaBacklogAdapter/createMulticaSpawnAdapter (this file's own
+// direct-to-Multica adapters, ./lib/adapters/multica/{backlog,spawn}.mjs),
+// which shelled out to the native `multica` CLI binary -- a real,
+// standing architecture violation (Auriga integrating with Multica
+// directly) that also could not run inside this container at all. Now
+// routed exclusively through Pantheon's own backlog API -- see
+// ./lib/adapters/pantheon-v2-l2/README.md for the full rationale and its
+// documented, deliberate scope boundaries.
+//
+// KNOWN GAP, carried over from that cutover, not silently absorbed: the
+// pantheon-v2-l2 backlog adapter's getIssuePullRequests() returns Multica's
+// native issue<->PR linkage only -- it does NOT port the old adapter's
+// GitHub-based gh-scan fallback (a separate, non-Multica integration, out
+// of this epic's scope). That native linkage was previously described as
+// "empty in practice" -- so PR-based verification (false-done detection,
+// review-dispatch's PR matching) may find fewer/no PRs until a follow-up
+// story ports GitHub discovery into this adapter too. Does not block board
+// reading, status transitions, or initial dispatch -- only later-lifecycle
+// PR-verification steps, which tonight's freshly-filed board items don't
+// reach yet.
+const defaultBacklog = createPantheonV2L2BacklogAdapter();
+const defaultSpawn = createPantheonV2L2SpawnAdapter({
   verifyDelayMs: cfg.CAPS.verifyDelayMs,
   projectLane: cfg.PROJECT_LANE,
   defaultLane: cfg.DEFAULT_LANE,
