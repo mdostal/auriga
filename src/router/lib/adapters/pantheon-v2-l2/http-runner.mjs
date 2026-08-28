@@ -33,14 +33,18 @@ export function makeHttpRun(execFileSync, baseUrl) {
       '--max-time', String(DEFAULT_TIMEOUT_SECONDS),
       '-X', method,
       url,
-      '-H', 'content-type: application/json',
       // Appends the HTTP status code as its own trailing line so this
       // synchronous, no-headers-API call can distinguish success from
       // failure without a second round trip.
       '-w', '\n%{http_code}',
     ];
+    // Only set content-type + a body when there IS a body -- Pantheon's real
+    // Fastify server (confirmed live: rerunIssue()'s no-body POST) rejects a
+    // request carrying `content-type: application/json` with an EMPTY body
+    // (FST_ERR_CTP_EMPTY_JSON_BODY), so the header must not be sent
+    // unconditionally.
     if (body !== undefined) {
-      args.push('-d', JSON.stringify(body));
+      args.push('-H', 'content-type: application/json', '-d', JSON.stringify(body));
     }
 
     const out = execFileSync('curl', args, {

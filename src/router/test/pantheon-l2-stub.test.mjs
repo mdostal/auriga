@@ -39,7 +39,7 @@ function makeCurlMock(t, handler) {
   const fn = t.mock.fn((cmd, args) => {
     if (cmd !== 'curl') throw new Error('unexpected exec cmd: ' + cmd);
     const parsed = parseCurlArgs(args);
-    calls.push(parsed);
+    calls.push({ ...parsed, rawArgs: args });
     const result = handler(parsed);
     if (result instanceof Error) throw result;
     const bodyText = result.body === undefined ? '' : JSON.stringify(result.body);
@@ -230,6 +230,19 @@ test('rerunIssue() POSTs with no body and propagates a failure', async (t) => {
   assert.equal(calls[0].method, 'POST');
   assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/rerun`);
   assert.equal(calls[0].body, undefined);
+});
+
+test('a bodyless request never sends a content-type header -- Pantheon\'s real Fastify server rejects content-type + empty body (FST_ERR_CTP_EMPTY_JSON_BODY, confirmed live 2026-08-28)', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.rerunIssue('PAN-1');
+
+  assert.ok(
+    !calls[0].rawArgs.includes('content-type: application/json'),
+    'a bodyless curl call must not set content-type at all',
+  );
 });
 
 test('unassignIssue() POSTs to the unassign route and propagates a failure', async (t) => {
