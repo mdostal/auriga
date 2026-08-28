@@ -32,7 +32,8 @@
     "d78a9f5d-8792-45e8-89e0-bd7b916564ca",
     "8cb0298a-8a45-45c2-8d09-bc219e2d8a82",
     "282343e2-b741-4438-bc80-b93c34819a96",
-    "d8ecfab4-79bd-4290-8127-290885f01f38"
+    "d8ecfab4-79bd-4290-8127-290885f01f38",
+    "032ea2e7-39b0-46d4-804e-57e74f627310"
   ],
   "projects": [
     {
@@ -62,6 +63,13 @@
       "notes": "Dogfood seed-drop project: Consus ideabox [idea] seeds land here and route to the minerva-dev planning lane; Minerva's decomposed non-seed child stories are filed back into this same project and route to the auriga-build (claude+hive) lane. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
       "lane": ["auriga-build"],
       "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "032ea2e7-39b0-46d4-804e-57e74f627310",
+      "name": "Pantheon Core",
+      "notes": "Dogfood seed-drop project, REAL workspace (f32af269-7b85-48d0-8a1b-5b09125b12b4) -- created 2026-08-28 because the older 'Pantheon Core' entry above (d8ecfab4-...) is scoped to a DIFFERENT, stale Multica workspace and does not exist in this one (confirmed live: `project not found in this workspace` when decision-bridge.ts tried to file a ticket there). Consus decision/idea seeds land here (via core-api's DECISION_SEED_PROJECT_ID override) and route to the minerva-dev planning lane via core.mjs's isSeed() check (overrides this entry's own PROJECT_LANE default below); Minerva's decomposed non-seed child stories route to auriga-build. Same semantics as the stale entry, correct workspace.",
+      "lane": ["auriga-build"],
+      "registered_at": "2026-08-28T01:42:58Z"
     },
     {
       "id": "6327fdaf-789e-4290-ab41-1421957b55c6",

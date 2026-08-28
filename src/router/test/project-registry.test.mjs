@@ -188,27 +188,29 @@ test('loadRegistryConfig(): a well-formed reader derives real, non-empty config 
 
 // ---- 2. THE HARD MERGE GATE: byte-identical migration, against the REAL file --
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS is byte-identical in order and content to today\'s former hardcoded 4-entry array — Minerva must NOT appear', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS is byte-identical in order and content to today\'s former hardcoded 4-entry array plus the real 2026-08-28 Pantheon Core addition — Minerva must NOT appear', async () => {
   const { PROJECT_IDS } = await import('../lib/config-substrate.mjs');
   assert.deepEqual(PROJECT_IDS, [
     'd78a9f5d-8792-45e8-89e0-bd7b916564ca', // Auriga
     '8cb0298a-8a45-45c2-8d09-bc219e2d8a82', // Heimdall
     '282343e2-b741-4438-bc80-b93c34819a96', // Consus
-    'd8ecfab4-79bd-4290-8127-290885f01f38', // Pantheon Core
+    'd8ecfab4-79bd-4290-8127-290885f01f38', // Pantheon Core (stale workspace)
+    '032ea2e7-39b0-46d4-804e-57e74f627310', // Pantheon Core (real workspace, added 2026-08-28)
   ]);
   assert.ok(!PROJECT_IDS.includes('6327fdaf-789e-4290-ab41-1421957b55c6'), 'Minerva must stay dispatch-ineligible');
 });
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE is byte-identical to today\'s former hardcoded 5-entry map — Minerva DOES appear', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE is byte-identical to today\'s former hardcoded 5-entry map plus the real 2026-08-28 Pantheon Core addition — Minerva DOES appear', async () => {
   const { PROJECT_LANE } = await import('../lib/config-substrate.mjs');
   assert.deepEqual(PROJECT_LANE, {
     '282343e2-b741-4438-bc80-b93c34819a96': ['consus-dev'],       // Consus
     '8cb0298a-8a45-45c2-8d09-bc219e2d8a82': ['heimdall-dev', 'heimdall-dev-codex'], // Heimdall
     'd78a9f5d-8792-45e8-89e0-bd7b916564ca': ['auriga-dev'],       // Auriga
     '6327fdaf-789e-4290-ab41-1421957b55c6': ['auriga-dev'],       // Minerva
-    'd8ecfab4-79bd-4290-8127-290885f01f38': ['auriga-build'],     // Pantheon Core
+    'd8ecfab4-79bd-4290-8127-290885f01f38': ['auriga-build'],     // Pantheon Core (stale workspace)
+    '032ea2e7-39b0-46d4-804e-57e74f627310': ['auriga-build'],     // Pantheon Core (real workspace)
   });
-  assert.equal(Object.keys(PROJECT_LANE).length, 5);
+  assert.equal(Object.keys(PROJECT_LANE).length, 6);
 });
 
 test('HARD GATE: config-substrate.mjs\'s real PROJECT_NAMES still resolves all 5 migrated ids (cosmetic, but must not regress)', async () => {
@@ -292,5 +294,8 @@ test('INTEGRATION: with NO override, config-substrate.mjs loads the REAL committ
   const { captured, result: mod } = await captureStderrAsync(() => freshConfigSubstrate());
   const { PROJECT_IDS } = mod;
   assert.equal(captured, '', 'no warning should be logged when the real file loads cleanly');
-  assert.equal(PROJECT_IDS.length, 4);
+  // 5 dispatch-eligible project ids as of 2026-08-28 (added a real, live
+  // "Pantheon Core" project in the correct Multica workspace -- see
+  // projects.json's own notes on the two "Pantheon Core" entries).
+  assert.equal(PROJECT_IDS.length, 5);
 });
