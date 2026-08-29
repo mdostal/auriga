@@ -26,55 +26,34 @@
     "dispatch-ineligible today — see that story's migration notes). The other ~12 names",
     "formerly in PROJECT_NAMES are deliberately NOT migrated here — left for a future",
     "`auriga project scan` to re-surface as real candidates, not silently dropped or",
-    "silently auto-added."
+    "silently auto-added.",
+    "",
+    "PRUNED 2026-08-29: the 4 aligned-repo entries (Auriga/Heimdall/Consus/the original",
+    "Pantheon Core) from the 2026-08-19 migration were all scoped to a DIFFERENT, stale",
+    "Multica workspace that this host no longer talks to (confirmed live via GET",
+    "/api/projects against the real, current workspace f32af269-7b85-48d0-8a1b-5b09125b12b4:",
+    "it returns exactly ONE project, 032ea2e7 below -- none of the 4 pruned ids exist in",
+    "it). They were harmless (a project id that never matches a real issue's project_id",
+    "simply never routes anything -- selectAssignments/detectCascadeDispatch silently",
+    "no-op), but actively misleading: they implied per-repo 'aligned lane' project",
+    "routing was live for this workspace when it structurally could not be. Minerva",
+    "stays -- see its own entry's note for why that one is a different, intentional case."
   ],
   "dispatch_order": [
-    "d78a9f5d-8792-45e8-89e0-bd7b916564ca",
-    "8cb0298a-8a45-45c2-8d09-bc219e2d8a82",
-    "282343e2-b741-4438-bc80-b93c34819a96",
-    "d8ecfab4-79bd-4290-8127-290885f01f38",
     "032ea2e7-39b0-46d4-804e-57e74f627310"
   ],
   "projects": [
     {
-      "id": "d78a9f5d-8792-45e8-89e0-bd7b916564ca",
-      "name": "Auriga",
-      "notes": "Aligned repo, Codex lane (auriga-dev). Scanned first in dispatch order (aligned lanes first). Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
-      "lane": ["auriga-dev"],
-      "registered_at": "2026-08-19T00:00:00Z"
-    },
-    {
-      "id": "8cb0298a-8a45-45c2-8d09-bc219e2d8a82",
-      "name": "Heimdall",
-      "notes": "Aligned repo, Opencode + Codex lanes (heimdall-dev, heimdall-dev-codex). Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
-      "lane": ["heimdall-dev", "heimdall-dev-codex"],
-      "registered_at": "2026-08-19T00:00:00Z"
-    },
-    {
-      "id": "282343e2-b741-4438-bc80-b93c34819a96",
-      "name": "Consus",
-      "notes": "Aligned repo, Claude lane (consus-dev). Scanned LAST in dispatch order so it is drained sparingly, only after cheaper lanes are saturated. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
-      "lane": ["consus-dev"],
-      "registered_at": "2026-08-19T00:00:00Z"
-    },
-    {
-      "id": "d8ecfab4-79bd-4290-8127-290885f01f38",
-      "name": "Pantheon Core",
-      "notes": "Dogfood seed-drop project: Consus ideabox [idea] seeds land here and route to the minerva-dev planning lane; Minerva's decomposed non-seed child stories are filed back into this same project and route to the auriga-build (claude+hive) lane. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_IDS/PROJECT_LANE by p6-registry-core.",
-      "lane": ["auriga-build"],
-      "registered_at": "2026-08-19T00:00:00Z"
-    },
-    {
       "id": "032ea2e7-39b0-46d4-804e-57e74f627310",
       "name": "Pantheon Core",
-      "notes": "Dogfood seed-drop project, REAL workspace (f32af269-7b85-48d0-8a1b-5b09125b12b4) -- created 2026-08-28 because the older 'Pantheon Core' entry above (d8ecfab4-...) is scoped to a DIFFERENT, stale Multica workspace and does not exist in this one (confirmed live: `project not found in this workspace` when decision-bridge.ts tried to file a ticket there). Consus decision/idea seeds land here (via core-api's DECISION_SEED_PROJECT_ID override) and route to the minerva-dev planning lane via core.mjs's isSeed() check (overrides this entry's own PROJECT_LANE default below); Minerva's decomposed non-seed child stories route to auriga-build. Same semantics as the stale entry, correct workspace.",
+      "notes": "Dogfood seed-drop project, REAL workspace (f32af269-7b85-48d0-8a1b-5b09125b12b4) -- created 2026-08-28 because an older 'Pantheon Core' entry (d8ecfab4-..., pruned 2026-08-29, see the top-level comment block) was scoped to a DIFFERENT, stale Multica workspace and did not exist in this one (confirmed live: `project not found in this workspace` when decision-bridge.ts tried to file a ticket there). Consus decision/idea seeds land here (via core-api's DECISION_SEED_PROJECT_ID override) and route to the minerva-dev planning lane via core.mjs's isSeed() check (overrides this entry's own PROJECT_LANE default below); Minerva's decomposed non-seed child stories route to auriga-build. This is the ONLY real project in the live workspace (confirmed via GET /api/projects, 2026-08-29).",
       "lane": ["auriga-build"],
       "registered_at": "2026-08-28T01:42:58Z"
     },
     {
       "id": "6327fdaf-789e-4290-ab41-1421957b55c6",
       "name": "Minerva",
-      "notes": "Dispatch-ineligible today (deliberately absent from dispatch_order above, exactly as it was absent from the hardcoded PROJECT_IDS) but routing-policy-load-bearing: PROJECT_LANE routed it to auriga-dev (no dedicated agent, nearest Codex lane) and that lane assignment is preserved here. Registered so `auriga project scan` doesn't perpetually flag it as wholly undiscovered. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_LANE by p6-registry-core.",
+      "notes": "Dispatch-ineligible today (deliberately absent from dispatch_order above, exactly as it was absent from the hardcoded PROJECT_IDS) but routing-policy-load-bearing: PROJECT_LANE routed it to auriga-dev (no dedicated agent, nearest Codex lane) and that lane assignment is preserved here. Registered so `auriga project scan` doesn't perpetually flag it as wholly undiscovered. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_LANE by p6-registry-core. NOTE (2026-08-29 audit): like the 4 pruned entries above, this id does not correspond to a real project in the current live workspace (f32af269-...) either -- GET /api/projects returns only 032ea2e7 (Pantheon Core). Left in place, unlike those 4, because it is dispatch-ineligible by design (never routes anything on its own) and exists purely as a documented lane-fallback placeholder, not a claim that a real 'Minerva' project exists.",
       "lane": ["auriga-dev"],
       "registered_at": "2026-08-19T00:00:00Z"
     }

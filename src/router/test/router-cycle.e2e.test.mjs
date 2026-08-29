@@ -29,6 +29,26 @@ function projectId(name) {
   return id;
 }
 
+// PRUNED 2026-08-29: projects.json's 4 aligned-repo entries (Auriga/Heimdall/
+// Consus/the original stale-workspace Pantheon Core) were removed — they were
+// scoped to a Multica workspace this host no longer talks to (confirmed live:
+// GET /api/projects against the real, current workspace returns only one
+// project). 'Pantheon Core' is now the only real, dispatch-eligible project,
+// so most tests below that just needed SOME valid real project id switched to
+// it directly. The two tests that specifically need MULTIPLE, DIFFERENTLY-
+// laned projects (AC1's hive-vs-default-lane contrast, AC3's per-lane-cap
+// coverage) can no longer get that from real, live data — they now build a
+// small synthetic cfg overlay (fixture ids never registered in projects.json)
+// carrying the exact same lane shapes the old real Auriga/Heimdall/Consus
+// entries had, so the routing behavior under test is unchanged.
+function withFixtureLanes(projectLaneOverrides) {
+  return {
+    ...cfg,
+    PROJECT_IDS: [...cfg.PROJECT_IDS, ...Object.keys(projectLaneOverrides)],
+    PROJECT_LANE: { ...cfg.PROJECT_LANE, ...projectLaneOverrides },
+  };
+}
+
 let seq = 1000;
 function makeIssue(overrides = {}) {
   const n = seq++;
@@ -115,12 +135,12 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
 }
 
 test('AC1: a hive-tagged todo dispatches to a HIVE_LANE agent (never codex/opencode) and verifies in-progress', async () => {
-  const AURIGA = projectId('Auriga'); // default (non-hive) lane here is codex-only auriga-dev
-  const hiveStory = makeIssue({ project_id: AURIGA, labels: ['build'] }); // 'build' is a HIVE_LABEL
-  const { backlog, spawn, calls } = createMockAdapters([hiveStory], cfg.AGENTS);
+  const fixtureCfg = withFixtureLanes({ 'fixture-auriga-project': ['auriga-dev'] }); // default (non-hive) lane here is codex-only auriga-dev
+  const hiveStory = makeIssue({ project_id: 'fixture-auriga-project', labels: ['build'] }); // 'build' is a HIVE_LABEL
+  const { backlog, spawn, calls } = createMockAdapters([hiveStory], fixtureCfg.AGENTS);
   const log = createLogSink();
 
-  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(result.assigned, 1);
   assert.equal(calls.assign.length, 1);
@@ -154,25 +174,27 @@ test('AC2: a Pantheon Core [idea] seed routes to minerva-dev; its decomposed non
 });
 
 test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within one cycle, never exceeding perCycleTotal(5)', async () => {
-  const AURIGA = projectId('Auriga'); // single-agent lane: auriga-dev (codex)
-  const HEIMDALL = projectId('Heimdall'); // two-agent lane: heimdall-dev (opencode) + heimdall-dev-codex (codex)
-  const CONSUS = projectId('Consus'); // single-agent lane: consus-dev (claude)
-  const PANTHEON_CORE = projectId('Pantheon Core'); // single-agent lane: auriga-build (claude)
+  const fixtureCfg = withFixtureLanes({
+    'fixture-auriga-project': ['auriga-dev'], // single-agent lane: auriga-dev (codex)
+    'fixture-heimdall-project': ['heimdall-dev', 'heimdall-dev-codex'], // two-agent lane: opencode + codex
+    'fixture-consus-project': ['consus-dev'], // single-agent lane: consus-dev (claude)
+  });
+  const PANTHEON_CORE = projectId('Pantheon Core'); // single-agent lane: auriga-build (claude), real
 
   // Each carries a fake parent_issue_id so isSeed() short-circuits false (not
   // top-level) — these are meant to be plain build-lane candidates, not seeds.
   const issues = [
-    ...Array.from({ length: 4 }, () => makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' })),
-    ...Array.from({ length: 4 }, () => makeIssue({ project_id: HEIMDALL, parent_issue_id: 'fake-parent' })),
-    ...Array.from({ length: 2 }, () => makeIssue({ project_id: CONSUS, parent_issue_id: 'fake-parent' })),
+    ...Array.from({ length: 4 }, () => makeIssue({ project_id: 'fixture-auriga-project', parent_issue_id: 'fake-parent' })),
+    ...Array.from({ length: 4 }, () => makeIssue({ project_id: 'fixture-heimdall-project', parent_issue_id: 'fake-parent' })),
+    ...Array.from({ length: 2 }, () => makeIssue({ project_id: 'fixture-consus-project', parent_issue_id: 'fake-parent' })),
     ...Array.from({ length: 2 }, () => makeIssue({ project_id: PANTHEON_CORE, parent_issue_id: 'fake-parent' })),
   ];
   assert.equal(issues.length, 12); // more candidates than perCycleTotal, so the cap is actually exercised
 
-  const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
+  const { backlog, spawn, calls } = createMockAdapters(issues, fixtureCfg.AGENTS);
   const log = createLogSink();
 
-  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
 
   assert.ok(result.assigned <= cfg.CAPS.perCycleTotal, `assigned ${result.assigned} > perCycleTotal ${cfg.CAPS.perCycleTotal}`);
   assert.ok(calls.assign.length <= cfg.CAPS.perCycleTotal);
@@ -207,7 +229,7 @@ test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within on
 // itself.
 
 test('a PR matching ONLY via the story\'s short slug key (never the raw ticket identifier) is found via the cached board-wide scan + prMatchesStory', async () => {
-  const AURIGA = projectId('Auriga');
+  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
   const story = makeIssue({
     project_id: AURIGA,
     title: '[m-01-core] Wire the recall interface',
@@ -244,7 +266,7 @@ test('a PR matching ONLY via the story\'s short slug key (never the raw ticket i
 });
 
 test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(), not once per in_review/done issue', async () => {
-  const AURIGA = projectId('Auriga');
+  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
   // 5 in_review + 5 done issues: every one of them independently needs a
   // "does this issue have a matching PR" answer across several passes
   // (verified-done, cascade guard, review-dispatch openPrIds, false-done).
@@ -277,7 +299,7 @@ test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(
 // log events and payloads.
 
 test('route new todos: an assign failure logs assign_error with the expected identifier/agent/error shape', async () => {
-  const AURIGA = projectId('Auriga');
+  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
   const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
   const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS, {
     failAssignFor: new Set([story.identifier]),
@@ -296,7 +318,7 @@ test('route new todos: an assign failure logs assign_error with the expected ide
 });
 
 test('route new todos: no run row appearing within the verify wait logs verify_no_run and force-reruns (observed via spawn.calls.rerun)', async () => {
-  const AURIGA = projectId('Auriga');
+  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
   const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS, {
     noRunFor: new Set([story.identifier]),

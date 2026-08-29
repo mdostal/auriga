@@ -25,7 +25,12 @@ function projectId(name) {
   return id;
 }
 
-const AURIGA = projectId('Auriga');
+// 'Auriga' (the aligned-repo entry) was pruned from projects.json 2026-08-29 —
+// it was scoped to a stale, no-longer-live Multica workspace (see that file's
+// own header comment). 'Pantheon Core' is now the only real, live project, so
+// fixtures route through it instead — still exercises the real PROJECT_LANE/
+// DEFAULT_LANE tables via a real, currently-registered project id.
+const FIXTURE_PROJECT_ID = projectId('Pantheon Core');
 
 // Every profile carries a fake (non-scanned) parent_issue_id so lib/core.mjs's
 // isSeed() never misclassifies one of these as an un-planned top-level seed —
@@ -43,7 +48,7 @@ function makeIssue(overrides = {}) {
     status: 'todo',
     assignee_id: null,
     parent_issue_id: FAKE_PARENT_ID,
-    project_id: AURIGA,
+    project_id: FIXTURE_PROJECT_ID,
     metadata: {},
     ...overrides,
   };

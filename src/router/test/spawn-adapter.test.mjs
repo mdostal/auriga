@@ -51,15 +51,15 @@ test('describeLanes(): structurally identical to today\'s exact PROJECT_LANE/DEF
   assert.deepEqual(lanes.reviewLane, REVIEW_LANE);
   assert.deepEqual(lanes.runtimeCap, RUNTIME_CAP);
 
-  // The KNOWN GAP: PROJECT_LANE covers only 6 real project UUIDs (Consus,
-  // Heimdall, Auriga, Minerva, and TWO "Pantheon Core" entries -- the
-  // original, scoped to a stale/different Multica workspace, plus a real
-  // one in the live workspace added 2026-08-28 once the stale one was
-  // confirmed to 404 against the workspace this install actually uses;
-  // see projects.json's own notes on both entries) — the other 7
-  // "unmapped" names (Tools sub-names) from the epic's plan have NO entry.
-  // Assert the gap survives the port unaltered: exactly 6 keys, not 8/12.
-  assert.equal(Object.keys(lanes.projectLane).length, 6, 'PROJECT_LANE must still have exactly 6 mapped project UUIDs (7-unmapped-names gap preserved)');
+  // PRUNED 2026-08-29: the 4 aligned-repo entries (Consus, Heimdall, Auriga,
+  // and the original stale-workspace "Pantheon Core") were all scoped to a
+  // DIFFERENT Multica workspace this host no longer talks to -- confirmed
+  // live (GET /api/projects against the real, current workspace) that none
+  // of those 4 ids exist in it. PROJECT_LANE now covers exactly 2 entries:
+  // the one real, live "Pantheon Core" project plus Minerva's dispatch-
+  // ineligible lane-fallback placeholder (not a real project either, but
+  // intentionally kept -- see projects.json's own notes on both entries).
+  assert.equal(Object.keys(lanes.projectLane).length, 2, 'PROJECT_LANE must have exactly 2 mapped project UUIDs after the 2026-08-29 stale-workspace prune');
 });
 
 test('describeLanes(): a cfg-supplied fixture lane map overrides the live config-substrate.mjs defaults', async (t) => {
