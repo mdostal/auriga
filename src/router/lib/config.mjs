@@ -228,6 +228,7 @@ export const CAPS = {
   perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
   perCycleCascade: 5, // CASCADE: at most N completion->dependent enqueues per cycle (bounded self-drain, never a mass fire)
+  perCycleChangeback: 3, // CHANGEBACK: at most N review-changes-requested -> rebuild dispatches per cycle
   redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago. A just-completed run (even one that set the story back to blocked) is "already attempted"; re-firing it cancels the fresh run = the 2-min cancel-thrash (PAN-7771).
 };
 

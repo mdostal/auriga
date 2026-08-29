@@ -536,11 +536,56 @@ async function cycle() {
     }
   }
 
+  // ---- REVIEW CHANGEBACK: changes-requested -> back-to-build ----
+  // Stories the review squad returned with required changes (STEP 5B). The
+  // review agent sets metadata.review_verdict = 'changes' before resetting to
+  // todo+unassigned. Route them explicitly back to a build lane so the loop-back
+  // is visible in the log as 'changeback' (not a silent 'route'), then clear the
+  // signal so the pass does not re-fire on the same story next cycle.
+  const changedBack = new Set();
+  {
+    const changebacks = core.detectReviewChangeback(issues, cfg);
+    const changebackCap = (cfg.CAPS.perCycleChangeback ?? cfg.CAPS.perCycleCascade) ?? 5;
+    let changebackFired = 0;
+    for (const c of changebacks) {
+      if (changebackFired >= changebackCap) break;
+      if (assignedThisProcess >= MAX_ASSIGN) break;
+      const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
+      const agent = core.chooseAgentForProject(c.projectId, cfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
+      if (!agent) { log('changeback_skip', { identifier: c.identifier, reason: 'no-lane-capacity' }); continue; }
+      if (blockedRuntimes.has(cfg.AGENTS[agent].runtime)) {
+        log('changeback_skip', { identifier: c.identifier, agent, runtime: cfg.AGENTS[agent].runtime, reason: 'runtime-blocked' });
+        continue;
+      }
+      log('changeback', { identifier: c.identifier, agent, applied: !DRY });
+      if (DRY) { changebackFired++; changedBack.add(c.identifier); continue; }
+      try {
+        mca.assignIssue(c.identifier, agent);
+        stampAssignment(c.identifier, agent, assignmentFingerprint(issueObj, agent, cfg));
+        assignedThisProcess++;
+        inflight[agent] = (inflight[agent] || 0) + 1;
+        try { mca.setIssueMetadata(c.identifier, 'review_verdict', null); } catch (e) {
+          log('changeback_clear_error', { identifier: c.identifier, error: e.message });
+        }
+        // Force-enqueue after assign — assignee-mutation alone does not reliably start a
+        // run (the dispatch dead-zone); without rerun the story sits idle for up to
+        // CAPS.assignedIdleStaleMs (10 min) before the self-heal pass fires.
+        await sleep(cfg.CAPS.verifyDelayMs);
+        mca.rerunIssue(c.identifier);
+        changebackFired++;
+        changedBack.add(c.identifier);
+        log('changeback_enqueued', { identifier: c.identifier, agent });
+      } catch (e) {
+        log('changeback_error', { identifier: c.identifier, agent, error: e.message });
+      }
+    }
+  }
+
   // ---- route new todos ----
   const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
   const picks = core.selectAssignments(issues, cfg, inflight, {
     blockedRuntimes,
-    exclude: cascaded,
+    exclude: new Set([...cascaded, ...changedBack]),
     maxTotal: Math.min(cfg.CAPS.perCycleTotal, remaining || cfg.CAPS.perCycleTotal),
   });
 
