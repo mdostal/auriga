@@ -122,14 +122,29 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
 
-  // Ported verbatim from multica/backlog.mjs's own ghRun/ghListRepos/ghPrs
-  // (same GH binary, same env passthrough, same flags/limits) -- see this
-  // file's header comment for why this exists again after being scoped out.
+  // Ported from multica/backlog.mjs's own ghRun/ghListRepos/ghPrs (same GH
+  // binary, same env passthrough, same flags/limits) -- see this file's
+  // header comment for why this exists again after being scoped out. NOT
+  // byte-verbatim on one point: added a per-call timeout (neither this nor
+  // the original had one). Found live 2026-08-29: listCandidatePullRequests
+  // does up to ~100+ sequential `gh pr list` calls (one per repo, no
+  // concurrency) with zero bound on any single call -- one slow/hanging repo
+  // silently stalls the WHOLE board-wide PR scan indefinitely, which starves
+  // review_pr_scan's cache for every issue that cycle, not just the slow
+  // repo's own. Confirmed live: a real listCandidatePullRequests() call
+  // never returned within several minutes, and PANT-24's real, merged PR
+  // was never detected as a result (had to be marked done by hand). 15s is
+  // generous for a single `gh` call (GitHub's API is normally sub-second)
+  // while still bounding the worst case to a known, finite value instead of
+  // an unbounded hang; execFileSync's timeout SIGTERMs the child and throws,
+  // which the existing per-call try/catch in ghListRepos/ghPrs below already
+  // degrades gracefully (logs + returns []) -- no new failure mode.
   function ghRun(args, maxBuffer = 32 * 1024 * 1024) {
     const out = ghExecFn(GH, args, {
       env: process.env,
       encoding: 'utf8',
       maxBuffer,
+      timeout: 15000,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return out.trim() ? JSON.parse(out) : [];
