@@ -49,12 +49,18 @@ the full reasoning on each):
   not project-scoped, so this adapter never needs (or leaks) Multica's
   project concept. `listAllIssues()` does one full, board-wide scan
   regardless of what it's passed.
-- GitHub-based PR discovery (the old `multica/backlog.mjs`'s
-  `listCandidatePullRequests`/`ghPrs`/`ghListRepos`) is **not** ported here —
-  that is a separate integration (GitHub, not Multica), out of scope for
-  this epic. `auriga-router.mjs`'s cycle() already duck-types for its
-  absence and falls back to per-identifier `getIssuePullRequests`, which
-  this adapter does implement (Multica's own native PR linkage only).
+- GitHub-based PR discovery (`listCandidatePullRequests`/`ghPrs`/
+  `ghListRepos`, ported back in from the old `multica/backlog.mjs`,
+  2026-08-29) — found live that Multica's own native issue<->PR linkage
+  (`getIssuePullRequests`'s only other path) is empty on this workspace (no
+  GitHub App integration configured), so the review lane's board-wide PR
+  scan always returned `[]` without it; every `in_review` issue sat
+  un-reviewed regardless of how many real PRs existed. `gh` itself ships in
+  the container image now (see `Dockerfile.auriga`) and authenticates via
+  `GH_TOKEN` — no `gh auth login` step. `reviewRepoOwner`/`reviewSearchRepos`
+  default to `config-substrate.mjs`'s `REVIEW_REPO_OWNER`/
+  `REVIEW_SEARCH_REPOS`, overridable via `cfg` (mirrors the old adapter's
+  constructor shape exactly).
 - Issue objects returned by this adapter are mapped back to the exact raw,
   snake_case field shape (`assignee_id`, `project_id`, `parent_issue_id`,
   ...) that `lib/core.mjs` already reads directly — not the cleaner,

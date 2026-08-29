@@ -134,6 +134,73 @@ test('getIssuePullRequests() unwraps {pull_requests} and degrades to [] on failu
   assert.deepEqual(backlog.getIssuePullRequests('PAN-1'), [{ number: 42 }]);
 });
 
+// ---- listCandidatePullRequests() -- re-ported gh scan (found live 2026-08-29: Multica's
+// native issue<->PR linkage is empty on this workspace, so getIssuePullRequests alone can
+// never find a real PR; this board-wide scan is what auriga-router.mjs's cycle() actually
+// uses for review-lane matching). `ghExec` is injected separately from the Pantheon `exec`
+// so these tests never touch the curl mock at all.
+function makeGhMock(t, handler) {
+  const calls = [];
+  const fn = t.mock.fn((cmd, args) => {
+    calls.push({ cmd, args });
+    const result = handler(args);
+    if (result instanceof Error) throw result;
+    return JSON.stringify(result);
+  });
+  return { fn, calls };
+}
+
+test('listCandidatePullRequests() unions ghListRepos(owner) with reviewSearchRepos, dedupes, tags each PR with _repo', async (t) => {
+  const { fn: ghExec, calls } = makeGhMock(t, (args) => {
+    if (args[0] === 'repo' && args[1] === 'list') return [{ nameWithOwner: 'mdostal/auriga' }, { nameWithOwner: 'mdostal/heimdall' }];
+    if (args[0] === 'pr' && args[1] === 'list') {
+      const repo = args[args.indexOf('--repo') + 1];
+      if (repo === 'mdostal/auriga') return [{ number: 1, title: 'a PR' }];
+      if (repo === 'mdostal/heimdall') return [{ number: 2, title: 'h PR' }];
+      if (repo === 'mdostal/consus') return [{ number: 3, title: 'c PR' }];
+      return [];
+    }
+    throw new Error('unexpected gh args: ' + args.join(' '));
+  });
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({
+    baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
+  });
+
+  const prs = backlog.listCandidatePullRequests();
+
+  assert.deepEqual(prs.sort((a, b) => a.number - b.number), [
+    { number: 1, title: 'a PR', _repo: 'mdostal/auriga' },
+    { number: 2, title: 'h PR', _repo: 'mdostal/heimdall' },
+    { number: 3, title: 'c PR', _repo: 'mdostal/consus' },
+  ].sort((a, b) => a.number - b.number));
+  // mdostal/auriga appears in both ghListRepos() and reviewSearchRepos -- deduped to one scan.
+  const prListCalls = calls.filter((c) => c.args[0] === 'pr');
+  assert.equal(prListCalls.length, 3);
+});
+
+test('listCandidatePullRequests() isolates a single repo\'s failure -- other repos still scanned, never throws', async (t) => {
+  const { fn: ghExec } = makeGhMock(t, (args) => {
+    if (args[0] === 'repo' && args[1] === 'list') throw new Error('gh repo list: rate limited');
+    if (args[0] === 'pr' && args[1] === 'list') {
+      const repo = args[args.indexOf('--repo') + 1];
+      if (repo === 'mdostal/auriga') throw new Error('gh pr list: 404');
+      return [{ number: 9, title: 'ok' }];
+    }
+    throw new Error('unexpected gh args: ' + args.join(' '));
+  });
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({
+    baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
+  });
+
+  const prs = backlog.listCandidatePullRequests();
+
+  // owner-discovery failed (falls back to just reviewSearchRepos), auriga's own PR list
+  // failed too, but consus's succeeded -- one real PR survives, nothing throws.
+  assert.deepEqual(prs, [{ number: 9, title: 'ok', _repo: 'mdostal/consus' }]);
+});
+
 test('setIssueStatus() POSTs {status} and PROPAGATES a failure (write methods never degrade)', async (t) => {
   const calls = makeCurlMock(t, () => new Error('HTTP 502'));
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();

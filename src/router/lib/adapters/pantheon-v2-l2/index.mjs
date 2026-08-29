@@ -34,13 +34,19 @@
 // silently changing it and risking a subtle behavior break.
 //
 // GitHub-based PR discovery (multica/backlog.mjs's ghOpenPrs/ghPrs/
-// ghListRepos/listCandidatePullRequests) is DELIBERATELY NOT ported here --
-// that is a GitHub integration, not a Multica one, and out of scope for
-// this epic (which is specifically about the Multica board bridge). This
-// adapter simply doesn't implement listCandidatePullRequests;
-// auriga-router.mjs's cycle() already duck-types for its absence
-// (`typeof backlog.listCandidatePullRequests === 'function'`) and falls
-// back to per-identifier getIssuePullRequests, which IS implemented here.
+// ghListRepos/listCandidatePullRequests) was ORIGINALLY left unported here
+// as a deliberate, documented scope cut (out of scope for the Multica-board-
+// bridge epic that first wrote this file). Found live, 2026-08-29: Multica's
+// own native issue<->PR linkage (getIssuePullRequests's only remaining path)
+// is EMPTY on this workspace -- no GitHub App integration is configured on
+// it -- so with the gh scan absent, the review lane's board-wide PR scan
+// (auriga-router.mjs's own `candidatePrs` cache) always returned [], and
+// EVERY in_review issue sat forever un-reviewed/un-shipped regardless of how
+// many real PRs existed. Ported listCandidatePullRequests (+ its ghListRepos/
+// ghPrs/ghRun helpers) back in from multica/backlog.mjs, byte-faithful to
+// that implementation, closing the gap the original scope cut left open.
+// `gh` itself now ships in this image (see Dockerfile.auriga's git/
+// github-cli comment) and reads GH_TOKEN directly -- no `gh auth login`.
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
@@ -50,6 +56,8 @@ import {
   HIVE_LANE as SUBSTRATE_HIVE_LANE,
   REVIEW_LANE as SUBSTRATE_REVIEW_LANE,
   RUNTIME_CAP as SUBSTRATE_RUNTIME_CAP,
+  REVIEW_REPO_OWNER as SUBSTRATE_REVIEW_REPO_OWNER,
+  REVIEW_SEARCH_REPOS as SUBSTRATE_REVIEW_SEARCH_REPOS,
 } from '../../config-substrate.mjs';
 import { classifyRun, latestRun } from '../../core.mjs';
 
@@ -92,15 +100,83 @@ function toRawIssue(issue) {
 }
 
 /**
- * @param {{ baseUrl?: string, exec?: Function }} [cfg]
+ * @param {{
+ *   baseUrl?: string, exec?: Function, ghExec?: Function, ghCli?: string,
+ *   reviewRepoOwner?: string, reviewSearchRepos?: string[],
+ * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
- *   inject a fake execFileSync.
+ *   inject a fake execFileSync for the Pantheon HTTP calls; ghExec does the
+ *   same for the `gh` calls below (kept separate so a test can fake one
+ *   without the other). ghCli/reviewRepoOwner/reviewSearchRepos default to
+ *   GH_CLI env / config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS
+ *   -- mirrors multica/backlog.mjs's own constructor shape exactly.
  * @returns {import('../backlog-adapter.mjs').BacklogAdapter}
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
+
+  const ghExecFn = cfg.ghExec || execFileSync;
+  const GH = cfg.ghCli || process.env.GH_CLI || 'gh';
+  const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
+  const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
+
+  // Ported verbatim from multica/backlog.mjs's own ghRun/ghListRepos/ghPrs
+  // (same GH binary, same env passthrough, same flags/limits) -- see this
+  // file's header comment for why this exists again after being scoped out.
+  function ghRun(args, maxBuffer = 32 * 1024 * 1024) {
+    const out = ghExecFn(GH, args, {
+      env: process.env,
+      encoding: 'utf8',
+      maxBuffer,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return out.trim() ? JSON.parse(out) : [];
+  }
+
+  function ghListRepos(owner, limit = 300) {
+    try {
+      const arr = ghRun(['repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner'], 16 * 1024 * 1024);
+      return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
+    } catch (e) {
+      process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
+      return [];
+    }
+  }
+
+  function ghPrs(repo, state = 'all') {
+    try {
+      return ghRun(['pr', 'list', '--repo', repo, '--state', state,
+        '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100']);
+    } catch (e) {
+      process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
+      return [];
+    }
+  }
+
+  // The raw, UNFILTERED board-wide PR candidate scan -- ported verbatim from
+  // multica/backlog.mjs's own listCandidatePullRequests (see that file's
+  // header comment: run ONCE per cycle, callers apply core.mjs's real
+  // prMatchesStory/prIdentityMatchesStory themselves). Not part of the
+  // BacklogAdapter typedef contract ("ported extra", same status as
+  // listAllIssues below) -- auriga-router.mjs's cycle() duck-types for its
+  // presence and falls back to per-identifier getIssuePullRequests when
+  // absent.
+  function listCandidatePullRequests() {
+    const repos = new Set([
+      ...(REVIEW_REPO_OWNER ? ghListRepos(REVIEW_REPO_OWNER) : []),
+      ...REVIEW_SEARCH_REPOS,
+    ]);
+    const all = [];
+    for (const repo of repos) {
+      for (const pr of ghPrs(repo, 'all')) {
+        pr._repo = repo;
+        all.push(pr);
+      }
+    }
+    return all;
+  }
 
   // Per-project issue list. NOT called by auriga-router.mjs's own cycle()
   // today (it uses listAllIssues below instead) but part of the
@@ -199,6 +275,10 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's
     // own comment above.
     listAllIssues,
+
+    // "Ported extra" -- see this file's header comment + listCandidatePullRequests's
+    // own comment above for why this exists again.
+    listCandidatePullRequests,
   });
 }
 
