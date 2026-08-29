@@ -141,14 +141,28 @@ test('getIssuePullRequests() unwraps {pull_requests} and degrades to [] on failu
 // so these tests never touch the curl mock at all.
 function makeGhMock(t, handler) {
   const calls = [];
-  const fn = t.mock.fn((cmd, args) => {
-    calls.push({ cmd, args });
+  const fn = t.mock.fn((cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
     const result = handler(args);
     if (result instanceof Error) throw result;
     return JSON.stringify(result);
   });
   return { fn, calls };
 }
+
+test('ghRun() passes a 15s timeout to every gh call -- a single slow/hanging repo must not stall the whole board-wide scan indefinitely (found live 2026-08-29)', async (t) => {
+  const { fn: ghExec, calls } = makeGhMock(t, (args) => {
+    if (args[0] === 'repo' && args[1] === 'list') return [];
+    return [];
+  });
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/pantheon-v2'] });
+
+  backlog.listCandidatePullRequests();
+
+  assert.ok(calls.length > 0);
+  for (const c of calls) assert.equal(c.opts.timeout, 15000);
+});
 
 test('listCandidatePullRequests() unions ghListRepos(owner) with reviewSearchRepos, dedupes, tags each PR with _repo', async (t) => {
   const { fn: ghExec, calls } = makeGhMock(t, (args) => {
