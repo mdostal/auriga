@@ -77,6 +77,8 @@ const MAX_ASSIGN = parseInt(val('--max-assign', '0'), 10) || Infinity;
 
 const PIDFILE = process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
 const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
+const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
+const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
@@ -106,6 +108,8 @@ function releaseLock() {
 // ---- logging ---------------------------------------------------------------
 function log(event, data) {
   const rec = { ts: new Date().toISOString(), event, ...data };
+  if (INSTANCE_ID) rec.instance_id = INSTANCE_ID;
+  if (TENANT_ID) rec.tenant_id = TENANT_ID;
   const line = JSON.stringify(rec);
   try { fs.appendFileSync(LOGFILE, line + '\n'); } catch {}
   console.log(line);
