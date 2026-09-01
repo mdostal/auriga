@@ -13,12 +13,19 @@
 //
 // PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE are now DERIVED (p6-registry-core),
 // not hardcoded — see the registry-derivation block below, after AGENTS.
+//
+// AURIGA_CONFIG: optional path to a partial JSON override file (PANT-70).
+// Any key present in the file replaces the corresponding export; absent keys
+// keep their defaults. Unreadable or malformed files exit non-zero (fail-closed
+// — a bad config must never silently fall back to the full default project list).
 import { loadRealRegistryConfig } from './project-registry.mjs';
+import { loadExternalConfig } from './config-loader.mjs';
+const _ext = loadExternalConfig();
 
 // Project -> agent-lane map, agent metadata, and caps.
 // All IDs verified live against workspace Pantheon (7feca4c9-...).
 
-export const AGENTS = {
+export const AGENTS = _ext.AGENTS ?? {
   'consus-dev': {
     id: '66b8f66d-27a6-4fe2-b677-ee69b04ff794',
     runtime: 'claude', // claude-sonnet-5 — spare the Claude weekly ceiling
@@ -99,7 +106,7 @@ const registryConfig = loadRealRegistryConfig();
 
 // Project UUID -> title (for logs/lane names). Cosmetic only — every real read
 // site (core.mjs) has a safe raw-UUID fallback (`cfg.PROJECT_NAMES[id] || id`).
-export const PROJECT_NAMES = registryConfig.PROJECT_NAMES;
+export const PROJECT_NAMES = _ext.PROJECT_NAMES ?? registryConfig.PROJECT_NAMES;
 
 // All project IDs the router scans — the REAL, order-sensitive dispatch-
 // eligibility gate (core.mjs's selectAssignments/detectCascadeDispatch filter
@@ -108,7 +115,8 @@ export const PROJECT_NAMES = registryConfig.PROJECT_NAMES;
 // (aligned lanes first — Auriga/Heimdall — PLUS Pantheon Core, the Consus
 // ideabox seed-drop project; Consus itself scanned LAST so it's drained
 // sparingly). See projects.json's own header comment for the full rationale.
-export const PROJECT_IDS = registryConfig.PROJECT_IDS;
+// ORDER IS LOAD-BEARING: selectAssignments sorts by PROJECT_IDS.indexOf for dispatch priority.
+export const PROJECT_IDS = _ext.PROJECT_IDS ?? registryConfig.PROJECT_IDS;
 
 // KNOWN GAP (found during implementation of p1-router-capability-routing;
 // PARTIALLY reconciled by p6-registry-core, which turned the hand-edit into a
@@ -137,7 +145,7 @@ export const PROJECT_IDS = registryConfig.PROJECT_IDS;
 
 // Per-runtime in-flight ceiling. The Codex runtime is shared by two agents,
 // so cap the whole runtime to avoid single-runtime contention collapse.
-export const RUNTIME_CAP = {
+export const RUNTIME_CAP = _ext.RUNTIME_CAP ?? {
   claude: 2,
   opencode: 3,
   codex: 4,
@@ -166,18 +174,18 @@ export const RUNTIME_CAP = {
 // unregistered entirely) falls back to DEFAULT_LANE below — unconditional,
 // unchanged fallback (core.mjs's chooseAgentForProject:
 // `cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE`).
-export const PROJECT_LANE = registryConfig.PROJECT_LANE;
+export const PROJECT_LANE = _ext.PROJECT_LANE ?? registryConfig.PROJECT_LANE;
 
 // Fallback lane for every other project: spread across the two Codex agents.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
-export const DEFAULT_LANE = ['auriga-dev', 'heimdall-dev-codex'];
+export const DEFAULT_LANE = _ext.DEFAULT_LANE ?? ['auriga-dev', 'heimdall-dev-codex'];
 
 // Capability-aware override: any story detected as hive-authored (isHiveStory in
 // lib/core.mjs — build/implementation/classic-methodology tagged, e.g. a Minerva-planned
 // story) routes HERE instead of PROJECT_LANE/DEFAULT_LANE, regardless of project. Codex and
 // Opencode runtimes have no plugin-hive install and cannot run /hive:execute|review|test —
 // routing a hive story there causes a silent self-block (PAN-6636, PAN-6640, PAN-6646).
-export const HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
+export const HIVE_LANE = _ext.HIVE_LANE ?? ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
 
 // The review/ship lane: in_review stories with an open PR route here. The
 // review agent itself ('auriga-review') is added to AGENTS, and its runtime
@@ -185,20 +193,20 @@ export const HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
 // (mutation happens there — see that file's BACK-HALF OF THE LOOP comment —
 // because it happens AFTER this module's AGENTS/RUNTIME_CAP are imported and
 // re-exported there, exactly like the AGENTS split in p2-multica-backlog-adapter).
-export const REVIEW_LANE = ['auriga-review'];
+export const REVIEW_LANE = _ext.REVIEW_LANE ?? ['auriga-review'];
 
 // GitHub owner whose repos the review lane sweeps for open PRs. The router
 // discovers ALL of this owner's repos live (mca.ghListRepos) each cycle so a new
 // repo (logic-loops, house-finder, ...) is covered the moment it exists, instead
 // of waiting to be hand-added to REVIEW_SEARCH_REPOS below. REVIEW_SEARCH_REPOS
 // remains the static fallback used only when live discovery returns nothing.
-export const REVIEW_REPO_OWNER = 'mdostal';
+export const REVIEW_REPO_OWNER = _ext.REVIEW_REPO_OWNER ?? 'mdostal';
 
 // Baseline repos the review lane searches for a story's open PR. Multica's
 // issue<->PR linkage is empty in practice, so PR discovery goes through gh; the
 // router also adds any explicit target_repo it finds on an in_review story, so
 // this is just the default set of OUR private plugin repos.
-export const REVIEW_SEARCH_REPOS = [
+export const REVIEW_SEARCH_REPOS = _ext.REVIEW_SEARCH_REPOS ?? [
   'mdostal/auriga', 'mdostal/heimdall', 'mdostal/consus',
   'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
   'mdostal/cron-maker',

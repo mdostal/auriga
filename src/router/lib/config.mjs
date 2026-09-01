@@ -2,6 +2,11 @@
 // Project -> agent-lane map, agent metadata, and caps.
 // All IDs verified live against workspace Pantheon (7feca4c9-...).
 //
+// AURIGA_CONFIG: optional path to a partial JSON override file (PANT-70). Any
+// key present in the file replaces the corresponding export; absent keys keep
+// their defaults. config-substrate.mjs handles substrate keys (AGENTS, lanes,
+// etc.); this file handles policy keys (CAPS, HUMAN_NAMES, REVIEW_SQUAD_RULES).
+//
 // AGENTS/PROJECT_NAMES/PROJECT_IDS moved to ./config-substrate.mjs
 // (p2-multica-backlog-adapter — the substrate/policy config split; see
 // .pHive/epics/p2-adapter-interface/stories/p2-multica-backlog-adapter.yaml).
@@ -20,6 +25,8 @@ import {
   RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
   REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
 } from './config-substrate.mjs';
+import { loadExternalConfig } from './config-loader.mjs';
+const _ext = loadExternalConfig();
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
   RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
@@ -31,10 +38,10 @@ export {
 // (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
 // Add a name here when a new human-owned ticket needs to route to the human
 // queue (scripts/export-human-queue.mjs) instead of an agent lane.
-export const HUMAN_NAMES = ['mathew', 'dostal'];
+export const HUMAN_NAMES = _ext.HUMAN_NAMES ?? ['mathew', 'dostal'];
 
 // Batch / cadence caps.
-export const CAPS = {
+export const CAPS = _ext.CAPS ?? {
   perCyclePerAgent: 2, // never mass-flip
   perCycleTotal: 5,
   cycleMs: 75000,
@@ -94,7 +101,7 @@ RUNTIME_CAP['claude-review'] = 1;
 // only DROP a perspective on a CLEAR signal it is inapplicable — UX on a
 // headless backend change, product+UX on a docs/chore change. Every drop is
 // logged with its reason.
-export const REVIEW_SQUAD_RULES = {
+export const REVIEW_SQUAD_RULES = _ext.REVIEW_SQUAD_RULES ?? {
   // USER-FACING signals -> tier 'full' (product + technical + qa + ux, Playwright ON).
   ui: [
     'ui', 'ux', 'user-facing', 'frontend', 'front-end', 'page', 'screen', 'view',
