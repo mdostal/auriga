@@ -271,11 +271,27 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
 // remaining two legs (childless + top-level) match this story's verbatim
 // acceptance criteria, which only asks for "unmarked AND childless AND
 // top-level" and never mentions epic.yaml.
+//
+// LOOP FIX (found live 2026-09-01, PANT-79): the childless+top-level fallback
+// misclassifies any standalone, already-scoped bug/fix ticket as a seed --
+// there is no such thing in this heuristic as "top-level but not actually an
+// idea." Minerva correctly declines these (see its own instructions' non-seed
+// check) and unassigns, but isSeed() re-evaluates true on the very next
+// cycle since the issue is still top-level and still childless, producing an
+// infinite minerva-dev<->unassign dispatch loop (confirmed live: PANT-79
+// cycled 4 times before Minerva self-mitigated by setting status to
+// `blocked`, which only sidesteps the candidate-pool filter rather than
+// fixing the misclassification). The `not-a-seed` label is the durable
+// escape hatch: Minerva applies it when declining an issue for this reason
+// (see minerva-dev's own live agent instructions), and it's checked FIRST,
+// before the explicit-mark and heuristic legs, so it always wins even if a
+// human later adds 'idea'/'needs-plan' back by mistake.
 export function isSeed(issue, allIssues = []) {
   // `multica issue list`/`get` return labels as an array of label OBJECTS
   // ({ id, name, color, ... }), not plain strings — normalize to names so
   // this matches real API data, not just string-array test fixtures.
   const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
   const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
   if (explicitlyMarked) return true;
   const isTopLevel = !issue.parent_issue_id;
