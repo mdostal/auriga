@@ -188,25 +188,35 @@ test('loadRegistryConfig(): a well-formed reader derives real, non-empty config 
 
 // ---- 2. THE HARD MERGE GATE: byte-identical migration, against the REAL file --
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches the pruned registry (2026-08-29) — only the real, live workspace project, Minerva must NOT appear', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches the registry (PANT-59 2026-08-31) — Pantheon Core plus 6 per-god projects, Minerva must NOT appear', async () => {
   const { PROJECT_IDS } = await import('../lib/config-substrate.mjs');
-  // The 4 aligned-repo entries (Auriga/Heimdall/Consus/the original stale-workspace
-  // Pantheon Core) were pruned 2026-08-29: confirmed live (GET /api/projects against
-  // the real workspace f32af269-...) that none of those 4 ids exist in it — only
-  // 032ea2e7 does. See projects.json's own top-level comment block for the full audit.
+  // PANT-59 (2026-08-31): added 6 per-god projects (confirmed live in workspace f32af269).
+  // Pantheon Core remains first; per-god projects follow in order.
   assert.deepEqual(PROJECT_IDS, [
-    '032ea2e7-39b0-46d4-804e-57e74f627310', // Pantheon Core (the one real, live project)
+    '032ea2e7-39b0-46d4-804e-57e74f627310', // Pantheon Core
+    '8c13f273-ab62-425f-aee2-45e7c324dc09', // Consus (god)
+    '9ebce7eb-01db-4274-8829-5472d13b76ae', // Auriga (god)
+    '4aa2f07d-79e0-421f-9618-fae642056237', // Heimdall (god)
+    '6a21cc72-5ca5-47d2-a791-9db5dce112bb', // Mnemosyne (god)
+    '23dd7a13-d801-4d68-9886-ed5a86b3ec40', // Janus (god)
+    '0e3d94f1-4846-43b9-90c3-b449d26869d6', // Portunus (god)
   ]);
   assert.ok(!PROJECT_IDS.includes('6327fdaf-789e-4290-ab41-1421957b55c6'), 'Minerva must stay dispatch-ineligible');
 });
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the pruned registry (2026-08-29) — the real project plus Minerva\'s dispatch-ineligible lane-fallback placeholder', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the registry (PANT-59 2026-08-31) — Pantheon Core, 6 per-god projects, plus Minerva placeholder', async () => {
   const { PROJECT_LANE } = await import('../lib/config-substrate.mjs');
   assert.deepEqual(PROJECT_LANE, {
-    '032ea2e7-39b0-46d4-804e-57e74f627310': ['auriga-build'],     // Pantheon Core (real workspace)
-    '6327fdaf-789e-4290-ab41-1421957b55c6': ['auriga-dev'],       // Minerva (placeholder, not a real project)
+    '032ea2e7-39b0-46d4-804e-57e74f627310': ['auriga-build'],              // Pantheon Core
+    '8c13f273-ab62-425f-aee2-45e7c324dc09': ['consus-dev', 'auriga-build'],// Consus (god)
+    '9ebce7eb-01db-4274-8829-5472d13b76ae': ['auriga-build'],              // Auriga (god)
+    '4aa2f07d-79e0-421f-9618-fae642056237': ['heimdall-dev', 'heimdall-dev-codex'], // Heimdall (god)
+    '6a21cc72-5ca5-47d2-a791-9db5dce112bb': ['mnemosyne-dev', 'auriga-build'],     // Mnemosyne (god)
+    '23dd7a13-d801-4d68-9886-ed5a86b3ec40': ['auriga-build'],              // Janus (god)
+    '0e3d94f1-4846-43b9-90c3-b449d26869d6': ['auriga-build'],              // Portunus (god)
+    '6327fdaf-789e-4290-ab41-1421957b55c6': ['auriga-dev'],                // Minerva (placeholder)
   });
-  assert.equal(Object.keys(PROJECT_LANE).length, 2);
+  assert.equal(Object.keys(PROJECT_LANE).length, 8);
 });
 
 test('HARD GATE: config-substrate.mjs\'s real PROJECT_NAMES resolves the 2 remaining registered ids (cosmetic, but must not regress)', async () => {
@@ -287,10 +297,7 @@ test('INTEGRATION: with NO override, config-substrate.mjs loads the REAL committ
   const { captured, result: mod } = await captureStderrAsync(() => freshConfigSubstrate());
   const { PROJECT_IDS } = mod;
   assert.equal(captured, '', 'no warning should be logged when the real file loads cleanly');
-  // 1 dispatch-eligible project id as of 2026-08-29: the 4 aligned-repo
-  // entries (Auriga/Heimdall/Consus/the original stale-workspace Pantheon
-  // Core) were pruned -- confirmed live (GET /api/projects against the real,
-  // current workspace) that none of those 4 ids exist in it. Only the real,
-  // live "Pantheon Core" project remains -- see projects.json's own notes.
-  assert.equal(PROJECT_IDS.length, 1);
+  // 7 dispatch-eligible project ids as of PANT-59 (2026-08-31): Pantheon Core
+  // plus 6 per-god projects created live in workspace f32af269.
+  assert.equal(PROJECT_IDS.length, 7);
 });
