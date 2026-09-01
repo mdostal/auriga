@@ -51,15 +51,10 @@ test('describeLanes(): structurally identical to today\'s exact PROJECT_LANE/DEF
   assert.deepEqual(lanes.reviewLane, REVIEW_LANE);
   assert.deepEqual(lanes.runtimeCap, RUNTIME_CAP);
 
-  // PRUNED 2026-08-29: the 4 aligned-repo entries (Consus, Heimdall, Auriga,
-  // and the original stale-workspace "Pantheon Core") were all scoped to a
-  // DIFFERENT Multica workspace this host no longer talks to -- confirmed
-  // live (GET /api/projects against the real, current workspace) that none
-  // of those 4 ids exist in it. PROJECT_LANE now covers exactly 2 entries:
-  // the one real, live "Pantheon Core" project plus Minerva's dispatch-
-  // ineligible lane-fallback placeholder (not a real project either, but
-  // intentionally kept -- see projects.json's own notes on both entries).
-  assert.equal(Object.keys(lanes.projectLane).length, 2, 'PROJECT_LANE must have exactly 2 mapped project UUIDs after the 2026-08-29 stale-workspace prune');
+  // PANT-59 (2026-08-31): 6 per-god projects added (confirmed live in workspace f32af269).
+  // PROJECT_LANE now covers 8 entries: Pantheon Core, 6 per-god projects, plus Minerva's
+  // dispatch-ineligible lane-fallback placeholder.
+  assert.equal(Object.keys(lanes.projectLane).length, 8, 'PROJECT_LANE must have 8 mapped project UUIDs after PANT-59 per-god project additions (2026-08-31)');
 });
 
 test('describeLanes(): a cfg-supplied fixture lane map overrides the live config-substrate.mjs defaults', async (t) => {

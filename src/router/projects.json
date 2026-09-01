@@ -37,10 +37,21 @@
     "simply never routes anything -- selectAssignments/detectCascadeDispatch silently",
     "no-op), but actively misleading: they implied per-repo 'aligned lane' project",
     "routing was live for this workspace when it structurally could not be. Minerva",
-    "stays -- see its own entry's note for why that one is a different, intentional case."
+    "stays -- see its own entry's note for why that one is a different, intentional case.",
+    "",
+    "PANT-59 (2026-08-31): added 6 per-god projects created live in workspace f32af269.",
+    "The per-god projects replace Pantheon Core as the primary project-per-repo dispatch",
+    "surface. Seeds dropped in Consus (god) route to minerva-dev via isSeed() in core.mjs",
+    "(overrides PROJECT_LANE); non-seed build stories route to the aligned build lane."
   ],
   "dispatch_order": [
-    "032ea2e7-39b0-46d4-804e-57e74f627310"
+    "032ea2e7-39b0-46d4-804e-57e74f627310",
+    "8c13f273-ab62-425f-aee2-45e7c324dc09",
+    "9ebce7eb-01db-4274-8829-5472d13b76ae",
+    "4aa2f07d-79e0-421f-9618-fae642056237",
+    "6a21cc72-5ca5-47d2-a791-9db5dce112bb",
+    "23dd7a13-d801-4d68-9886-ed5a86b3ec40",
+    "0e3d94f1-4846-43b9-90c3-b449d26869d6"
   ],
   "projects": [
     {
@@ -49,6 +60,48 @@
       "notes": "Dogfood seed-drop project, REAL workspace (f32af269-7b85-48d0-8a1b-5b09125b12b4) -- created 2026-08-28 because an older 'Pantheon Core' entry (d8ecfab4-..., pruned 2026-08-29, see the top-level comment block) was scoped to a DIFFERENT, stale Multica workspace and did not exist in this one (confirmed live: `project not found in this workspace` when decision-bridge.ts tried to file a ticket there). Consus decision/idea seeds land here (via core-api's DECISION_SEED_PROJECT_ID override) and route to the minerva-dev planning lane via core.mjs's isSeed() check (overrides this entry's own PROJECT_LANE default below); Minerva's decomposed non-seed child stories route to auriga-build. This is the ONLY real project in the live workspace (confirmed via GET /api/projects, 2026-08-29).",
       "lane": ["auriga-build"],
       "registered_at": "2026-08-28T01:42:58Z"
+    },
+    {
+      "id": "8c13f273-ab62-425f-aee2-45e7c324dc09",
+      "name": "Consus (god)",
+      "notes": "Per-god project for Consus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Decision seeds from decision-bridge.ts land here and route to minerva-dev via isSeed() in core.mjs (overrides this lane); non-seed build stories route to consus-dev (aligned) then auriga-build (hive fallback). Confirmed live 2026-08-31.",
+      "lane": ["consus-dev", "auriga-build"],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "9ebce7eb-01db-4274-8829-5472d13b76ae",
+      "name": "Auriga (god)",
+      "notes": "Per-god project for Auriga in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Auriga-specific god stories route to the hive build lane. Confirmed live 2026-08-31.",
+      "lane": ["auriga-build"],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "4aa2f07d-79e0-421f-9618-fae642056237",
+      "name": "Heimdall (god)",
+      "notes": "Per-god project for Heimdall in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Heimdall god stories route to heimdall-dev (opencode, aligned) then heimdall-dev-codex (codex fallback). Confirmed live 2026-08-31.",
+      "lane": ["heimdall-dev", "heimdall-dev-codex"],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "6a21cc72-5ca5-47d2-a791-9db5dce112bb",
+      "name": "Mnemosyne (god)",
+      "notes": "Per-god project for Mnemosyne in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Mnemosyne god stories route to mnemosyne-dev (aligned) then auriga-build (hive fallback). Confirmed live 2026-08-31.",
+      "lane": ["mnemosyne-dev", "auriga-build"],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "23dd7a13-d801-4d68-9886-ed5a86b3ec40",
+      "name": "Janus (god)",
+      "notes": "Per-god project for Janus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). No dedicated Janus agent yet; routes to auriga-build (hive build lane). Confirmed live 2026-08-31.",
+      "lane": ["auriga-build"],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "0e3d94f1-4846-43b9-90c3-b449d26869d6",
+      "name": "Portunus (god)",
+      "notes": "Per-god project for Portunus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). No dedicated Portunus agent yet; routes to auriga-build (hive build lane). Confirmed live 2026-08-31.",
+      "lane": ["auriga-build"],
+      "registered_at": "2026-08-31T23:59:00Z"
     },
     {
       "id": "6327fdaf-789e-4290-ab41-1421957b55c6",
