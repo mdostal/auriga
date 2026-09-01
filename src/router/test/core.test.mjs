@@ -363,6 +363,29 @@ test('isSeed: top-level but has a child in allIssues is not a seed', () => {
   assert.equal(core.isSeed(issue, allIssues), false);
 });
 
+// LOOP FIX (PANT-79, found live 2026-09-01): a standalone, already-scoped
+// bug/fix ticket is top-level and childless by construction (it was never
+// decomposed from anything and has no sub-issues), which the childless+
+// top-level heuristic above misreads as "unmarked seed" -- producing an
+// infinite minerva-dev decline/unassign/reassign loop, since re-evaluating
+// isSeed() on the same unchanged issue always returns true again. The
+// 'not-a-seed' label is Minerva's own durable escape hatch when it declines
+// an issue for this reason; it must short-circuit isSeed() to false.
+test("isSeed: 'not-a-seed' label overrides the childless+top-level heuristic", () => {
+  const issue = { id: 'x8', labels: ['not-a-seed'] }; // no parent, no children -- would be a seed without the label
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test("isSeed: 'not-a-seed' label (real API {name,...} object shape) still overrides", () => {
+  const issue = { id: 'x9', labels: [{ id: 'l2', name: 'not-a-seed', color: '#b45309' }] };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test("isSeed: 'not-a-seed' wins even if 'idea'/'needs-plan' is also present", () => {
+  const issue = { id: 'x10', labels: ['idea', 'not-a-seed'] };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
 // --- selectAssignments seed routing (PAN-6646) ------------------------------
 
 test('routing: issue labeled idea routes to minerva-dev, never a build agent', () => {
@@ -384,6 +407,16 @@ test('routing: unmarked, top-level, childless issue routes to minerva-dev', () =
   const picks = core.selectAssignments([issue], CFG, {}, {});
   assert.equal(picks.length, 1);
   assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+// LOOP FIX (PANT-79): otherwise-seed-shaped (top-level, childless) issue that
+// Minerva has already declined and labeled 'not-a-seed' must route to the
+// normal build lane, not loop back to minerva-dev.
+test("routing: unmarked, top-level, childless issue labeled 'not-a-seed' routes to the normal build lane, not minerva-dev", () => {
+  const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['not-a-seed'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
 });
 
 test('routing: issue with a parent_issue_id is not seed-classified, uses the normal build lane', () => {
