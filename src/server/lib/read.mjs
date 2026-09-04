@@ -115,9 +115,18 @@ function listStoryFiles(epicDir) {
   }
 }
 
+// Terminal story statuses that count as "this story is finished" for the
+// epic-level rollup below. 'done' is this repo's oldest convention; 'complete'
+// and 'shipped' are the later stages of the real lifecycle
+// (pending -> in_progress -> in_review -> complete -> shipped, see /ship) that
+// every story YAML on disk actually uses post-release — a story never reverts
+// out of 'shipped', so treating it as anything but terminal here was a stale
+// rollup bug (every shipped epic reported 'in-progress' instead of 'done').
+const TERMINAL_STORY_STATUSES = new Set(['done', 'complete', 'shipped']);
+
 function deriveEpicStatus(storyStatuses) {
   if (storyStatuses.length === 0) return 'planning';
-  if (storyStatuses.every((s) => s === 'done')) return 'done';
+  if (storyStatuses.every((s) => TERMINAL_STORY_STATUSES.has(s))) return 'done';
   if (storyStatuses.some((s) => s !== 'pending')) return 'in-progress';
   return 'pending';
 }
@@ -127,9 +136,9 @@ function deriveEpicStatus(storyStatuses) {
  * .pHive/epics/*\/epic.yaml on disk. `status` is a rollup derived from each
  * epic's stories/*.yaml statuses (epic.yaml itself carries no status field —
  * see .pHive/epics/p3-auriga-ui/docs/horizontal-plan.md's "status per story
- * rollup" note): 'done' if every story is done, 'in-progress' if any story
- * has moved off 'pending', 'planning' if the epic has no story files at all,
- * else 'pending'.
+ * rollup" note): 'done' if every story is terminal (done/complete/shipped —
+ * see TERMINAL_STORY_STATUSES), 'in-progress' if any story has moved off
+ * 'pending', 'planning' if the epic has no story files at all, else 'pending'.
  * @param {string} [root] .pHive root — overridable for tests
  * @returns {Array<{id:string,title:string,status:string,story_count:number,docs_path:string}>}
  */

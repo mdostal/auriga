@@ -12,13 +12,14 @@ test('dashboard renders this repo\'s real epics with accurate story counts', asy
   const table = page.getByRole('table')
   await expect(table).toBeVisible()
 
-  // p1-dispatch-throughput: 11 stories, all pending -> epic status "pending".
+  // p1-dispatch-throughput: 11 stories, all shipped (v0.1.0 reconciliation) ->
+  // epic status "done" (deriveEpicStatus treats shipped as terminal).
   const p1Row = page.getByRole('row', { name: /p1-dispatch-throughput/ })
   await expect(p1Row).toContainText('P1: Convert Dispatch Throughput to DONE Throughput')
-  await expect(p1Row).toContainText('pending')
+  await expect(p1Row).toContainText('done')
   await expect(p1Row).toContainText('11')
 
-  // p2-adapter-interface: 5 stories, all done -> epic status "done".
+  // p2-adapter-interface: 5 stories, all shipped -> epic status "done".
   const p2Row = page.getByRole('row', { name: /p2-adapter-interface/ })
   await expect(p2Row).toContainText('P2: Adapter-Interface Extraction')
   await expect(p2Row).toContainText('done')

@@ -18,7 +18,7 @@ test('epics list -> epic -> story detail renders real acceptance criteria and cr
   // Epic detail: its real stories render with correct status badges.
   const storyRow = page.getByRole('row', { name: /p2-router-cutover/ })
   await expect(storyRow).toBeVisible()
-  await expect(storyRow).toContainText('done')
+  await expect(storyRow).toContainText('shipped')
   await storyRow.click()
 
   // Story detail: real, full acceptance_criteria text (not truncated).

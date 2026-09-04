@@ -40,17 +40,18 @@ test('listEpics() returns real epics from .pHive/epics/*/epic.yaml', () => {
 
   const p2 = epics.find((e) => e.id === 'p2-adapter-interface');
   assert.equal(p2.title, 'P2: Adapter-Interface Extraction — backlogAdapter + spawnAdapter + pantheon-v2-l2 stub');
-  // Every story in p2-adapter-interface is status: done on disk.
+  // Every story in p2-adapter-interface is status: shipped on disk (the
+  // v0.1.0 release's story-status reconciliation moved every p1-p6 story
+  // from done/complete to shipped) — the epic-level rollup treats shipped
+  // as terminal too (see read.mjs's TERMINAL_STORY_STATUSES), so the epic
+  // itself still reports 'done'.
   assert.equal(p2.status, 'done');
   assert.equal(p2.story_count, 5);
   assert.equal(p2.docs_path, path.join('.pHive', 'epics', 'p2-adapter-interface', 'docs'));
 
   const p3 = epics.find((e) => e.id === 'p3-auriga-ui');
-  // Every story in p3-auriga-ui is status: done on disk (this epic's stories
-  // were all marked done post-review — see the "mark all 4 stories done"
-  // commit). Was asserted as 'pending' pre-existing to that commit; this
-  // test just fell out of sync with real repo data, not a code bug — fixed
-  // here to match current reality rather than leaving a stale assertion.
+  // Every story in p3-auriga-ui is status: shipped on disk (same v0.1.0
+  // reconciliation as p2 above).
   assert.equal(p3.status, 'done');
   assert.equal(p3.story_count, 4);
 });
@@ -62,7 +63,7 @@ test('getEpic(id) returns real stories[] and docs for a real epic', () => {
   assert.ok(Array.isArray(epic.stories));
   const backlogStory = epic.stories.find((s) => s.id === 'p2-multica-backlog-adapter');
   assert.ok(backlogStory);
-  assert.equal(backlogStory.status, 'done');
+  assert.equal(backlogStory.status, 'shipped');
   assert.equal(backlogStory.complexity, 'medium');
   assert.deepEqual(backlogStory.depends_on, ['p2-adapter-interfaces-and-stubs']);
 
@@ -79,7 +80,7 @@ test('getStory(epicId, storyId) returns full real YAML content', () => {
   assert.ok(story);
   assert.equal(story.id, 'p2-multica-backlog-adapter');
   assert.equal(story.epic, 'p2-adapter-interface');
-  assert.equal(story.status, 'done');
+  assert.equal(story.status, 'shipped');
   assert.ok(Array.isArray(story.acceptance_criteria));
   assert.ok(story.acceptance_criteria.length >= 5);
   assert.ok(Array.isArray(story.risks));
@@ -263,6 +264,40 @@ test('listEpics() derives "planning" status for a zero-story epic (deriveEpicSta
   assert.equal(epics.length, 1);
   assert.equal(epics[0].story_count, 0);
   assert.equal(epics[0].status, 'planning');
+});
+
+test('listEpics() derives "done" for an epic whose stories are all status: shipped (not done) — TERMINAL_STORY_STATUSES regression', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const epicDir = path.join(tmpRoot, 'epics', 'shipped-epic');
+  const storiesDir = path.join(epicDir, 'stories');
+  fs.mkdirSync(storiesDir, { recursive: true });
+  fs.writeFileSync(path.join(epicDir, 'epic.yaml'), 'name: shipped-epic\ntitle: Shipped Epic\n');
+  fs.writeFileSync(path.join(storiesDir, 's1.yaml'), 'id: s1\ntitle: Story 1\nstatus: shipped\n');
+  fs.writeFileSync(path.join(storiesDir, 's2.yaml'), 'id: s2\ntitle: Story 2\nstatus: shipped\n');
+
+  const epics = listEpics(tmpRoot);
+  const epic = epics.find((e) => e.id === 'shipped-epic');
+  assert.ok(epic);
+  assert.equal(epic.status, 'done', 'a fully-shipped epic must roll up to done, not in-progress');
+});
+
+test('listEpics() derives "in-progress" for a mix of shipped and pending stories (mixed-terminal regression)', (t) => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'phive-read-test-'));
+  t.after(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+
+  const epicDir = path.join(tmpRoot, 'epics', 'mixed-epic');
+  const storiesDir = path.join(epicDir, 'stories');
+  fs.mkdirSync(storiesDir, { recursive: true });
+  fs.writeFileSync(path.join(epicDir, 'epic.yaml'), 'name: mixed-epic\ntitle: Mixed Epic\n');
+  fs.writeFileSync(path.join(storiesDir, 's1.yaml'), 'id: s1\ntitle: Story 1\nstatus: shipped\n');
+  fs.writeFileSync(path.join(storiesDir, 's2.yaml'), 'id: s2\ntitle: Story 2\nstatus: pending\n');
+
+  const epics = listEpics(tmpRoot);
+  const epic = epics.find((e) => e.id === 'mixed-epic');
+  assert.ok(epic);
+  assert.equal(epic.status, 'in-progress');
 });
 
 test('getStory() returns a story object with no cross_cutting key when the YAML omits it — never throws, never fabricates a value', (t) => {
