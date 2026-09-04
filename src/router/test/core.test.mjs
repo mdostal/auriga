@@ -789,6 +789,47 @@ test('detectFalseDone demotes a done story that still has an OPEN matching PR', 
   assert.equal(core.detectFalseDone([m01], []).length, 0);
 });
 
+test('detectFalseDone does NOT demote when a merged identity-matching PR coexists with a stray open identity-matching PR in the same repo (GitHub issue #76 / PANT-4 thrash guard)', () => {
+  // PANT-4 repro: a real merged PR (mdostal/heimdall#85) advances the story to done
+  // via detectVerifiedDone, but a SEPARATE, unrelated-but-loosely-identity-matching
+  // still-open PR in the SAME repo used to demote it right back every cycle. The
+  // merged PR must win: no demotion.
+  const pant4 = {
+    id: 'p4', identifier: 'PANT-4', project_id: 'AURIGA',
+    title: '[p4-router-loop] fix thrash', status: 'done',
+    metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const mergedOwn = {
+    headRefName: 'feat/pant-4-router-loop', title: 'PANT-4: fix thrash',
+    state: 'merged', merged_at: '2026-09-01T00:00:00Z',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/85',
+  };
+  const strayOpen = {
+    headRefName: 'agent/retry/abc123', title: 'retry: PANT-4 router loop attempt',
+    state: 'open', _repo: 'mdostal/heimdall',
+    url: 'https://github.com/mdostal/heimdall/pull/99',
+  };
+  const acts = core.detectFalseDone([pant4], [mergedOwn, strayOpen]);
+  assert.equal(acts.length, 0);
+});
+
+test('detectFalseDone still demotes on an open identity-matching PR when NO merged identity-matching PR exists (no regression)', () => {
+  const pant4 = {
+    id: 'p4b', identifier: 'PANT-4', project_id: 'AURIGA',
+    title: '[p4-router-loop] fix thrash', status: 'done',
+    metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const strayOpen = {
+    headRefName: 'agent/retry/abc123', title: 'retry: PANT-4 router loop attempt',
+    state: 'open', _repo: 'mdostal/heimdall',
+    url: 'https://github.com/mdostal/heimdall/pull/99',
+  };
+  const acts = core.detectFalseDone([pant4], [strayOpen]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  assert.equal(acts[0].prUrl, 'https://github.com/mdostal/heimdall/pull/99');
+});
+
 test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => {
   assert.ok(core.isHiveCapableAssignee('AB', CFG));  // auriga-build
   assert.ok(core.isHiveCapableAssignee('RV', CFG));  // auriga-review
