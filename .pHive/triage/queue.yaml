@@ -48,6 +48,36 @@ entries:
         at: "2026-09-04T00:00:00Z"
       - state: closed
         at: "2026-09-04T00:00:00Z"
+  - id: t-003
+    state: clarified
+    kind: bug
+    title: "Root-cause why build tasks hang 3+ hours under light default-config workload"
+    description: >
+      GitHub issue #77 (mdostal/auriga#77), split out from #75 (t-001, now
+      closed): why PANT-48 sat in_progress/running for 3+ hours with no
+      progress, one prior retry already failed with "task expired in queue".
+      t-001's fix (bounded zombie-recovery give-up) addresses the SYMPTOM
+      (stop looping forever on a stuck task) but not this — why the
+      underlying task runtime got stuck for hours in the first place.
+    reproduction_steps: >
+      Not reproducible from a code-only pass — needs live investigation of
+      queue/runtime state at the time of a real stall (queue starvation vs.
+      a runtime/agent-side deadlock vs. a missing upstream timeout). Blocked
+      on live production access this session does not have.
+    reporter: "mdostal (GitHub issue #77, filed 2026-09-04 by this session, split from #75)"
+    reported_at: "2026-09-04T00:00:00Z"
+    priority: null
+    severity: null
+    linked_epic: null
+    linked_story: null
+    closed_reason: null
+    closed_at: null
+    source_url: "https://github.com/mdostal/auriga/issues/77"
+    state_history:
+      - state: inbox
+        at: "2026-09-04T00:00:00Z"
+      - state: clarified
+        at: "2026-09-04T00:00:00Z"
   - id: t-002
     state: closed
     kind: bug
