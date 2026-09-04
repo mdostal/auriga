@@ -32,7 +32,7 @@ const CFG = {
   HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus', PCORE: 'Pantheon Core' },
-  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10, perCycleReview: 1 },
+  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, zombieMaxAttempts: 3, verifyDelayMs: 10, perCycleReview: 1 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
@@ -272,6 +272,50 @@ test('detectZombies: stale-but-old run triggers recovery, fresh done does not', 
   assert.equal(byId['z4'], 'rerun');
   // z5: fresh running run -> healthy, not flagged.
   assert.equal(byId['z5'], undefined);
+});
+
+test('detectZombies: run count below zombieMaxAttempts still emits assign/rerun (no regression)', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  // CFG.CAPS.zombieMaxAttempts is 3; 2 prior runs is still below the cap.
+  const inProgress = [
+    { id: 'g1', identifier: 'g1', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled' },
+    { id: 'g2', identifier: 'g2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled' },
+  ];
+  const runs = {
+    g1: [
+      { status: 'failed', error: 'x', created_at: old },
+      { status: 'failed', error: 'x', created_at: old },
+    ],
+    g2: [
+      { status: 'running', completed_at: null, created_at: old, started_at: old },
+      { status: 'running', completed_at: null, created_at: old, started_at: old },
+    ],
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a.action]));
+  assert.equal(byId['g1'], 'assign');
+  assert.equal(byId['g2'], 'rerun');
+});
+
+test('detectZombies: run count at/above zombieMaxAttempts emits give-up instead of assign/rerun', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  const makeRuns = (n) => Array.from({ length: n }, () => ({ status: 'failed', error: 'x', created_at: old }));
+  const inProgress = [
+    { id: 'g3', identifier: 'g3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stuck at cap' },
+    { id: 'g4', identifier: 'g4', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stuck above cap' },
+  ];
+  const runs = {
+    g3: makeRuns(3), // exactly at CFG.CAPS.zombieMaxAttempts (3)
+    g4: makeRuns(5), // above the cap
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
+  assert.equal(byId['g3'].action, 'give-up');
+  assert.equal(byId['g3'].reason, 'max-attempts-exhausted');
+  assert.equal(byId['g4'].action, 'give-up');
+  assert.equal(byId['g4'].reason, 'max-attempts-exhausted');
 });
 
 test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {

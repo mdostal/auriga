@@ -335,3 +335,55 @@ test('route new todos: no run row appearing within the verify wait logs verify_n
   assert.equal(log.byEvent('verify_ok').length, 0);
   assert.ok(calls.rerun.some((c) => c.identifier === story.identifier), 'the inline verify step must have force-reran the story');
 });
+
+// ---- GH #75 / t001-zombie-give-up: bounded zombie-recovery attempts -------
+// Once an in_progress issue's run count reaches cfg.CAPS.zombieMaxAttempts,
+// detectZombies emits 'give-up' instead of 'assign'/'rerun'. The router must
+// never actuate (assignIssue/rerunIssue) for that action, must log
+// zombie_give_up, and must best-effort comment on the issue.
+
+test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIssue, logs zombie_give_up, and gets a best-effort comment', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000); // 1h old, well past zombieStaleMs
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  // Pre-seed run history AT the cap (cfg.CAPS.zombieMaxAttempts) so detectZombies
+  // gives up on it instead of recovering it.
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(!calls.assign.some((c) => c.identifier === stuckIssue.identifier), 'give-up must never call spawn.assignIssue for this issue');
+  assert.ok(!calls.rerun.some((c) => c.identifier === stuckIssue.identifier), 'give-up must never call spawn.rerunIssue for this issue');
+
+  const giveUps = log.byEvent('zombie_give_up');
+  assert.equal(giveUps.length, 1);
+  assert.equal(giveUps[0].identifier, stuckIssue.identifier);
+  assert.equal(giveUps[0].action, 'give-up');
+
+  assert.equal(calls.comment.length, 1, 'give-up should best-effort comment on the issue');
+  assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
+  assert.ok(calls.comment[0].body.length > 0);
+});
+
+test('zombie give-up: a comment failure is swallowed and never crashes the cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  backlog.commentOnIssue = () => { throw new Error('comment API down'); };
+  const log = createLogSink();
+
+  await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
+
+  assert.ok(!calls.assign.some((c) => c.identifier === stuckIssue.identifier));
+  assert.ok(!calls.rerun.some((c) => c.identifier === stuckIssue.identifier));
+  assert.equal(log.byEvent('zombie_give_up').length, 1);
+  assert.equal(log.byEvent('zombie_give_up_error').length, 1);
+});

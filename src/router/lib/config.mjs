@@ -46,6 +46,7 @@ export const CAPS = _ext.CAPS ?? {
   perCycleTotal: 5,
   cycleMs: 75000,
   zombieStaleMs: 20 * 60 * 1000, // 20 min
+  zombieMaxAttempts: 3, // GH #75: cap bounded zombie-recovery retries before giving up (see core.mjs detectZombies)
   verifyDelayMs: 6000, // wait after assign before checking a run started
   perCycleReview: 1, // BACK-HALF: at most one review/ship dispatch per cycle (sparing on the Claude account)
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)

@@ -502,6 +502,35 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // fires the self-block ("plugin-hive execute is unavailable in this Codex
     // runtime"). Force a REASSIGN to a hive lane instead of a same-assignee rerun.
     const misLaned = isHive && !!i.assignee_id && !isHiveCapableAssignee(i.assignee_id, cfg);
+    // GH #75 / t001-zombie-give-up: bound zombie-recovery retries instead of
+    // re-firing assign/rerun forever. runsByIssue already gives us the
+    // issue's own run history for free, so its length is a natural, stateless
+    // attempt counter — no new persistent state needed.
+    //
+    // Hellsing boundary: this is a deliberate, BOUNDED stopgap, not the real
+    // fix. pantheon-v2's plugins/hellsing/README.md reserves "the dangerous
+    // actuation of terminating stuck processes" for a separate god (Hellsing),
+    // keeping Auriga "a thin, event-driven state-machine consumer." Hellsing
+    // is phase:concept with no runnable code today, and Auriga has no
+    // SpawnAdapter method to actually terminate a stuck process (adding one
+    // pre-emptively would violate adapters/README.md's no-pre-emptive-
+    // integrations rule). So once an issue exhausts its attempt budget,
+    // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
+    // + commented on the issue) instead of silently looping forever. Real
+    // termination/actuation stays Hellsing's job once it exists and runs.
+    if (runs.length >= cfg.CAPS.zombieMaxAttempts) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        hasAssignee: !!i.assignee_id,
+        isHive,
+        action: 'give-up',
+        reason: 'max-attempts-exhausted',
+      });
+      continue;
+    }
     actions.push({
       identifier: i.identifier,
       issueId: i.id,
