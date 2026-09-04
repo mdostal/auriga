@@ -481,6 +481,25 @@ export async function cycle(opts = {}) {
     const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
     for (const z of zombies) {
       if (assigned >= maxAssign) break;
+      if (z.action === 'give-up') {
+        // GH #75 / t001-zombie-give-up: attempt cap exhausted — stop re-actuating.
+        // Never call spawn.assignIssue/rerunIssue on this path. Best-effort leave
+        // a human-visible marker on the issue; a comment failure must never crash
+        // the cycle (matches zombie_error/unblock_unassign_error convention).
+        logImpl('zombie_give_up', { ...z, applied: !dryRun });
+        if (!dryRun) {
+          try {
+            backlog.commentOnIssue(
+              z.identifier,
+              `Auriga auto-retried this issue ${cfgImpl.CAPS.zombieMaxAttempts} time(s) and it is still stuck ` +
+              'in_progress with no successful run. Giving up on further automatic zombie-recovery attempts ' +
+              '(bounded-retry stopgap — see t001-zombie-give-up) to avoid looping forever. This needs manual ' +
+              'attention: please investigate and manually rerun/reassign when ready.'
+            );
+          } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, error: e.message }); }
+        }
+        continue;
+      }
       if (z.action === 'rerun') {
         logImpl('zombie', { ...z, applied: !dryRun });
         if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
