@@ -862,16 +862,31 @@ export function detectFalseDone(doneIssues, openPrs = []) {
     // carries the story key but not the PAN id): match by branch/title identity,
     // repo-qualified. Kept so the m-01-style genuine false-done still fires.
     const wantRepo = normalizeRepoSlug(targetRepoValue(i) || '');
+    const repoQualifies = (p) => {
+      if (!wantRepo) return true;
+      const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
+      return !prRepo || prRepo === wantRepo;
+    };
     const pr = (openPrs || []).find((p) => {
       if (!prIsOpen(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false; // branch/title identity only (never body)
-      if (wantRepo) {
-        const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
-        if (prRepo && prRepo !== wantRepo) return false;
-      }
-      return true;
+      return repoQualifies(p);
     });
     if (!pr) continue; // no OWN open PR -> either merged or a non-code done task -> leave it
+    // GUARD (GitHub issue #76 / PANT-4 thrash): a stray still-open PR that merely
+    // identity-matches the story (a stale retry, an old draft, anything else
+    // referencing the same ticket id/key) must not out-rank a REAL merged PR for the
+    // same story in the same repo. Without this, detectVerifiedDone advances the story
+    // to done off the merged PR while detectFalseDone immediately demotes it again off
+    // the unrelated open one, and the two detectors thrash done<->in_review forever.
+    // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
+    const mergedPr = (openPrs || []).find((p) => {
+      const merged = p.state === 'merged' || p.merged_at != null || p.mergedAt != null;
+      if (!merged) return false;
+      if (!prIdentityMatchesStory(p, i)) return false;
+      return repoQualifies(p);
+    });
+    if (mergedPr) continue; // a merged own PR beats a stray open one -> genuinely done, leave it
     actions.push({
       identifier: i.identifier, issueId: i.id, projectId: i.project_id,
       action: 'demote-to-in-review', prUrl: pr.url || pr.html_url || null,
