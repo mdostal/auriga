@@ -1,0 +1,123 @@
+id: t002-detect-false-done-merged-guard
+epic: t002-false-done-thrash-fix
+title: Guard detectFalseDone's fallback path against a merged identity-matching PR
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #76 (mdostal/auriga#76, triage t-002, p0/critical): the
+  dostal-tech tenant's dispatch loop is stuck thrashing PANT-4 between `done`
+  and `in_review` every cycle, starving all other backlog items (assigned: 0
+  every cycle).
+
+  Root cause (verified against current code, see
+  .pHive/epics/t002-false-done-thrash-fix/docs/design-discussion.md for the
+  full trace): `detectFalseDone` (src/router/lib/core.mjs:838) has two paths.
+  The "authoritative" path (keyed on a recorded `ownPrUrl`) is effectively
+  dead code — nothing in this codebase ever writes `metadata.pr_url` or a
+  `pr_url:` description line, confirmed by grep. So every real story goes
+  through the FALLBACK path: it demotes a `done` issue back to `in_review`
+  whenever candidatePrs contains ANY open PR that identity-matches the story
+  (repo-qualified via `prIdentityMatchesStory`) — without checking whether
+  the SAME candidate set also contains a MERGED PR that identity-matches the
+  same story. `detectVerifiedDone` (core.mjs:446) meanwhile advances the
+  issue to `done` off the merged PR using a separate, looser matcher
+  (`prMatchesStory`). When a story has both a real merged PR AND a separate,
+  unrelated-but-loosely-matching still-open PR in the same target repo (a
+  stale/abandoned retry, an old draft, anything else that happens to
+  reference the ticket id), the two detectors permanently disagree and the
+  story thrashes done<->in_review forever.
+
+  Fix: in `detectFalseDone`'s fallback branch only (the authoritative
+  `ownPrUrl` branch is untouched), before pushing a demote action, also
+  check the SAME `openPrs` candidate set for a MERGED PR that
+  identity-matches the story via the same `prIdentityMatchesStory` matcher,
+  repo-qualified the same way the open-PR check already is. If a merged
+  identity-matching PR exists, skip the demotion — a merged PR beats a stray
+  open one referencing the same ticket, so the story is genuinely done.
+
+acceptance_criteria:
+  - "Given a done story with a merged identity-matching PR AND a separate open identity-matching PR in the same repo, when detectFalseDone runs, then it does NOT produce a demote-to-in-review action for that story."
+  - "Given a done story with only an open identity-matching PR (no merged one), when detectFalseDone runs, then it still produces a demote-to-in-review action exactly as before (no regression on the real false-done catch this function exists for)."
+  - "Given a done story with a recorded ownPrUrl (authoritative path), when detectFalseDone runs, then its existing behavior is completely unchanged — the new guard only applies inside the fallback branch."
+  - "All existing tests in src/router/test/core.test.mjs covering detectFalseDone (including the PAN-6952 regression case) still pass unmodified."
+
+steps:
+  - id: implement
+    description: >
+      Add the merged-PR guard to detectFalseDone's fallback branch in
+      src/router/lib/core.mjs. Reuse prIdentityMatchesStory and prIsOpen
+      (already imported/defined in this file) — do not introduce a new
+      matcher. Keep the change additive and minimal: it must only ever
+      SUPPRESS a demotion that would otherwise fire, never cause a new one.
+    agent: developer
+  - id: test
+    description: >
+      Add test cases to src/router/test/core.test.mjs covering: (1) merged +
+      stray-open PR -> no demotion (the new guard firing, this is the PANT-4
+      repro case), (2) open-only PR, no merged one -> demotion still fires
+      (no regression), (3) confirm the existing PAN-6952 authoritative-path
+      test and any other existing detectFalseDone tests still pass
+      unmodified. Run `npm test` (or the repo's real test command — check
+      package.json) from repo root and confirm full green, not just the new
+      cases.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t002-false-done-thrash-fix with a clear message
+      referencing GitHub issue #76. Do not open a PR or merge — the
+      orchestrator handles verification, PR, and merge after this story
+      completes.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: "detectFalseDone (line ~838) and detectVerifiedDone (line ~446) — the two competing state-machine decisions; prIdentityMatchesStory and prIsOpen are the matchers to reuse."
+    - path: src/router/test/core.test.mjs
+      purpose: existing test coverage for detectFalseDone, including the PAN-6952 regression case — new tests should follow the same style/fixture shape.
+    - path: src/router/auriga-router.mjs
+      purpose: "lines ~356-420 — shows how detectFalseDone is actually called (candidatePrs board-wide scan, passed as `donePrs`), for context only; this story does not touch this file."
+
+code_examples:
+  - title: detectFalseDone's existing fallback branch (core.mjs:861-878)
+    file: src/router/lib/core.mjs
+    snippet: |
+      const wantRepo = normalizeRepoSlug(targetRepoValue(i) || '');
+      const pr = (openPrs || []).find((p) => {
+        if (!prIsOpen(p)) return false;
+        if (!prIdentityMatchesStory(p, i)) return false; // branch/title identity only (never body)
+        if (wantRepo) {
+          const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
+          if (prRepo && prRepo !== wantRepo) return false;
+        }
+        return true;
+      });
+      if (!pr) continue; // no OWN open PR -> either merged or a non-code done task -> leave it
+      actions.push({ ... action: 'demote-to-in-review', ... });
+
+design_decisions:
+  - decision: Guard inside detectFalseDone's fallback branch only, not a new top-level function.
+    rationale: Smallest possible surface area; matches this function's own PAN-6952 precedent of tightening the fallback match rather than restructuring the caller.
+  - decision: Reuse prIdentityMatchesStory (not the looser prMatchesStory) for the merged-PR check.
+    rationale: Symmetry — the guard should trust a merged PR exactly as much as the demotion trusts an open one, using the same identity matcher and repo qualification.
+
+risks:
+  - severity: low
+    description: A story with a genuinely merged PR that happens to ALSO have an unrelated but identity-matching still-open PR in a DIFFERENT repo than target_repo could be missed by a repo-mismatched guard check.
+    mitigation: Repo-qualify the merged-PR check the same way the existing open-PR check already is (using targetRepoValue/normalizeRepoSlug) — covered by acceptance criteria and new tests.
+
+references:
+  - path: src/router/lib/core.mjs
+    relevant_excerpt: |
+      export function prIsOpen(pr = {}) {
+        const st = (pr.state || '').toLowerCase();
+        if (st === 'open') return true;
+        if (st === 'merged' || st === 'closed') return false;
+        return !pr.merged_at && !pr.mergedAt && !pr.closed_at && !pr.closedAt;
+      }

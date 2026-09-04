@@ -1,0 +1,24 @@
+name: t002-false-done-thrash-fix
+title: Stop detectFalseDone thrashing a story with a merged PR back to in_review
+description: >
+  Fixes GitHub issue #76 (triage t-002, p0/critical): a story with a genuinely
+  merged PR can also match a separate, unrelated, still-open PR via
+  detectFalseDone's fuzzy fallback identity match, causing an infinite
+  done<->in_review thrash that starves the whole tenant's dispatch loop.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/76"
+source_triage: t-002
+
+stories:
+  - id: t002-detect-false-done-merged-guard
+    title: Guard detectFalseDone's fallback path against a merged identity-matching PR
+    complexity: low
+    depends_on: []
