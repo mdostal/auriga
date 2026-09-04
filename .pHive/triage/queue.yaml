@@ -1,7 +1,7 @@
 schema_version: 1
 entries:
   - id: t-001
-    state: prioritized
+    state: closed
     kind: bug
     title: "Auriga does its own zombie-detection/actuation — contradicts Hellsing's documented architecture, and it's malfunctioning"
     description: >
@@ -32,10 +32,10 @@ entries:
     reported_at: "2026-09-03T14:42:06Z"
     priority: p1
     severity: moderate
-    linked_epic: null
-    linked_story: null
-    closed_reason: null
-    closed_at: null
+    linked_epic: t001-zombie-give-up
+    linked_story: t001-zombie-max-attempts-give-up
+    closed_reason: "shipped in PR (merged directly to main, commit 4dd121f) — bounded-retry give-up added to detectZombies (src/router/lib/core.mjs) + auriga-router.mjs"
+    closed_at: "2026-09-04T00:00:00Z"
     source_url: "https://github.com/mdostal/auriga/issues/75"
     state_history:
       - state: inbox
@@ -43,6 +43,10 @@ entries:
       - state: clarified
         at: "2026-09-04T00:00:00Z"
       - state: prioritized
+        at: "2026-09-04T00:00:00Z"
+      - state: plan-ready
+        at: "2026-09-04T00:00:00Z"
+      - state: closed
         at: "2026-09-04T00:00:00Z"
   - id: t-002
     state: closed
