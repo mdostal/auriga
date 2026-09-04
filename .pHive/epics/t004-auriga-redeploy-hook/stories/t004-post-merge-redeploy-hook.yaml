@@ -1,0 +1,97 @@
+id: t004-post-merge-redeploy-hook
+epic: t004-auriga-redeploy-hook
+title: Standalone-safe post-merge hook that redeploys live auriga* compose services
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #78 (mdostal/auriga#78). Fixes merged to Auriga's main never
+  reach a live pantheon-v2 deployment's running auriga containers, because
+  nothing rebuilds them after a merge. Real incident: issue #76's fix sat
+  merged for a long time while dostal-tech's container kept running the
+  pre-fix image and PANT-4 kept thrashing.
+
+  pantheon-v2's docker-compose.yml / scripts/generate-auriga-compose.ts
+  build every auriga/auriga-<tenant_id> service's image from a plain git
+  checkout at ${AURIGA_LOCAL_PATH:-./plugins/auriga} -- just a normal clone
+  of this repo. A git pull inside it is the exact moment a redeploy needs
+  to fire. pantheon-v2 already has bin/pantheon-redeploy (targeted,
+  build+force-recreate+health-check, already documents auriga as a known
+  service) and its own install/lib/git-hooks/post-merge (wired via
+  git config core.hooksPath) triggering it on merges to ITS OWN main --
+  but has no visibility into merges landing on Auriga's separate repo/main.
+
+  Fix: ship the trigger half in Auriga's own repo, mirroring pantheon-v2's
+  hook convention exactly (same core.hooksPath wiring, same guard-on-main
+  logic). Zero pantheon-v2-side changes. Must be a correct, silent,
+  documented no-op in a standalone dev checkout (no pantheon-v2 parent) --
+  the common case, including this session's own working copy -- detected by
+  checking two directories up for a real pantheon-v2 deployment tree
+  (docker-compose.yml referencing AURIGA_LOCAL_PATH + a working
+  bin/pantheon-redeploy) before doing anything. Discover live auriga*
+  services via `docker compose config --services`, never hardcoded, so the
+  hook needs no update as tenants are added/removed.
+
+acceptance_criteria:
+  - "Given this hook runs in an ordinary standalone Auriga clone (no pantheon-v2 parent two directories up), when it fires, then it exits 0 silently without attempting any docker/redeploy action."
+  - "Given this hook runs on a non-main branch (even inside a real pantheon-v2-nested checkout), when it fires, then it exits 0 silently (matches pantheon-v2's own post-merge hook's guard)."
+  - "Given this hook runs on main inside a real pantheon-v2-nested checkout (docker-compose.yml references AURIGA_LOCAL_PATH, bin/pantheon-redeploy is executable), when it fires, then it discovers every live compose service whose name matches ^auriga(-|$) via `docker compose config --services` and invokes pantheon-v2's own bin/pantheon-redeploy with exactly that list."
+  - "Given zero auriga* services are discovered (e.g. docker not running, or a compose file with none), when the hook fires, then it logs a clear message to stderr and exits 0 -- never a hard failure that could break a normal git pull."
+  - "The script is portable to a plain bash without bash-4+ builtins (no mapfile/readarray) -- verified against this machine's stock bash 3.2, not assumed from the deploy host's likely-newer bash."
+  - "README.md documents both the one-time `git config core.hooksPath install/lib/git-hooks` setup and a manual fallback redeploy command sequence, per issue #78's explicit ask for at minimum a documented manual step."
+
+steps:
+  - id: implement
+    description: >
+      Write install/lib/git-hooks/post-merge (executable) implementing the
+      guard-on-main + pantheon-v2-nesting-detection + live service discovery
+      + exec pantheon-redeploy logic described above. Add the README.md
+      "Redeploying a live pantheon-v2 instance" section documenting both the
+      hook setup and the manual fallback.
+    agent: developer
+  - id: test
+    description: >
+      No existing JS test suite covers shell hooks. Verify manually by
+      actually running the script (not just reading it) against real
+      scenarios: (1) standalone checkout (this repo itself) -> silent no-op;
+      (2) a disposable temp directory shaped like a real pantheon-v2 nested
+      deployment (fake docker-compose.yml referencing AURIGA_LOCAL_PATH, a
+      fake executable bin/pantheon-redeploy that just echoes its args, a
+      real git repo on main) -> correctly discovers and invokes redeploy for
+      the right service(s), including a multi-tenant case with a
+      docker-compose.override.yml adding a second auriga-<tenant> service;
+      (3) same nested setup but on a feature branch -> no-op. Run
+      `bash -n` for a syntax check. Then run this repo's own full
+      `npm run test:all` to confirm zero regressions (this change touches no
+      JS/test code, so this should be a pure confirmation, not a fix pass).
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t004-auriga-redeploy-hook with a clear message
+      referencing GitHub issue #78.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: install/lib/git-hooks/post-merge
+      purpose: the new hook itself
+    - path: README.md
+      purpose: "new 'Redeploying a live pantheon-v2 instance' section, inserted before ## Quickstart"
+
+design_decisions:
+  - decision: Ship the hook in Auriga's own repo rather than adding per-plugin logic to pantheon-v2.
+    rationale: The trigger event (a merge landing on Auriga's own main) only exists in this checkout's git history; pantheon-v2's own hook has no visibility into it. Shipping with Auriga means every deployment gets this automatically.
+  - decision: Discover services live via `docker compose config --services` rather than hardcoding tenant names.
+    rationale: This hook must have zero knowledge of pantheon-v2's tenant registry and keep working unmodified as tenants are added/removed.
+  - decision: Avoid bash-4+ builtins (mapfile/readarray).
+    rationale: Found live during verification that this machine's stock bash (3.2, macOS default) lacks mapfile — a portable while-read loop costs nothing and removes a real, silently-possible failure mode on any bash <4 environment.
+
+risks:
+  - severity: low
+    description: A misconfigured docker-compose.yml on the deploy host that happens to also reference AURIGA_LOCAL_PATH but isn't actually a real Auriga deployment could trigger a spurious redeploy attempt.
+    mitigation: The detection also requires a working, executable bin/pantheon-redeploy at the expected relative path — an unlikely false-positive combination; worst case is a harmless no-op redeploy attempt against services docker compose reports don't exist.
