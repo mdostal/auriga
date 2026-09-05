@@ -32,8 +32,26 @@ test('AC1: AURIGA_CONFIG unset - HIVE_LANE is a non-empty array', () => {
 
 test('AC1: AURIGA_CONFIG unset - AGENTS contains expected built-in entries', () => {
   assert.ok(cfg.AGENTS['auriga-build'], 'auriga-build must exist in AGENTS');
-  assert.ok(cfg.AGENTS['auriga-review'], 'auriga-review (mutation) must exist in AGENTS');
+  assert.ok(cfg.AGENTS['auriga-review'], 'auriga-review must exist in AGENTS');
   assert.ok(cfg.AGENTS['mnemosyne-dev'], 'mnemosyne-dev must exist in AGENTS');
+});
+
+// GH #79 regression: auriga-review's id was hardcoded stale (verified against
+// the wrong, old Multica workspace) AND config.mjs used to add this entry via
+// an unconditional `AGENTS['auriga-review'] = {...}` mutation AFTER
+// config-substrate.mjs's AGENTS object was already built — silently stomping
+// any future tenant-scoped override. It now lives directly in
+// config-substrate.mjs's AGENTS default, like every other agent.
+test('GH #79: auriga-review carries the live-reverified id, not the stale default', () => {
+  assert.equal(cfg.AGENTS['auriga-review'].id, '7545f9ad-41da-4bd9-9674-f0dc223236b9');
+  assert.notEqual(cfg.AGENTS['auriga-review'].id, 'c5beb33c-2a6d-4f78-960a-73966f184506');
+});
+
+test('GH #79: every review-lane name in REVIEW_LANE resolves to a real AGENTS entry with an id', () => {
+  for (const name of cfg.REVIEW_LANE) {
+    assert.ok(cfg.AGENTS[name], `REVIEW_LANE name "${name}" must exist in AGENTS`);
+    assert.ok(cfg.AGENTS[name].id, `AGENTS["${name}"] must carry a real id`);
+  }
 });
 
 test('AC1: PROJECT_IDS is an array (registry-derived when AURIGA_CONFIG unset)', () => {
