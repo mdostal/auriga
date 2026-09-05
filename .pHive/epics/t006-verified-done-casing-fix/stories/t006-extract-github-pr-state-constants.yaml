@@ -1,0 +1,101 @@
+id: t006-extract-github-pr-state-constants
+epic: t006-verified-done-casing-fix
+title: Extract GITHUB_PR_STATE constants module and fix detectVerifiedDone's casing bug
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #81 (mdostal/auriga#81, triage t-004). detectVerifiedDone
+  (core.mjs) checked `pr.state === 'merged'` and `pr.merged_at != null`, but
+  real gh-CLI-sourced PR objects use `state: "MERGED"` (uppercase) and
+  `mergedAt` (camelCase) -- both checks always false, so detectVerifiedDone
+  could never advance a story to done off a genuinely merged PR. Confirmed
+  live: 19 stories stuck in_review on dostal-tech, some 4-5+ days stale
+  (PANT-59, PANT-93 named specifically in the issue).
+
+  Per operator discussion (design-discussion.md's presented gate): the
+  operator flagged this as a hardcoded-strings/magic-value cleanliness
+  problem beyond just this one bug, and asked for a real GitHub-enum-shaped
+  constants module (not ad hoc string literals at each comparison site) plus
+  Option B (a shared isPrMerged/isPrOpen helper, not just a narrow inline
+  fix to detectVerifiedDone alone) -- closing the pattern that had already
+  produced THREE hand-copied, drifting versions of this exact
+  casing-normalization logic in core.mjs (prIsOpen had it right,
+  detectFalseDone's merged-PR guard from this week's #76 fix partially
+  duplicated it, detectVerifiedDone lacked it entirely).
+
+acceptance_criteria:
+  - "A new src/router/lib/github-pr-state.mjs module exports GITHUB_PR_STATE (OPEN/CLOSED/MERGED, mirroring GitHub's real, uppercase PullRequestState enum values) and PR_TIMESTAMP_FIELDS (both camelCase and snake_case spellings for merged/closed timestamps), plus isPrOpen(pr) and isPrMerged(pr) predicate functions built on those constants."
+  - "detectVerifiedDone(inReviewIssues, prsByIssue) fires (produces an advance-done action) given a real gh-CLI-shaped PR object: { state: 'MERGED', mergedAt: '<timestamp>' } with no lowercase/snake_case fields present at all."
+  - "core.mjs's prIsOpen and detectFalseDone's merged-PR guard both now delegate to the same shared isPrOpen/isPrMerged functions -- no hand-copied casing-comparison logic remains duplicated across the three sites."
+  - "prIsOpen remains exported from core.mjs under that exact name (auriga-router.mjs accesses it as coreImpl.prIsOpen) -- this refactor does not break that call site."
+  - "All existing tests (including lowercase-state fixtures already in core.test.mjs, e.g. detectFalseDone's PAN-6952 case) continue to pass unmodified -- the new normalization is backward-compatible with older lowercase/snake_case test fixtures, not just the new uppercase/camelCase real shape."
+  - "No hardcoded PR-state string literal ('open'/'closed'/'merged' in any casing) remains anywhere in core.mjs outside github-pr-state.mjs itself."
+
+steps:
+  - id: implement
+    description: >
+      Create src/router/lib/github-pr-state.mjs with GITHUB_PR_STATE,
+      PR_TIMESTAMP_FIELDS, prTimestamp(), isPrOpen(), isPrMerged(). Update
+      core.mjs: import from the new module; detectVerifiedDone uses
+      isPrMerged directly (prs.some(isPrMerged)); prIsOpen becomes `export
+      const prIsOpen = isPrOpen;` (preserves the existing export name/call
+      site); detectFalseDone's merged-PR guard (added this week for #76)
+      replaces its own inline merged-check with isPrMerged(p). Export
+      isPrMerged from core.mjs too for direct testability.
+    agent: developer
+  - id: test
+    description: >
+      Add src/router/test/github-pr-state.test.mjs covering the constants
+      module directly (enum values, frozen-ness, prTimestamp field-priority,
+      isPrOpen/isPrMerged against real uppercase/camelCase shapes AND
+      backward-compat lowercase/snake_case shapes). Add a
+      detectVerifiedDone test in core.test.mjs using the literal real
+      gh-CLI shape from GH #81 (state:'MERGED', mergedAt:<ts>, no other
+      fields) -- not a shape that would also satisfy the old broken check.
+      Run npm run test:all and confirm full green, not just the new tests.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t006-verified-done-casing-fix with a clear
+      message referencing GitHub issue #81.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/github-pr-state.mjs
+      purpose: new constants + predicate module, single source of truth for PR-state casing normalization.
+    - path: src/router/lib/core.mjs
+      purpose: "detectVerifiedDone (~line 464), prIsOpen (~line 628), detectFalseDone's merged-PR guard (~line 930) -- the three consumers unified onto the new module."
+    - path: src/router/test/github-pr-state.test.mjs
+      purpose: new dedicated test file for the constants module.
+    - path: src/router/test/core.test.mjs
+      purpose: existing detectVerifiedDone/detectFalseDone coverage + the new GH #81 repro case.
+
+design_decisions:
+  - decision: Extract a real GitHub-shaped constants module rather than just fixing the one comparison inline.
+    rationale: "Operator's explicit ask: no hardcoded strings, mirror GitHub's real enum shape so a future different integration only needs a new constants module, not a grep-and-pray through core.mjs. Also closes a real, already-observed drift pattern (three hand-copied versions of the same check, one of them simply wrong)."
+  - decision: Keep prIsOpen's exported name unchanged in core.mjs (as a re-export) rather than moving all callers to import from github-pr-state.mjs directly.
+    rationale: auriga-router.mjs accesses it as coreImpl.prIsOpen (property access on the whole module object) -- preserving the name avoids touching that call site or any test that references core.prIsOpen.
+  - decision: Case-normalize with .toUpperCase() against real (uppercase) GitHub enum values, while still tolerating lowercase/mixed-case input.
+    rationale: Matches gh CLI's actual real output casing (the literal bug this epic fixes) while staying backward-compatible with this repo's own pre-existing lowercase test fixtures and any other source that might use different casing.
+
+risks:
+  - severity: low
+    description: A different, non-GitHub future PR/MR source with an entirely different state vocabulary (not OPEN/CLOSED/MERGED at all) would not be served by this module.
+    mitigation: Explicitly out of scope by design (adapters/README.md's no-pre-emptive-integrations rule) -- a future integration gets its own constants module, and the two call sites that need it swap imports, which is the entire point of extracting this in the first place.
+
+references:
+  - path: src/router/lib/core.mjs
+    relevant_excerpt: |
+      export function prIsOpen(pr = {}) {
+        const st = (pr.state || '').toLowerCase();
+        if (st === 'open') return true;
+        if (st === 'merged' || st === 'closed') return false;
+        return !pr.merged_at && !pr.mergedAt && !pr.closed_at && !pr.closedAt;
+      }

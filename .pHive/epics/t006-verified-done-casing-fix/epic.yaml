@@ -1,0 +1,29 @@
+name: t006-verified-done-casing-fix
+title: Fix detectVerifiedDone's PR-state casing bug + extract a shared GitHub PR-state constants module
+description: >
+  Fixes GitHub issue #81: detectVerifiedDone never fired on a real merged PR
+  because it compared against lowercase 'merged'/snake_case merged_at, while
+  real gh-CLI PR objects use uppercase "MERGED"/camelCase mergedAt.
+  Per operator discussion, extracted GitHub's real PullRequestState enum
+  values and the timestamp-field spellings into a dedicated constants
+  module (src/router/lib/github-pr-state.mjs) with shared isPrOpen/isPrMerged
+  predicates, replacing three previously hand-copied, drifting versions of
+  the same casing-normalization logic across core.mjs (prIsOpen,
+  detectVerifiedDone, detectFalseDone's merged-PR guard).
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/81"
+source_triage: t-004
+
+stories:
+  - id: t006-extract-github-pr-state-constants
+    title: Extract GITHUB_PR_STATE constants module and fix detectVerifiedDone's casing bug
+    complexity: low
+    depends_on: []

@@ -1,6 +1,9 @@
 // Auriga auto-router — PURE decision logic (no live calls).
 // Everything here is deterministic and unit-tested with mocked inputs.
 
+import { isPrOpen, isPrMerged } from './github-pr-state.mjs';
+export { isPrMerged };
+
 const ACTIVE_RUN_STATUSES = new Set([
   'running', 'in_progress', 'in progress', 'queued', 'pending', 'dispatched', 'started', 'assigned',
 ]);
@@ -455,16 +458,20 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 }
 
 // Pure-code state-machine: advance in_review issues to done once verify_ok is
-// real — a linked PR has actually merged (state 'merged' or a non-null
-// merged_at), not merely runStatus reporting success. This is the
+// real — a linked PR has actually merged (see isPrMerged in
+// github-pr-state.mjs), not merely runStatus reporting success. This is the
 // false-confidence guard: runStatus is never treated as "done" on its own.
-// prsByIssue: { [identifier]: pullRequest[] } from `multica issue pull-requests`.
+// prsByIssue: { [identifier]: pullRequest[] } — real gh-CLI-shaped PR objects
+// (see lib/adapters/pantheon-v2-l2/index.mjs's ghPrs()) as of the
+// pantheon-owns-multica-board-bridge cutover; GH #81 found this function
+// still checking the OLD Multica-native shape's casing (lowercase
+// 'merged'/snake_case merged_at) and never firing on a real one.
 export function detectVerifiedDone(inReviewIssues, prsByIssue) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
     const prs = prsByIssue[i.identifier] || [];
-    const merged = prs.some((pr) => pr.state === 'merged' || pr.merged_at != null);
+    const merged = prs.some(isPrMerged);
     if (merged) {
       actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-done' });
     }
@@ -617,14 +624,10 @@ export function repoFromPrUrl(pr = {}) {
   return m ? m[1] : null;
 }
 
-// Is a PR open (not merged/closed)? Tolerant of gh's uppercase 'OPEN' and of a
-// missing state (open only when there is no merged/closed marker).
-export function prIsOpen(pr = {}) {
-  const st = (pr.state || '').toLowerCase();
-  if (st === 'open') return true;
-  if (st === 'merged' || st === 'closed') return false;
-  return !pr.merged_at && !pr.mergedAt && !pr.closed_at && !pr.closedAt;
-}
+// Is a PR open (not merged/closed)? See github-pr-state.mjs's isPrOpen —
+// kept exported here under this name (not just re-exported from that module)
+// because auriga-router.mjs accesses it as coreImpl.prIsOpen.
+export const prIsOpen = isPrOpen;
 
 // Does this ticket have at least one OPEN PR referencing it? `prs` is the array of
 // candidate PRs the router gathered (gh pr list across the story's resolvable repos).
@@ -926,8 +929,7 @@ export function detectFalseDone(doneIssues, openPrs = []) {
     // the unrelated open one, and the two detectors thrash done<->in_review forever.
     // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
     const mergedPr = (openPrs || []).find((p) => {
-      const merged = p.state === 'merged' || p.merged_at != null || p.mergedAt != null;
-      if (!merged) return false;
+      if (!isPrMerged(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false;
       return repoQualifies(p);
     });

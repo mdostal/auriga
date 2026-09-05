@@ -48,6 +48,51 @@ entries:
         at: "2026-09-04T00:00:00Z"
       - state: closed
         at: "2026-09-04T00:00:00Z"
+  - id: t-004
+    state: closed
+    kind: bug
+    title: "detectVerifiedDone never fires: state/mergedAt field casing mismatch leaves merged-PR tickets stuck in_review forever"
+    description: >
+      GitHub issue #81 (mdostal/auriga#81). detectVerifiedDone (src/router/lib/core.mjs:462)
+      checks `pr.state === 'merged'` and `pr.merged_at`, but the real
+      gh-CLI-sourced PR objects (via listCandidatePullRequests's ghPrs())
+      use `"MERGED"` (uppercase) and `mergedAt` (camelCase) -- both halves of
+      the check are always false for every real PR, so detectVerifiedDone
+      can never advance a story to done off a merged PR. prIsOpen() in the
+      same file already handles this correctly (lowercases state, checks
+      both merged_at and mergedAt) -- a clean, precedented fix shape.
+      Confirmed live on dostal-tech: PANT-59 (merged PR #112, 2026-09-01) and
+      PANT-93 (merged PR #144, 2026-09-02) both stuck in_review for 4-5 days;
+      19 stories total stuck in_review on that tenant's board. Verified
+      against the current repo code by this session (2026-09-05) -- real,
+      not stale. Third instance this week of a data-shape mismatch between
+      gh's real JSON output and core.mjs's assumptions (same class as #76's
+      false-done fix and part of what #79 touched).
+    reproduction_steps: >
+      Any story with a genuinely merged PR sourced via the board-wide gh
+      scan sits in in_review forever -- detectVerifiedDone(inReviewIssues,
+      prsByIssue) returns zero actions for it even though prsByIssue
+      contains a PR object with state:"MERGED"/mergedAt:<timestamp>.
+    reporter: "mdostal (GitHub issue #81, filed 2026-09-05T06:17:18Z)"
+    reported_at: "2026-09-05T06:17:18Z"
+    priority: p0
+    severity: critical
+    linked_epic: t006-verified-done-casing-fix
+    linked_story: t006-extract-github-pr-state-constants
+    closed_reason: "shipped — GITHUB_PR_STATE constants module + isPrOpen/isPrMerged extracted (src/router/lib/github-pr-state.mjs), detectVerifiedDone fixed"
+    closed_at: "2026-09-05T00:00:00Z"
+    source_url: "https://github.com/mdostal/auriga/issues/81"
+    state_history:
+      - state: inbox
+        at: "2026-09-05T00:00:00Z"
+      - state: clarified
+        at: "2026-09-05T00:00:00Z"
+      - state: prioritized
+        at: "2026-09-05T00:00:00Z"
+      - state: plan-ready
+        at: "2026-09-05T00:00:00Z"
+      - state: closed
+        at: "2026-09-05T00:00:00Z"
   - id: t-003
     state: clarified
     kind: bug

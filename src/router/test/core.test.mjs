@@ -255,6 +255,25 @@ test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to
   assert.ok(actions.every((a) => a.action === 'advance-done'));
 });
 
+// GH #81 regression: real gh-CLI-shaped PR objects use uppercase state
+// ("MERGED") and camelCase mergedAt — NOT lowercase 'merged'/snake_case
+// merged_at. Before the fix, both fields on this exact shape failed to
+// match and detectVerifiedDone never fired. This is the literal PANT-59/
+// PANT-93 repro shape from the issue, not a shape that also happens to
+// satisfy the old broken check.
+test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, camelCase mergedAt) — GH #81', () => {
+  const inReview = [
+    { id: 'g1', identifier: 'PANT-59', project_id: 'AURIGA', status: 'in_review', title: 'real gh PR shape' },
+  ];
+  const prs = {
+    'PANT-59': [{ number: 112, state: 'MERGED', mergedAt: '2026-09-01T00:06:57Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PANT-59');
+  assert.equal(actions[0].action, 'advance-done');
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
