@@ -1,0 +1,28 @@
+name: t005-stale-agent-ids-fix
+title: Fix stale agent ids (verified against the wrong Multica workspace) + a config-mutation stomp bug
+description: >
+  Fixes GitHub issue #79: dostal-tech's dispatch loop stayed fully stuck
+  after #76's fix because selectReviewDispatch's idempotency check compared
+  the board's real assignee_id against a hardcoded agent id verified
+  against the WRONG (old) Multica workspace. Widened investigation (via a
+  cross-session peer's live data) found all 9 AGENTS ids shared this
+  staleness, plus a separate structural bug where config.mjs unconditionally
+  stomped any future tenant-scoped override of the auriga-review agent.
+  heimdall-dev's id could not be resolved live and is split out as its own
+  follow-up (GitHub issue #80).
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/79"
+
+stories:
+  - id: t005-fix-stale-agent-ids
+    title: Re-verify and fix all AGENTS ids; remove the auriga-review stomp mutation
+    complexity: low
+    depends_on: []

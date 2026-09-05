@@ -1,0 +1,103 @@
+id: t005-fix-stale-agent-ids
+epic: t005-stale-agent-ids-fix
+title: Re-verify and fix all AGENTS ids; remove the auriga-review stomp mutation
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #79 (mdostal/auriga#79). After #76's false-done fix was
+  confirmed genuinely working live, dostal-tech's dispatch loop stayed fully
+  stuck: PANT-4 got a fresh dispatch-review every ~30s cycle forever.
+
+  Root cause, established via real code reads plus two live data pulls from
+  a cross-session peer with production access (see
+  docs/design-discussion.md for the full trace): selectReviewDispatch's
+  "already under review" idempotency check compares the board's real
+  assignee_id against cfg.AGENTS['auriga-review'].id, which was hardcoded
+  and verified against the WRONG (old, stale) Multica workspace
+  (7feca4c9-..., per config-substrate.mjs's own header comment) rather than
+  the corrected one (f32af269-..., per PR #66/#71). The assign call itself
+  was resolving and writing the CORRECT live id every time
+  (7545f9ad-41da-4bd9-9674-f0dc223236b9, confirmed matching PANT-4's real
+  assignee_id) -- the router's own read-side check was comparing against a
+  different, wrong value and could never recognize its own assignment.
+
+  Widened before fixing: ALL 9 AGENTS entries carried the same "verified
+  against workspace 7feca4c9" claim, meaning computeInflight/
+  computeReviewInflight's assignee_id->lane-name lookups were likely wrong
+  router-wide, not just for review dispatch. A cross-session peer pulled the
+  real live id for every agent name via GET /api/backlog/agents/<name>: 8 of
+  9 resolved to real, different-from-hardcoded values; heimdall-dev 404'd
+  (no agent by that name in the corrected workspace) -- left UNCHANGED here,
+  split out as GitHub issue #80 rather than guessed.
+
+  Separately, the same peer found config.mjs added the auriga-review entry
+  via an UNCONDITIONAL `AGENTS['auriga-review'] = {...}` mutation running
+  AFTER config-substrate.mjs's AGENTS object was already built -- would
+  silently stomp any future tenant-scoped AGENTS override for this one
+  agent even after the id itself was fixed.
+
+acceptance_criteria:
+  - "cfg.AGENTS['auriga-review'].id equals the live-verified value 7545f9ad-41da-4bd9-9674-f0dc223236b9, not the old hardcoded c5beb33c-2a6d-4f78-960a-73966f184506."
+  - "cfg.AGENTS['consus-dev'/'auriga-dev'/'heimdall-dev-codex'/'auriga-build'/'mnemosyne-dev'/'votum-dev'/'minerva-dev'].id all equal their live-verified values (see design-discussion.md's data table)."
+  - "cfg.AGENTS['heimdall-dev'].id is left UNCHANGED (not blanked/guessed) with a comment referencing GitHub issue #80."
+  - "config.mjs no longer contains an `AGENTS['auriga-review'] = ` assignment -- the entry is defined once, in config-substrate.mjs's AGENTS default, alongside every other agent."
+  - "Every name in REVIEW_LANE (and by extension every name any lane list references) resolves to a real cfg.AGENTS entry carrying a non-empty id."
+  - "All existing tests pass unmodified except the one stale '(mutation)' comment-only wording update; full npm run test:all stays green."
+
+steps:
+  - id: implement
+    description: >
+      Update the 8 confirmed-live agent ids in
+      src/router/lib/config-substrate.mjs. Move the auriga-review entry from
+      lib/config.mjs's unconditional mutation into config-substrate.mjs's
+      AGENTS default (with its correct id), removing the mutation from
+      config.mjs entirely (keep the RUNTIME_CAP['claude-review'] = 1 line
+      and the surrounding explanatory comments, updated to reflect the
+      move). Update both files' stale "verified live against workspace
+      7feca4c9" header comments. Leave heimdall-dev's id unchanged with a
+      comment pointing at issue #80.
+    agent: developer
+  - id: test
+    description: >
+      Grep the test suite first to confirm no test hardcodes any of the old
+      stale UUID strings (it doesn't -- already confirmed). Add regression
+      tests to config.test.mjs: auriga-review carries the new live id (not
+      the old one), and every REVIEW_LANE name resolves to a real AGENTS
+      entry with a non-empty id. Update the one stale comment
+      ("auriga-review (mutation) must exist") to drop the now-inaccurate
+      "(mutation)" wording. Run npm run test:all and confirm full green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t005-stale-agent-ids-fix with a clear message
+      referencing GitHub issue #79 and crediting the cross-session live data
+      that made this fix possible.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/config-substrate.mjs
+      purpose: AGENTS default object -- all 9 agent ids live here now, including the moved-in auriga-review entry.
+    - path: src/router/lib/config.mjs
+      purpose: previously had the unconditional AGENTS['auriga-review'] = {...} mutation; now just the RUNTIME_CAP registration + explanatory comments.
+    - path: src/router/lib/core.mjs
+      purpose: "selectReviewDispatch (~line 677), computeInflight/computeReviewInflight -- the consumers whose assignee_id comparisons this fix makes correct."
+    - path: src/router/test/config.test.mjs
+      purpose: new GH #79 regression tests live here.
+
+design_decisions:
+  - decision: Leave heimdall-dev's id unchanged rather than guess or blank it.
+    rationale: An absent/wrong lookup fails identically either way (never matches a real assignee_id), and chooseAgentForProject already falls back to heimdall-dev-codex -- guessing would add risk (a WRONG-but-plausible-looking id could match some unrelated real agent) without removing any actual harm. Split to its own issue (#80) for live investigation.
+  - decision: Move auriga-review into config-substrate.mjs rather than just adding ??= in config.mjs.
+    rationale: Unifies it with the other 8 agents in the single real AGENTS default, inheriting the exact same uniform, tenant-overridable mechanism (_ext.AGENTS ?? {...}) with zero special-cased mutation -- removes the stomp bug at its root rather than patching around it.
+
+risks:
+  - severity: low
+    description: If any other code path (outside this repo, e.g. a dashboard or script in pantheon-v2) hardcodes the OLD auriga-review id for some display/matching purpose, it would silently stop matching after this change.
+    mitigation: Grepped this repo's own tests and found no hardcoded reference to the old id; out of scope to grep sibling repos, but the old id was already producing WRONG behavior everywhere it mattered (the whole point of this fix), so any such external reference was already broken in practice.

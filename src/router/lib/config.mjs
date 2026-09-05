@@ -1,6 +1,7 @@
 // Auriga auto-router configuration.
-// Project -> agent-lane map, agent metadata, and caps.
-// All IDs verified live against workspace Pantheon (7feca4c9-...).
+// Project -> agent-lane map, agent metadata, and caps. AGENTS' own ids now
+// live entirely in config-substrate.mjs (see that file's header for the
+// GH #79 re-verification against the correct workspace).
 //
 // AURIGA_CONFIG: optional path to a partial JSON override file (PANT-70). Any
 // key present in the file replaces the corresponding export; absent keys keep
@@ -71,12 +72,13 @@ export const CAPS = _ext.CAPS ?? {
 // separately and does not fight the build lanes for the claude RUNTIME_CAP slots.
 // It is deliberately capped tight (maxInflight 1 + perCycleReview 1) because it
 // physically shares the one Claude account (account usage is the real ceiling).
-AGENTS['auriga-review'] = {
-  id: 'c5beb33c-2a6d-4f78-960a-73966f184506', // filled in from `multica agent create` (Claude runtime, plugin-hive)
-  runtime: 'claude-review',  // own capacity bucket; physical Multica runtime is Claude (1d5e9b93)
-  maxInflight: 1,            // one review/ship at a time — sparing on the Claude account
-  repo: null,               // target_repo-driven, exactly like the build lane
-};
+//
+// The 'auriga-review' agent entry itself now lives in config-substrate.mjs's
+// AGENTS default (moved there GH #79) — this file used to ADD it here via an
+// unconditional `AGENTS['auriga-review'] = {...}` AFTER config-substrate.mjs's
+// object was already built, which would silently stomp any future
+// tenant-scoped AGENTS override for this one agent. Only the runtime-cap
+// bucket registration is still this "policy" file's job.
 
 RUNTIME_CAP['claude-review'] = 1;
 

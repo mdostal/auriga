@@ -23,15 +23,34 @@ import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
 
 // Project -> agent-lane map, agent metadata, and caps.
-// All IDs verified live against workspace Pantheon (7feca4c9-...).
-
+//
+// IDs re-verified live 2026-09-04 (GitHub issue #79) against the CORRECT,
+// current workspace f32af269-... via a real cross-session GET
+// /api/backlog/agents/<name> pull against the live core-api. The previous
+// claim here ("All IDs verified live against workspace Pantheon
+// 7feca4c9-...") was itself the bug: 7feca4c9 is the OLD, stale workspace
+// PR #66/#71 already moved every PROJECT id away from — these AGENT ids had
+// simply never gotten the same treatment. Concretely, this silently broke
+// selectReviewDispatch's "already under review, don't re-dispatch" check
+// (the real assignee_id the live board wrote never matched the stale
+// auriga-review id here, so PANT-4 re-dispatched every single cycle
+// forever — see #79) and, by the same mechanism, computeInflight/
+// computeReviewInflight's assignee_id->lane-name lookups router-wide.
 export const AGENTS = _ext.AGENTS ?? {
   'consus-dev': {
-    id: '66b8f66d-27a6-4fe2-b677-ee69b04ff794',
+    id: 'f77456c3-ec31-4490-8f38-099624ce9384',
     runtime: 'claude', // claude-sonnet-5 — spare the Claude weekly ceiling
     maxInflight: 1, // sparing: at most one Consus/Claude ticket in flight
     repo: 'mdostal/consus',
   },
+  // UNRESOLVED (#80): GET /api/backlog/agents/heimdall-dev 404s against the
+  // corrected workspace f32af269 — either this lane's agent genuinely
+  // doesn't exist there yet, or Multica calls it something else now. Left
+  // UNCHANGED (not blanked/guessed) pending that investigation — an absent
+  // id here fails the exact same way a wrong one does (never matches a real
+  // assignee_id), so leaving the old value causes no additional harm while
+  // it's open, and chooseAgentForProject already falls back to
+  // heimdall-dev-codex when this lane has no capacity/match.
   'heimdall-dev': {
     id: 'e56643ab-ec07-4347-a284-221c2f03a62d',
     runtime: 'opencode',
@@ -39,13 +58,13 @@ export const AGENTS = _ext.AGENTS ?? {
     repo: 'mdostal/heimdall',
   },
   'auriga-dev': {
-    id: '18d3ce15-3167-46ce-92bd-04e989f5e71d',
+    id: '7eeeaaf0-0353-439a-9b51-29c29d54ad93',
     runtime: 'codex', // shares runtime a86c890c with heimdall-dev-codex
     maxInflight: 3,
     repo: 'mdostal/pantheon-orchestrator',
   },
   'heimdall-dev-codex': {
-    id: 'e60c0630-761c-4106-aa39-bb3803336e50',
+    id: '5d349b30-8860-4306-a7a2-4219f015e446',
     runtime: 'codex', // shares runtime a86c890c with auriga-dev
     maxInflight: 3,
     repo: 'mdostal/heimdall',
@@ -54,34 +73,49 @@ export const AGENTS = _ext.AGENTS ?? {
   // These are the ONLY lanes that can run /hive:execute|review|test — hive-tagged
   // stories (see isHiveStory in lib/core.mjs) must land here, never on codex/opencode.
   'auriga-build': {
-    id: 'f8678f39-633f-45ef-9b1d-2ac63425877c',
+    id: '84c1c48c-1425-49d9-8dc4-e841f2034654',
     runtime: 'claude',
     maxInflight: 2, // sparing, mirrors consus-dev
     repo: 'mdostal/auriga',
   },
   'mnemosyne-dev': {
-    id: '4dca0020-27c8-4695-b7c7-a56fc2df2f08',
+    id: 'b5ab2148-de69-4c8a-af63-0b1495cfd57b',
     runtime: 'claude',
     maxInflight: 2,
     repo: 'mdostal/mnemosyne',
   },
   'votum-dev': {
-    id: '94e096ea-d2c1-4084-898c-4174e3285d0d',
+    id: '8f4bb79f-6087-4fd7-82b0-c222cd1e70df',
     runtime: 'claude',
     maxInflight: 2,
     repo: 'mdostal/votum',
   },
-  // NOTE: minerva-dev (07208ea2-...) is intentionally NOT a hive-execute build lane —
-  // its live agent instructions are Minerva's *planning* lane only (bin/minerva-plan),
-  // not /hive:execute. Do not add it to HIVE_LANE below.
+  // NOTE: minerva-dev is intentionally NOT a hive-execute build lane — its
+  // live agent instructions are Minerva's *planning* lane only
+  // (bin/minerva-plan), not /hive:execute. Do not add it to HIVE_LANE below.
   // Planning lane (not a build agent): un-planned "seed" issues route here
   // instead of a build lane so they get an epic + dependency-tracked stories
   // before any build agent ever sees them (see PAN-6646).
   'minerva-dev': {
-    id: '07208ea2-3d2f-455d-a07c-60ab56c26e5c',
+    id: 'e51a115c-6181-4f59-bb01-b4c77206c6fd',
     runtime: 'claude-planning', // own runtime bucket; not shared with consus-dev's `claude`
     maxInflight: 3, // mirrors the real agent's max_concurrent_tasks
     repo: null, // planning lane; no fixed target repo — plans land on whichever project the seed belongs to
+  },
+  // Review lane (moved here from lib/config.mjs, GH #79): that file used to
+  // ADD this entry via `AGENTS['auriga-review'] = {...}` AFTER this object
+  // was already built — an unconditional `=`, not `??=` or a merge, that
+  // would silently stomp any future tenant-scoped AGENTS override for this
+  // one agent even after fixing the id below (found live by a cross-session
+  // peer while diagnosing #79). Defining it here instead means it is just
+  // another entry in the one real AGENTS default, overridable via `_ext.AGENTS`
+  // the exact same (uniform, whole-object) way as every other agent above —
+  // no special-cased mutation, no stomp risk.
+  'auriga-review': {
+    id: '7545f9ad-41da-4bd9-9674-f0dc223236b9',
+    runtime: 'claude-review', // own capacity bucket; physical Multica runtime is Claude (1d5e9b93)
+    maxInflight: 1, // one review/ship at a time — sparing on the Claude account
+    repo: null, // target_repo-driven, exactly like the build lane
   },
 };
 
