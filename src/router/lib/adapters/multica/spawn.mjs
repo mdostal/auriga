@@ -35,7 +35,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { makeRun } from './cli-runner.mjs';
-import { classifyRun, latestRun } from '../../core.mjs';
+import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
   DEFAULT_LANE as SUBSTRATE_DEFAULT_LANE,
@@ -157,56 +157,22 @@ export function createMulticaSpawnAdapter(cfg = {}) {
   //     ("any run row means it dispatched" — cycle()'s own comment).
   //   - if not started: force-rerun, catching (not propagating) a rerun
   //     failure — mirrors cycle()'s `try { mcaImpl.rerunIssue(...) } catch`.
-  function dispatch(issue, lane) {
-    const identifier = issue && issue.identifier;
-
-    try {
-      assignIssue(identifier, lane);
-    } catch (e) {
-      return { identifier, lane, assigned: false, assignError: e.message, started: false, forcedRerun: false };
-    }
-
-    sleep(VERIFY_DELAY_MS);
-
-    const runs = getIssueRuns(identifier);
-    const now = Date.now();
-    const started = runs.some((r) => {
-      const c = classifyRun(r, now);
-      return c.active || c.done || c.failed; // any run row means it dispatched
-    });
-
-    if (!started) {
-      const result = { identifier, lane, assigned: true, started: false, forcedRerun: true };
-      try {
-        rerunIssue(identifier);
-      } catch (e) {
-        result.rerunError = e.message;
-      }
-      return result;
-    }
-
-    const lr = latestRun(runs);
-    const c = lr ? classifyRun(lr, now) : {};
-    return {
-      identifier, lane, assigned: true, started: true, forcedRerun: false,
-      runStatus: c.status, runtimeId: lr && lr.runtime_id,
-    };
-  }
+  //
+  // dispatch()/describeLanes() now live in ../spawn-dispatch.mjs, shared
+  // with pantheon-v2-l2/index.mjs's byte-identical copy (t013 dedup) — this
+  // adapter supplies its own already-tested assignIssue/rerunIssue/
+  // getIssueRuns as injected dependencies.
+  const dispatch = makeDispatch({ assignIssue, rerunIssue, getIssueRuns, sleep, verifyDelayMs: VERIFY_DELAY_MS });
 
   // describeLanes(): the runner-side analog of lib/config.mjs's
   // PROJECT_LANE/HIVE_LANE/DEFAULT_LANE/REVIEW_LANE tables, assembled
   // (unaltered) alongside RUNTIME_CAP into one LaneMap — byte-identical to
   // today's config-substrate.mjs values, including the KNOWN GAP (PROJECT_LANE
   // not covering all named projects; see config-substrate.mjs's comment).
-  function describeLanes() {
-    return {
-      projectLane: PROJECT_LANE,
-      defaultLane: DEFAULT_LANE,
-      hiveLane: HIVE_LANE,
-      reviewLane: REVIEW_LANE,
-      runtimeCap: RUNTIME_CAP,
-    };
-  }
+  const describeLanes = makeDescribeLanes({
+    projectLane: PROJECT_LANE, defaultLane: DEFAULT_LANE, hiveLane: HIVE_LANE,
+    reviewLane: REVIEW_LANE, runtimeCap: RUNTIME_CAP,
+  });
 
   return Object.freeze({
     dispatch,

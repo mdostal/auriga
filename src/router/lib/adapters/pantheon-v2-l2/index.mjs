@@ -51,6 +51,7 @@
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
 import { makeGhRun, makeGhListRepos, makeGhPrs, makeListCandidatePullRequests } from '../github-cli.mjs';
+import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
   DEFAULT_LANE as SUBSTRATE_DEFAULT_LANE,
@@ -60,7 +61,6 @@ import {
   REVIEW_REPO_OWNER as SUBSTRATE_REVIEW_REPO_OWNER,
   REVIEW_SEARCH_REPOS as SUBSTRATE_REVIEW_SEARCH_REPOS,
 } from '../../config-substrate.mjs';
-import { classifyRun, latestRun } from '../../core.mjs';
 
 const DEFAULT_BASE_URL = 'http://core-api:3012';
 const DEFAULT_VERIFY_DELAY_MS = 6000;
@@ -331,52 +331,20 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // sequence instead. See spawn-adapter.mjs's typedef for the full
   // rationale. Kept here as a real, tested, available method for a future
   // short-lived caller.
-  function dispatch(issue, lane) {
-    const identifier = issue && issue.identifier;
-
-    try {
-      assignIssue(identifier, lane);
-    } catch (e) {
-      return { identifier, lane, assigned: false, assignError: e.message, started: false, forcedRerun: false };
-    }
-
-    sleep(VERIFY_DELAY_MS);
-
-    const runs = getIssueRunsForVerify(identifier);
-    const now = Date.now();
-    const started = runs.some((r) => {
-      const c = classifyRun(r, now);
-      return c.active || c.done || c.failed;
-    });
-
-    if (!started) {
-      const result = { identifier, lane, assigned: true, started: false, forcedRerun: true };
-      try {
-        rerunIssue(identifier);
-      } catch (e) {
-        result.rerunError = e.message;
-      }
-      return result;
-    }
-
-    const lr = latestRun(runs);
-    const c = lr ? classifyRun(lr, now) : {};
-    return {
-      identifier, lane, assigned: true, started: true, forcedRerun: false,
-      runStatus: c.status, runtimeId: lr && lr.runtime_id,
-    };
-  }
+  //
+  // dispatch()/describeLanes() now live in ../spawn-dispatch.mjs, shared
+  // with multica/spawn.mjs's byte-identical copy (t013 dedup) — this
+  // adapter supplies its own already-tested assignIssue/rerunIssue/
+  // getIssueRunsForVerify as injected dependencies.
+  const dispatch = makeDispatch({
+    assignIssue, rerunIssue, getIssueRuns: getIssueRunsForVerify, sleep, verifyDelayMs: VERIFY_DELAY_MS,
+  });
 
   // Zero Multica/Pantheon dependency — carried over unchanged.
-  function describeLanes() {
-    return {
-      projectLane: PROJECT_LANE,
-      defaultLane: DEFAULT_LANE,
-      hiveLane: HIVE_LANE,
-      reviewLane: REVIEW_LANE,
-      runtimeCap: RUNTIME_CAP,
-    };
-  }
+  const describeLanes = makeDescribeLanes({
+    projectLane: PROJECT_LANE, defaultLane: DEFAULT_LANE, hiveLane: HIVE_LANE,
+    reviewLane: REVIEW_LANE, runtimeCap: RUNTIME_CAP,
+  });
 
   return Object.freeze({
     dispatch,
