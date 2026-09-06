@@ -94,7 +94,7 @@ entries:
       - state: closed
         at: "2026-09-05T00:00:00Z"
   - id: t-003
-    state: clarified
+    state: closed
     kind: bug
     title: "Root-cause why build tasks hang 3+ hours under light default-config workload"
     description: >
@@ -111,18 +111,31 @@ entries:
       on live production access this session does not have.
     reporter: "mdostal (GitHub issue #77, filed 2026-09-04 by this session, split from #75)"
     reported_at: "2026-09-04T00:00:00Z"
-    priority: null
-    severity: null
+    priority: p2
+    severity: moderate
     linked_epic: null
     linked_story: null
-    closed_reason: null
-    closed_at: null
+    closed_reason: >
+      Closed without a code fix, real root cause documented instead of
+      guessed: live cross-session investigation traced the 3-hour stall to
+      Multica's own runtime-offline reaper being slow (3+ hours to mark a
+      dead runtime's run failed), not a bug in Auriga's detectZombies
+      logic (traced against real timestamps and found correct on paper).
+      Definitive proof detectZombies fired correctly is unrecoverable — the
+      dostal-tech container was recreated 2026-09-05 and its router log
+      lived only in the writable layer, not a persistent volume. A
+      Pantheon-side icebox item was filed to mount router logs persistently
+      so this class of incident stays forensically inspectable going
+      forward. Re-open if it recurs with real-time log evidence available.
+    closed_at: "2026-09-06T00:00:00Z"
     source_url: "https://github.com/mdostal/auriga/issues/77"
     state_history:
       - state: inbox
         at: "2026-09-04T00:00:00Z"
       - state: clarified
         at: "2026-09-04T00:00:00Z"
+      - state: closed
+        at: "2026-09-06T00:00:00Z"
   - id: t-002
     state: closed
     kind: bug
