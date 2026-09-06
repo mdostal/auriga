@@ -1,0 +1,80 @@
+id: t010-orchestrator-topology
+epic: t010-memory-and-topology
+title: Orchestrator topology registry (pure data) + CLI
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Operator (2026-09-06): "the hand off and up is also similar in that it
+  is a pattern and we register another auriga instance as the one up or
+  down -- same we do to projects and boards, we just have a knowledge
+  layer and help to navigate where it gets created and assigned etc. We
+  don't actually create the logic or the setup or the orchestration of
+  many levels, we just purely make this as if a node in a tree and we can
+  manually set up a node to aim to another and have a parent or many
+  children. Then when the implementation uses those, it just sets up the
+  parts in config correctly."
+
+  This story builds exactly and only that: a committed JSON registry
+  (parent: one entry or null, children: a list) plus CLI commands to
+  set/clear the parent and add/remove children. No discovery, no
+  validation that an `id` resolves to a real reachable instance, no
+  escalation/handoff logic, no cycle detection. Mirrors
+  project-registry.mjs's own conventions (injected read/write I/O,
+  env-var path override, graceful degrade) exactly.
+
+acceptance_criteria:
+  - "src/router/orchestrator-topology.json exists, committed, default { parent: null, children: [] }."
+  - "lib/orchestrator-topology.mjs exports setParent/clearParent/addChild/removeChild as pure functions (no mutation of the input object) plus readRealTopologyFile/writeRealTopologyFile/loadRealTopology honoring AURIGA_ORCHESTRATOR_TOPOLOGY_PATH."
+  - "addChild is idempotent by id -- re-adding an existing child updates its notes rather than duplicating the entry; omitting notes on re-add preserves the existing notes."
+  - "auriga orchestrator set-parent <id> [--notes] / clear-parent / add-child <id> [--notes] / remove-child <id> / list CLI commands exist and are wired in bin/auriga.mjs's main() dispatch."
+  - "A real end-to-end CLI test (spawned auriga process, throwaway topology file) proves set-parent -> add-child (x2) -> list -> remove-child -> clear-parent -> list, each step confirmed by reading the file back off disk afterward, not by trusting subprocess stdout alone."
+  - "This story does NOT implement any handoff, escalation, discovery, or validation logic against a registered id -- pure data only, by explicit operator direction."
+
+steps:
+  - id: implement
+    description: >
+      Create src/router/orchestrator-topology.json and
+      lib/orchestrator-topology.mjs. Add resolveTopology-backed
+      runOrchestratorSetParent/ClearParent/AddChild/RemoveChild/List to
+      bin/auriga.mjs, wired into main()'s dispatch and usage().
+    agent: developer
+  - id: test
+    description: >
+      Add test/orchestrator-topology.test.mjs (pure functions, injected
+      I/O) and test/orchestrator-cli.test.mjs (real end-to-end spawned
+      process against a throwaway temp file). Run npm run test:all and
+      confirm full green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t010-memory-and-topology (shared with the
+      memory-adapter story).
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/orchestrator-topology.mjs
+      purpose: pure read/write/set/clear/add/remove functions.
+    - path: src/router/orchestrator-topology.json
+      purpose: committed default registry file.
+    - path: src/router/lib/project-registry.mjs
+      purpose: "the precedent this module mirrors exactly -- same injected I/O, same env-var override, same graceful-degrade convention."
+    - path: src/router/bin/auriga.mjs
+      purpose: orchestrator set-parent/clear-parent/add-child/remove-child/list CLI commands.
+
+design_decisions:
+  - decision: id is a free-form, unvalidated string -- no discovery, no dialing, no reachability check.
+    rationale: Explicit operator direction -- this is pure data for a future consumer to interpret, not a working handoff mechanism. Building validation/discovery now would be speculative ahead of any real consumer.
+  - decision: A node has at most one parent, many children -- no cycle detection.
+    rationale: Matches the operator's own tree framing exactly ("a parent or many children"). Cycle detection has no real consumer to validate against yet (nothing walks this tree today) -- same no-pre-emptive-integrations reasoning as the id-validation decision above.
+
+risks:
+  - severity: low
+    description: An operator could manually create a cycle (A's parent is B, B's parent is A) with nothing to catch it.
+    mitigation: Harmless today -- nothing reads or walks this data yet. Worth adding validation once a real consumer (the future orchestration/handoff logic) actually needs a well-formed tree.
