@@ -401,7 +401,7 @@ test('listAllProjects degrades to [] (does not throw) on CLI failure', async (t)
   assert.deepEqual(backlog.listAllProjects(), []);
 });
 
-test('listAllProjects: the stub adapter does NOT implement this ported extra (no .listAllProjects property at all), matching listAllIssues/listCandidatePullRequests', async (t) => {
+test('listAllProjects: the stub adapter does NOT implement this ported extra (no .listAllProjects property at all), matching listAllIssues/listCandidatePullRequests', async () => {
   const { createStubBacklogAdapter } = await import('../lib/adapters/stub/backlog.mjs');
   const stub = createStubBacklogAdapter();
   assert.equal('listAllProjects' in stub, false);

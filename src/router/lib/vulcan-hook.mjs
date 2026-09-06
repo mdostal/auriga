@@ -35,7 +35,7 @@ export function ensureTargetRepo(slug, { log = () => {}, noSeed = false } = {}) 
   try {
     const args = [VULCAN_BIN, 'provision', slug];
     if (noSeed) args.push('--no-seed');
-    const out = execFileSync('node', args, { encoding: 'utf8', timeout: 180000 });
+    execFileSync('node', args, { encoding: 'utf8', timeout: 180000 });
     log('vulcan_provision', { slug, ok: true });
     return true;
   } catch (e) {

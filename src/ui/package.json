@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:e2e:hardening": "playwright test --config=playwright.hardening.config.js"

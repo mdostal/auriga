@@ -139,7 +139,7 @@ test('graceful degradation: a malformed epic.yaml is skipped, not a crash', (t) 
 
   const stderrLines = [];
   const realWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = (chunk, ...rest) => { stderrLines.push(String(chunk)); return true; };
+  process.stderr.write = (chunk, ..._rest) => { stderrLines.push(String(chunk)); return true; };
   let epics;
   try {
     epics = listEpics(tmpRoot);
@@ -176,7 +176,7 @@ test('graceful degradation: genuinely invalid YAML syntax (not just a missing fi
 
   const stderrLines = [];
   const realWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = (chunk, ...rest) => { stderrLines.push(String(chunk)); return true; };
+  process.stderr.write = (chunk, ..._rest) => { stderrLines.push(String(chunk)); return true; };
   let epics;
   try {
     epics = listEpics(tmpRoot);

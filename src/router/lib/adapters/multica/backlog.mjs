@@ -177,22 +177,6 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // directly anymore — see the file-header note on Open Question 1). ----
 
   // Open PRs for a repo via gh, as [{number,title,headRefName,baseRefName,body,url,state}].
-  // Ported verbatim for fidelity with lib/multica.mjs's exported ghOpenPrs,
-  // but getIssuePullRequests below calls ghPrs('all') instead of this one —
-  // ghPrs('all') is a strict superset (it also carries mergedAt, needed to
-  // detect a MERGED PR) so this narrower open-only variant isn't currently
-  // invoked from here. Kept as a private helper for parity / potential
-  // future direct reuse, not dead code left over from an incomplete port.
-  function ghOpenPrs(repo) {
-    try {
-      return ghRun(['pr', 'list', '--repo', repo, '--state', 'open',
-        '--json', 'number,title,headRefName,baseRefName,body,url,state', '--limit', '100']);
-    } catch (e) {
-      process.stderr.write('ghOpenPrs(' + repo + ') failed: ' + e.message + '\n');
-      return [];
-    }
-  }
-
   // All PRs (any state) for a repo, as [{...,mergedAt}]. getIssuePullRequests
   // needs every state (not just open) because a caller (detectVerifiedDone)
   // must be able to see a MERGED PR too — run status alone is never trusted

@@ -28,8 +28,8 @@ export function createStubBacklogAdapter(seedData = {}) {
   for (const issue of seedData.issues || []) {
     if (issue && issue.identifier) issuesByIdentifier.set(issue.identifier, issue);
   }
-  const runsByIdentifier = { ...(seedData.runsByIdentifier || {}) };
-  const pullRequestsByIdentifier = { ...(seedData.pullRequestsByIdentifier || {}) };
+  const runsByIdentifier = { ...seedData.runsByIdentifier };
+  const pullRequestsByIdentifier = { ...seedData.pullRequestsByIdentifier };
   const comments = [];
 
   return Object.freeze({

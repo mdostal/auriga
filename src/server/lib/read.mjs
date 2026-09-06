@@ -110,7 +110,7 @@ function listStoryFiles(epicDir) {
     return fs.readdirSync(path.join(epicDir, 'stories'))
       .filter((f) => f.endsWith('.yaml'))
       .map((f) => path.join(epicDir, 'stories', f));
-  } catch (e) {
+  } catch {
     return [];
   }
 }
@@ -233,7 +233,7 @@ export function getEpic(id, root = DEFAULT_PHIVE_ROOT) {
   let docs = [];
   try {
     docs = fs.readdirSync(docsDir).filter((f) => !f.startsWith('.'));
-  } catch (e) {
+  } catch {
     docs = [];
   }
 
@@ -320,7 +320,7 @@ export function listActivity(root = DEFAULT_PHIVE_ROOT, cwd = REPO_ROOT) {
   let files = [];
   try {
     files = fs.readdirSync(auditDir).filter((f) => f.endsWith('.yaml'));
-  } catch (e) {
+  } catch {
     files = [];
   }
 
