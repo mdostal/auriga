@@ -7,6 +7,13 @@
 //   auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]]
 //   auriga project remove <id>
 //   auriga project list
+//   auriga memory recall <query> [--scope <id>] [--hits N]
+//   auriga memory remember <text> [--scope <id>] [--tag <tag>]
+//   auriga orchestrator set-parent <id> [--notes "..."]
+//   auriga orchestrator clear-parent
+//   auriga orchestrator add-child <id> [--notes "..."]
+//   auriga orchestrator remove-child <id>
+//   auriga orchestrator list
 //
 // This file owns ONLY argv parsing + output formatting. It does not
 // duplicate any detection/registration logic (that's lib/agent-setup.mjs,
@@ -15,9 +22,13 @@
 // MCP server logic (that's lib/mcp/server.mjs's startMcpServer(), invoked
 // directly below — see that module's header comment: "the CLI's `mcp`
 // subcommand ... does not duplicate any server logic, it just invokes
-// this"), and does not duplicate any project-registry logic (that's
+// this"), does not duplicate any project-registry logic (that's
 // lib/project-registry.mjs's scan/upsert/remove functions, p6-project-cli —
-// same split, mirrored precisely).
+// same split, mirrored precisely), does not duplicate any memory-adapter
+// logic (that's lib/adapters/mnemosyne/memory.mjs's recall/remember, t010 —
+// same split again), and does not duplicate any orchestrator-topology logic
+// (that's lib/orchestrator-topology.mjs's set/clear/add/remove functions,
+// t010 — same split a third time).
 //
 // Note on repo convention: auriga-router.mjs (the existing bin in this
 // package) uses flat manual process.argv flag parsing with no subcommand
@@ -36,6 +47,16 @@ import {
   upsertProject,
   removeProject,
 } from '../lib/project-registry.mjs';
+import { createMnemosyneMemoryAdapter } from '../lib/adapters/mnemosyne/memory.mjs';
+import { createStubMemoryAdapter } from '../lib/adapters/stub/memory.mjs';
+import {
+  loadRealTopology,
+  writeRealTopologyFile,
+  setParent,
+  clearParent,
+  addChild,
+  removeChild,
+} from '../lib/orchestrator-topology.mjs';
 
 function usage() {
   return [
@@ -46,6 +67,13 @@ function usage() {
     '       auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]]',
     '       auriga project remove <id>',
     '       auriga project list',
+    '       auriga memory recall <query> [--scope <id>] [--hits N]',
+    '       auriga memory remember <text> [--scope <id>] [--tag <tag>]',
+    '       auriga orchestrator set-parent <id> [--notes "..."]',
+    '       auriga orchestrator clear-parent',
+    '       auriga orchestrator add-child <id> [--notes "..."]',
+    '       auriga orchestrator remove-child <id>',
+    '       auriga orchestrator list',
   ].join('\n');
 }
 
@@ -257,6 +285,185 @@ export function runProjectList(deps = {}) {
   return formatListOutput(readRegistry());
 }
 
+// ---- memory subcommand family ----------------------------------------------
+// All real logic (recall/remember over Mnemosyne) lives in
+// lib/adapters/mnemosyne/memory.mjs — see this file's header comment. The
+// functions below own argv extraction and result formatting only, mirroring
+// the project subcommand family's own deps-injection shape so tests never
+// need a real Mnemosyne service/CLI.
+
+/**
+ * Default recall/remember scope when `--scope` is absent: this instance's
+ * own tenant/instance identity (see auriga-router.mjs's own
+ * AURIGA_TENANT_ID/AURIGA_INSTANCE_ID precedent), falling back to a plain
+ * 'default' scope for an unscoped standalone instance.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string}
+ */
+function defaultMemoryScope(env = process.env) {
+  return env.AURIGA_TENANT_ID || env.AURIGA_INSTANCE_ID || 'default';
+}
+
+/**
+ * Resolves the memory adapter for `memory recall`/`memory remember`.
+ * Mirrors resolveProjectBacklog()'s own AURIGA_BACKLOG_ADAPTER=stub switch
+ * exactly, for the same reason: this repo's standing rule is real
+ * subprocess-level CLI tests never touch a live external service (no live
+ * Mnemosyne testing here, mirroring the no-live-Multica-testing rule) —
+ * AURIGA_MEMORY_ADAPTER=stub (optionally seeded via AURIGA_STUB_MEMORY_SEED,
+ * a JSON string matching createStubMemoryAdapter's seedData shape) lets
+ * test/memory-cli.test.mjs exercise these commands against a real spawned
+ * `auriga` process with zero real network/CLI access. Unset in normal
+ * operation, so production behavior is the real Mnemosyne adapter.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {import('../lib/adapters/memory-adapter.mjs').MemoryAdapter}
+ */
+function resolveMemoryAdapter(env = process.env) {
+  if (env.AURIGA_MEMORY_ADAPTER === 'stub') {
+    const seed = env.AURIGA_STUB_MEMORY_SEED ? JSON.parse(env.AURIGA_STUB_MEMORY_SEED) : {};
+    return createStubMemoryAdapter(seed);
+  }
+  return createMnemosyneMemoryAdapter();
+}
+
+/**
+ * `auriga memory recall <query> [--scope] [--hits]`.
+ * @param {string|undefined} query
+ * @param {{ scope?: string, hits?: number }} flags
+ * @param {{ memory?: import('../lib/adapters/memory-adapter.mjs').MemoryAdapter }} [deps]
+ * @returns {Promise<{ ok: boolean, message: string }>}
+ */
+export async function runMemoryRecall(query, flags, deps = {}) {
+  if (!query) return { ok: false, message: 'error: auriga memory recall requires <query>\n' };
+  const memory = deps.memory || resolveMemoryAdapter();
+  const scope = flags.scope || defaultMemoryScope();
+  const result = await memory.recall(query, scope, { hits: flags.hits });
+
+  if (!result.total_hits) {
+    return { ok: true, message: `auriga memory recall "${query}" (scope=${scope})\n  no results (via=${result.via})\n` };
+  }
+  const lines = [`auriga memory recall "${query}" (scope=${scope})`, `  ${result.total_hits} hit(s) (via=${result.via}):`];
+  for (const s of result.scopes || []) {
+    for (const hit of s.hits || []) {
+      const text = String(hit.text || hit.chunk || JSON.stringify(hit)).slice(0, 200);
+      lines.push(`  - ${text}`);
+    }
+  }
+  return { ok: true, message: lines.join('\n') + '\n' };
+}
+
+/**
+ * `auriga memory remember <text> [--scope] [--tag]`.
+ * @param {string|undefined} text
+ * @param {{ scope?: string, tag?: string }} flags
+ * @param {{ memory?: import('../lib/adapters/memory-adapter.mjs').MemoryAdapter }} [deps]
+ * @returns {Promise<{ ok: boolean, message: string }>}
+ */
+export async function runMemoryRemember(text, flags, deps = {}) {
+  if (!text) return { ok: false, message: 'error: auriga memory remember requires <text>\n' };
+  const memory = deps.memory || resolveMemoryAdapter();
+  const scope = flags.scope || defaultMemoryScope();
+  const result = await memory.remember(text, scope, { tag: flags.tag });
+
+  if (!result.remembered) {
+    return { ok: false, message: `error: memory write failed (via=${result.via}${result.service_error ? `, ${result.service_error}` : ''})\n` };
+  }
+  return { ok: true, message: `remembered (scope=${scope}, via=${result.via})\n` };
+}
+
+// ---- orchestrator subcommand family -----------------------------------------
+// All real logic (set/clear parent, add/remove child) lives in
+// lib/orchestrator-topology.mjs — see this file's header comment and that
+// module's own header comment (PURE DATA, no orchestration logic). The
+// functions below own argv extraction and result formatting only.
+
+/**
+ * `auriga orchestrator list` output — READ-ONLY.
+ * @param {{ parent: {id:string,notes?:string}|null, children: {id:string,notes?:string}[] }} data
+ * @returns {string}
+ */
+function formatTopologyOutput(data) {
+  const lines = ['auriga orchestrator list'];
+  lines.push(data.parent ? `  parent: ${data.parent.id}${data.parent.notes ? ` (${data.parent.notes})` : ''}` : '  parent: (none — this is a root node)');
+  const children = data.children || [];
+  if (!children.length) {
+    lines.push('  children: (none)');
+  } else {
+    lines.push(`  children (${children.length}):`);
+    for (const c of children) lines.push(`    ${c.id}${c.notes ? ` (${c.notes})` : ''}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * `auriga orchestrator set-parent <id> [--notes]`.
+ * @param {string|undefined} id
+ * @param {{ notes?: string }} flags
+ * @param {{ readTopology?: () => object, writeTopology?: (data: object) => void }} [deps]
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function runOrchestratorSetParent(id, flags, deps = {}) {
+  if (!id) return { ok: false, message: 'error: auriga orchestrator set-parent requires <id>\n' };
+  const readTopology = deps.readTopology || loadRealTopology;
+  const writeTopology = deps.writeTopology || writeRealTopologyFile;
+  writeTopology(setParent(readTopology(), { id, notes: flags.notes }));
+  return { ok: true, message: `parent set to ${id}\n` };
+}
+
+/**
+ * `auriga orchestrator clear-parent`.
+ * @param {{ readTopology?: () => object, writeTopology?: (data: object) => void }} [deps]
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function runOrchestratorClearParent(deps = {}) {
+  const readTopology = deps.readTopology || loadRealTopology;
+  const writeTopology = deps.writeTopology || writeRealTopologyFile;
+  writeTopology(clearParent(readTopology()));
+  return { ok: true, message: 'parent cleared — this is now a root node\n' };
+}
+
+/**
+ * `auriga orchestrator add-child <id> [--notes]` — idempotent (updates notes
+ * on an already-registered child).
+ * @param {string|undefined} id
+ * @param {{ notes?: string }} flags
+ * @param {{ readTopology?: () => object, writeTopology?: (data: object) => void }} [deps]
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function runOrchestratorAddChild(id, flags, deps = {}) {
+  if (!id) return { ok: false, message: 'error: auriga orchestrator add-child requires <id>\n' };
+  const readTopology = deps.readTopology || loadRealTopology;
+  const writeTopology = deps.writeTopology || writeRealTopologyFile;
+  writeTopology(addChild(readTopology(), { id, notes: flags.notes }));
+  return { ok: true, message: `added child ${id}\n` };
+}
+
+/**
+ * `auriga orchestrator remove-child <id>`.
+ * @param {string|undefined} id
+ * @param {{ readTopology?: () => object, writeTopology?: (data: object) => void }} [deps]
+ * @returns {{ ok: boolean, message: string }}
+ */
+export function runOrchestratorRemoveChild(id, deps = {}) {
+  if (!id) return { ok: false, message: 'error: auriga orchestrator remove-child requires <id>\n' };
+  const readTopology = deps.readTopology || loadRealTopology;
+  const writeTopology = deps.writeTopology || writeRealTopologyFile;
+  const { removed, data } = removeChild(readTopology(), id);
+  if (!removed) return { ok: false, message: `error: '${id}' is not a registered child\n` };
+  writeTopology(data);
+  return { ok: true, message: `removed child ${id}\n` };
+}
+
+/**
+ * `auriga orchestrator list` — READ-ONLY, zero side effects.
+ * @param {{ readTopology?: () => object }} [deps]
+ * @returns {string}
+ */
+export function runOrchestratorList(deps = {}) {
+  const readTopology = deps.readTopology || loadRealTopology;
+  return formatTopologyOutput(readTopology());
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const [cmd, sub] = argv;
@@ -308,6 +515,63 @@ async function main() {
 
   if (cmd === 'project' && sub === 'list') {
     process.stdout.write(runProjectList());
+    return;
+  }
+
+  if (cmd === 'memory' && sub === 'recall') {
+    const query = argv[2];
+    const hitsFlag = parseFlagValue(argv, '--hits');
+    const flags = { scope: parseFlagValue(argv, '--scope'), hits: hitsFlag ? Number(hitsFlag) : undefined };
+    const result = await runMemoryRecall(query, flags);
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'memory' && sub === 'remember') {
+    const text = argv[2];
+    const flags = { scope: parseFlagValue(argv, '--scope'), tag: parseFlagValue(argv, '--tag') };
+    const result = await runMemoryRemember(text, flags);
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'orchestrator' && sub === 'set-parent') {
+    const id = argv[2];
+    const flags = { notes: parseFlagValue(argv, '--notes') };
+    const result = runOrchestratorSetParent(id, flags);
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'orchestrator' && sub === 'clear-parent') {
+    const result = runOrchestratorClearParent();
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'orchestrator' && sub === 'add-child') {
+    const id = argv[2];
+    const flags = { notes: parseFlagValue(argv, '--notes') };
+    const result = runOrchestratorAddChild(id, flags);
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'orchestrator' && sub === 'remove-child') {
+    const id = argv[2];
+    const result = runOrchestratorRemoveChild(id);
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'orchestrator' && sub === 'list') {
+    process.stdout.write(runOrchestratorList());
     return;
   }
 
