@@ -131,14 +131,34 @@ yet; this is still aspirational, not started.
 
 **Route across a tree of Auriga instances.** `t010-memory-and-topology` landed the data shape (a
 committed `orchestrator-topology.json` — one parent, many children, manually wired per instance)
-but deliberately built zero logic on top of it. The next real slice, planned as of 2026-09-06: give
-an instance with a registered parent a way to **hand work back up** when it hits something outside
-its own authority to resolve — the same shape as the router's existing seed→`minerva-dev` hand-off
-(*"this isn't mine to build, hand it to whoever's job it actually is"*), just aimed at a parent
-instance instead of a sibling lane. This is intentionally the smallest end of that vision: no
-hand-down (parent→child) yet, no auto-discovery of the parent, no bidirectional negotiation — just
-the up-direction, built once and validated, before any of the rest of a real N-level orchestration
-tree gets designed.
+but deliberately built zero logic on top of it. Planning as of 2026-09-06 (`t015`/`t016`) landed on
+the real shape, driven by the operator's actual multi-level deployment: per-project "meta
+orchestrators" at e.g. a Dostal Tech / Firefly Events / Personal level, mostly handing tickets
+directly to the right repo/runner today; a hypothetical top-level "meta of everything" orchestrator
+above them would only need to know its own children and hand a ticket down to the right one (e.g.
+"make a ticket for Firefly Events' Flayr app" fires it into Firefly Events' own board and lets that
+instance's own Minerva/architect/runners take it from there). Two structural findings fell out of
+that conversation:
+
+- **Hand-up is recursive by construction, with no multi-level code required.** Every instance runs
+  the identical local rule against its own `topology.parent`. If a parent can't route a handed-up
+  ticket either and has its own parent, its next cycle hands it up again automatically — recursion
+  is a property of the tree shape, not something any one instance's code has to implement.
+- **Hand-down is the same shape as hand-up, and the same shape as today's existing `PROJECT_LANE`
+  routing table** — "which child owns this project" is structurally identical to "which agent lane
+  owns this project," just a different kind of target. Both directions share one real new
+  capability: a cross-board `createIssue` write (genuinely new — no adapter creates tickets today,
+  only acts on existing ones), config-driven via an extended topology schema (real
+  adapter/reachability info per node, or a reference into `AURIGA_CONFIG`'s existing multi-tenant
+  pattern).
+
+Sequenced as two epics sharing that one primitive: **`t015`** ships the up-direction only (one
+parent, no selection ambiguity, explicit-label-triggered) — no auto-detection of "doesn't fit,"
+no operator-chat ticket-origination surface (a separate, bigger question: does a top-level
+orchestrator even have its own board, or does it work from pure conversational input?). **`t016`**
+(queued immediately after, not started) adds hand-down: a `PROJECT_LANE`-style routing-table
+extension so a project can resolve to `{ kind: 'child', childId }` instead of `{ kind: 'agent',
+lane }`, reusing `t015`'s cross-board-write primitive unchanged.
 
 Combined with Pantheon's toggle-and-compare model, this makes routing policy — and now routing
 *topology* — a first-class, swappable, measurable thing: pick your board adapter, pick your lanes
