@@ -1,0 +1,25 @@
+name: t008-github-cli-dedup
+title: Extract shared gh-CLI helper module, closing a real timeout drift bug
+description: >
+  Second of four agreed workstreams from the 2026-09-05 codebase-wide
+  cleanup discussion. Extracts ghRun/ghListRepos/ghPrs/
+  listCandidatePullRequests/gatherReviewRepos (hand-copied across
+  multica/backlog.mjs and pantheon-v2-l2/index.mjs, plus a third in-file
+  copy of the repo-gathering loop) into a shared
+  src/router/lib/adapters/github-cli.mjs. Found and fixed a real, live
+  drift bug in the process: multica/backlog.mjs's copy never received
+  pantheon-v2-l2's 15s exec timeout fix (PANT-24/#70).
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t008-extract-github-cli-module
+    title: Extract shared github-cli.mjs, unify ghRun's timeout, close the in-file repo-gathering duplication
+    complexity: medium
+    depends_on: []

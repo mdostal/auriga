@@ -50,6 +50,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
+import { makeGhRun, makeGhListRepos, makeGhPrs, makeListCandidatePullRequests } from '../github-cli.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
   DEFAULT_LANE as SUBSTRATE_DEFAULT_LANE,
@@ -122,76 +123,21 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
 
-  // Ported from multica/backlog.mjs's own ghRun/ghListRepos/ghPrs (same GH
-  // binary, same env passthrough, same flags/limits) -- see this file's
-  // header comment for why this exists again after being scoped out. NOT
-  // byte-verbatim on one point: added a per-call timeout (neither this nor
-  // the original had one). Found live 2026-08-29: listCandidatePullRequests
-  // does up to ~100+ sequential `gh pr list` calls (one per repo, no
-  // concurrency) with zero bound on any single call -- one slow/hanging repo
-  // silently stalls the WHOLE board-wide PR scan indefinitely, which starves
-  // review_pr_scan's cache for every issue that cycle, not just the slow
-  // repo's own. Confirmed live: a real listCandidatePullRequests() call
-  // never returned within several minutes, and PANT-24's real, merged PR
-  // was never detected as a result (had to be marked done by hand). 15s is
-  // generous for a single `gh` call (GitHub's API is normally sub-second)
-  // while still bounding the worst case to a known, finite value instead of
-  // an unbounded hang; execFileSync's timeout SIGTERMs the child and throws,
-  // which the existing per-call try/catch in ghListRepos/ghPrs below already
-  // degrades gracefully (logs + returns []) -- no new failure mode.
-  function ghRun(args, maxBuffer = 32 * 1024 * 1024) {
-    const out = ghExecFn(GH, args, {
-      env: process.env,
-      encoding: 'utf8',
-      maxBuffer,
-      timeout: 15000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return out.trim() ? JSON.parse(out) : [];
-  }
-
-  function ghListRepos(owner, limit = 300) {
-    try {
-      const arr = ghRun(['repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner'], 16 * 1024 * 1024);
-      return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
-    } catch (e) {
-      process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
-      return [];
-    }
-  }
-
-  function ghPrs(repo, state = 'all') {
-    try {
-      return ghRun(['pr', 'list', '--repo', repo, '--state', state,
-        '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100']);
-    } catch (e) {
-      process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
-      return [];
-    }
-  }
-
-  // The raw, UNFILTERED board-wide PR candidate scan -- ported verbatim from
-  // multica/backlog.mjs's own listCandidatePullRequests (see that file's
-  // header comment: run ONCE per cycle, callers apply core.mjs's real
-  // prMatchesStory/prIdentityMatchesStory themselves). Not part of the
-  // BacklogAdapter typedef contract ("ported extra", same status as
-  // listAllIssues below) -- auriga-router.mjs's cycle() duck-types for its
-  // presence and falls back to per-identifier getIssuePullRequests when
-  // absent.
-  function listCandidatePullRequests() {
-    const repos = new Set([
-      ...(REVIEW_REPO_OWNER ? ghListRepos(REVIEW_REPO_OWNER) : []),
-      ...REVIEW_SEARCH_REPOS,
-    ]);
-    const all = [];
-    for (const repo of repos) {
-      for (const pr of ghPrs(repo, 'all')) {
-        pr._repo = repo;
-        all.push(pr);
-      }
-    }
-    return all;
-  }
+  // ghRun/ghListRepos/ghPrs/listCandidatePullRequests now live in
+  // ../github-cli.mjs -- shared with multica/backlog.mjs, which this file
+  // was previously a hand-copied, drifted port of (that dedupe found this
+  // file's own 15s timeout, added 2026-08-29 for PANT-24, had NEVER been
+  // ported back to multica/backlog.mjs -- exactly the risk of the
+  // hand-copy pattern this shared module now closes). env stays
+  // process.env here (unchanged): this container holds no Multica
+  // credentials by design, so there's nothing to scrub before a gh call,
+  // unlike multica/backlog.mjs's own cleanEnv().
+  const ghRun = makeGhRun(ghExecFn, GH);
+  const ghListRepos = makeGhListRepos(ghRun);
+  const ghPrs = makeGhPrs(ghRun);
+  const listCandidatePullRequests = makeListCandidatePullRequests(
+    ghListRepos, ghPrs, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  );
 
   // Per-project issue list. NOT called by auriga-router.mjs's own cycle()
   // today (it uses listAllIssues below instead) but part of the

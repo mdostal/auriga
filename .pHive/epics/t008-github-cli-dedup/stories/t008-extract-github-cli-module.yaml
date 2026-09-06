@@ -1,0 +1,86 @@
+id: t008-extract-github-cli-module
+epic: t008-github-cli-dedup
+title: Extract shared github-cli.mjs, unify ghRun's timeout, close the in-file repo-gathering duplication
+status: shipped
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Second of four agreed workstreams from the 2026-09-05 codebase-wide
+  cleanup discussion. multica/backlog.mjs and pantheon-v2-l2/index.mjs each
+  carried a byte-near-identical private copy of ghRun/ghListRepos/ghPrs
+  (pantheon-v2-l2's own header comment admitted it was a port); the exact
+  repo-gathering set-union loop also appeared a THIRD time inside
+  multica/backlog.mjs's own getIssuePullRequests.
+
+  Diffing the two ghRun copies directly found a real, live drift bug:
+  pantheon-v2-l2/index.mjs's ghRun has a 15s timeout (added 2026-08-29 for
+  a real incident, PANT-24 -- a single hanging repo stalled the entire
+  board-wide PR scan indefinitely) that was NEVER ported back to
+  multica/backlog.mjs, which had no timeout at all. multica/backlog.mjs
+  DOES have a real, deliberate difference worth preserving: it scrubs
+  MULTICA_* env vars via cleanEnv() before every gh call (that process
+  holds real Multica credentials elsewhere), while pantheon-v2-l2's
+  container holds none by design and passes process.env straight through.
+
+acceptance_criteria:
+  - "src/router/lib/adapters/github-cli.mjs exports makeGhRun(execFn, gh, {env}), makeGhListRepos(ghRun), makeGhPrs(ghRun), gatherReviewRepos(ghListRepos, owner, searchRepos), and makeListCandidatePullRequests(ghListRepos, ghPrs, owner, searchRepos)."
+  - "makeGhRun's returned function passes a 15s timeout on every call, unconditionally -- this is the actual fix, not just a refactor."
+  - "makeGhRun's env defaults to process.env via a thunk, but accepts an injected env thunk (e.g. cleanEnv) that fully overrides it."
+  - "multica/backlog.mjs no longer defines its own ghRun/ghListRepos/ghPrs/listCandidatePullRequests -- it imports and wires the shared factories, passing { env: cleanEnv }, and its getIssuePullRequests's own repo-gathering block uses gatherReviewRepos instead of a third hand-copied loop."
+  - "pantheon-v2-l2/index.mjs no longer defines its own ghRun/ghListRepos/ghPrs/listCandidatePullRequests -- it imports and wires the shared factories with the default env (process.env)."
+  - "A new test confirms multica/backlog.mjs's gh calls now carry the 15s timeout (the actual drift this epic closes) -- not assumed from the refactor alone."
+  - "execFileSync remains INJECTED, never imported inside github-cli.mjs itself, preserving both callers' existing t.mock.module-based test-mocking approach."
+  - "All existing tests (including the pre-existing 15s-timeout test for pantheon-v2-l2 and the pre-existing cleanEnv scrubbing test for multica/backlog.mjs) continue to pass unmodified."
+
+steps:
+  - id: implement
+    description: >
+      Create src/router/lib/adapters/github-cli.mjs with the five exports
+      described above, following multica/cli-runner.mjs's exact
+      dependency-injection convention (execFileSync injected, never
+      imported). Update multica/backlog.mjs and pantheon-v2-l2/index.mjs to
+      import and wire these instead of their own local copies; replace
+      multica/backlog.mjs's second, in-file duplicate repo-gathering block
+      (inside getIssuePullRequests) with gatherReviewRepos too.
+    agent: developer
+  - id: test
+    description: >
+      Add src/router/test/github-cli.test.mjs covering the shared module's
+      pure factory functions directly (timeout propagation, env-thunk
+      override, empty-stdout handling, degrade-to-[] on failure, repo-set
+      union/de-dup, PR tagging with _repo). Add one new regression test to
+      backlog-adapter.test.mjs asserting multica/backlog.mjs's gh calls now
+      carry the 15s timeout. Run npm run test:all and confirm full green,
+      not just the new tests.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t008-github-cli-dedup.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/adapters/github-cli.mjs
+      purpose: new shared module, single source of truth for gh-CLI helper logic.
+    - path: src/router/lib/adapters/multica/cli-runner.mjs
+      purpose: the precedent this extraction directly mirrors (same DI convention, same reason).
+    - path: src/router/lib/adapters/multica/backlog.mjs
+      purpose: first consumer, passes { env: cleanEnv }.
+    - path: src/router/lib/adapters/pantheon-v2-l2/index.mjs
+      purpose: second consumer, uses the default env (process.env).
+
+design_decisions:
+  - decision: env is an injected thunk, not a plain value, on makeGhRun.
+    rationale: The two real callers have a genuine, deliberate difference here (credential scrubbing vs. none) -- a thunk lets each supply its own real behavior rather than the shared module having to know about cleanEnv() or guess a one-size-fits-all default.
+  - decision: Hardcode the 15s timeout inside the shared makeGhRun rather than making it a parameter.
+    rationale: The whole point of unifying is that both callers should have the SAME timeout protection; parameterizing it before any real caller needs a different value would be speculative.
+
+risks:
+  - severity: low
+    description: A future caller of multica/backlog.mjs that depended on gh calls having no timeout (relying on an indefinite hang for some reason) would now see a 15s SIGTERM instead.
+    mitigation: No such caller exists today (confirmed by reading every call site); a 15s timeout is the same behavior pantheon-v2-l2 has already run live with since 2026-08-29 without incident.

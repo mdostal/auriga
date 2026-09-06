@@ -238,6 +238,19 @@ test('getIssuePullRequests: non-empty gh-mocked response is discovered and retur
   // returning empty because the gh-fallback wiring was dropped/broken).
   assert.ok(calls.some((c) => c.cmd === GH_CLI && c.args[0] === 'repo'), 'ghListRepos should have been called');
   assert.ok(calls.some((c) => c.cmd === GH_CLI && c.args[0] === 'pr'), 'ghPrs should have been called');
+
+  // t008 dedupe regression: ghRun now comes from the shared ../github-cli.mjs
+  // (also used by pantheon-v2-l2/index.mjs) rather than a hand-copied local
+  // definition. This adapter's gh calls must still get the 15s timeout that
+  // module bakes in -- this file's OWN copy never had one before the dedupe,
+  // a real, live drift the dedupe found and fixed, not a hypothetical (see
+  // the "cleanEnv(): ..." test above for this file's separate, pre-existing
+  // MULTICA_* env-scrubbing coverage, unaffected by this change).
+  const ghCalls = calls.filter((c) => c.cmd === GH_CLI);
+  assert.ok(ghCalls.length > 0);
+  for (const c of ghCalls) {
+    assert.equal(c.options.timeout, 15000, 'every gh call must carry the shared 15s timeout');
+  }
 });
 
 test('getIssuePullRequests: merges native Multica linkage with gh-discovered PRs, de-duplicated by url', async (t) => {
