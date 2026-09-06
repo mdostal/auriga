@@ -82,6 +82,7 @@ import { z } from 'zod';
 import { createMulticaBacklogAdapter } from '../adapters/multica/backlog.mjs';
 import { createStubBacklogAdapter } from '../adapters/stub/backlog.mjs';
 import { prMatchesStory } from '../core.mjs';
+import { ISSUE_STATUS } from '../issue-status.mjs';
 import * as cfg from '../config.mjs';
 
 // TTL for the cached board-wide PR candidate scan (see getStoryPullRequests
@@ -255,9 +256,9 @@ export function getStory(backlog, args, prCache = { prs: null, fetchedAt: 0 }) {
 export function listBlockedAndInflight(backlog, args = {}) {
   const { project_id } = args;
   const issues = project_id ? backlog.listIssues(project_id) : scanAllIssues(backlog).issues;
-  const blocked = issues.filter((i) => i.status === 'blocked').map((i) => shapeIssue(i, issues));
+  const blocked = issues.filter((i) => i.status === ISSUE_STATUS.BLOCKED).map((i) => shapeIssue(i, issues));
   const inFlight = issues
-    .filter((i) => i.status === 'in_progress' || i.status === 'in_review')
+    .filter((i) => i.status === ISSUE_STATUS.IN_PROGRESS || i.status === ISSUE_STATUS.IN_REVIEW)
     .map((i) => shapeIssue(i, issues));
   return {
     project_id: project_id || null,
