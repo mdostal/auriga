@@ -26,6 +26,7 @@
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
@@ -180,7 +181,7 @@ export async function cycle(opts = {}) {
     return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
   }
 
-  const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
+  const todo = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
   logImpl('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
@@ -199,7 +200,7 @@ export async function cycle(opts = {}) {
   // fresh candidates. Guard: skip any that already have runs (already built / in flight),
   // so an anomalous blocked-with-open-PR story is never re-dispatched.
   {
-    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked');
+    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.BLOCKED);
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
@@ -222,12 +223,12 @@ export async function cycle(opts = {}) {
         catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
       if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
-      logImpl('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !dryRun });
+      logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
         try {
-          backlog.setIssueStatus(u.identifier, 'todo');
+          backlog.setIssueStatus(u.identifier, ISSUE_STATUS.TODO);
           try { spawn.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
-        } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
+        } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: ISSUE_STATUS.TODO, error: e.message }); }
       }
     }
 
@@ -237,9 +238,9 @@ export async function cycle(opts = {}) {
     // already terminal.
     const parentDone = coreImpl.detectParentDone(issues);
     for (const pd of parentDone) {
-      logImpl('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !dryRun });
+      logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {
-        try { backlog.setIssueStatus(pd.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
+        try { backlog.setIssueStatus(pd.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
       }
     }
   }
@@ -249,26 +250,28 @@ export async function cycle(opts = {}) {
   // makes each cycle atomic w.r.t. other router processes; re-deriving the
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
-  const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
+  const inProgress = issues.filter((i) => [
+    ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
+  ].includes((i.status || '').toLowerCase()));
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
   const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
   for (const c of completions) {
-    logImpl('advance', { identifier: c.identifier, to: 'in_review', applied: !dryRun });
+    logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
-      try { backlog.setIssueStatus(c.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
+      try { backlog.setIssueStatus(c.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
     }
   }
 
-  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
+  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW);
   const prsByIssue = {};
   for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
   const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
   for (const v of verified) {
-    logImpl('advance', { identifier: v.identifier, to: 'done', applied: !dryRun });
+    logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {
-      try { backlog.setIssueStatus(v.identifier, 'done'); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: 'done', error: e.message }); }
+      try { backlog.setIssueStatus(v.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
     }
   }
 
@@ -288,7 +291,7 @@ export async function cycle(opts = {}) {
   {
     const doneIds = new Set(
       issues
-        .filter((i) => { const s = (i.status || '').toLowerCase(); return s === 'done' || s === 'cancelled' || s === 'canceled'; })
+        .filter((i) => isTerminalIssueStatus((i.status || '').toLowerCase()))
         .map((i) => i.id)
     );
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
@@ -319,7 +322,7 @@ export async function cycle(opts = {}) {
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
-        if (c.status === 'blocked') backlog.setIssueStatus(c.identifier, 'todo');
+        if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
         // NOT routed through spawn.dispatch() (a real, tested method with a
@@ -363,7 +366,7 @@ export async function cycle(opts = {}) {
   // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
   // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
   // are still found).
-  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
+  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE);
 
   // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
   // parent/seed ticket that some unrelated PR merely references is never dispatched.
@@ -416,9 +419,9 @@ export async function cycle(opts = {}) {
     for (const f of falseDone) {
       if (n >= cap) { logImpl('false_done_capped', { remaining: falseDone.length - n }); break; }
       n++;
-      logImpl('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
+      logImpl('advance', { identifier: f.identifier, from: ISSUE_STATUS.DONE, to: ISSUE_STATUS.IN_REVIEW, kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
       if (!dryRun) {
-        try { backlog.setIssueStatus(f.identifier, 'in_review'); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
+        try { backlog.setIssueStatus(f.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
       }
     }
   }

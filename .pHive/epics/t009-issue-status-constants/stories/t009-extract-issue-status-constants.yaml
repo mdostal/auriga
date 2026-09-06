@@ -1,0 +1,82 @@
+id: t009-extract-issue-status-constants
+epic: t009-issue-status-constants
+title: Extract ISSUE_STATUS constants module, apply across core.mjs and auriga-router.mjs
+status: shipped
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Third of four agreed workstreams from the 2026-09-05 codebase-wide
+  cleanup discussion (mirrors the "no hardcoded strings" fix already
+  shipped for GitHub's PR-state enum in github-pr-state.mjs, GH #81 --
+  applied here to Multica issue-status values).
+
+  Found wider than originally scoped: auriga-router.mjs had just as many
+  raw issue-status literals as core.mjs (comparison sites, setIssueStatus()
+  write calls, and logImpl() log payloads), plus a real, in-file
+  duplication in core.mjs itself -- the exact done/cancelled/canceled
+  "is this issue terminal" check was hand-copied as a local
+  `const terminal = (s) => ...` closure in THREE separate functions
+  (depsSatisfied inline, descDepsSatisfied, detectParentDone).
+
+  Unlike GITHUB_PR_STATE (a verified copy of GitHub's own documented
+  enum), this module is honestly NOT a verified copy of Multica's own API
+  docs -- no live access to confirm that from this session. It names the
+  values this router has empirically relied on to date; the module's own
+  header comment says so.
+
+acceptance_criteria:
+  - "src/router/lib/issue-status.mjs exports ISSUE_STATUS (todo/blocked/in_progress/in_review/done/cancelled/canceled/shipped/complete/pending/running), ISSUE_STATUS_ALT_SPELLINGS (in progress, spaced), and isTerminalIssueStatus(status)."
+  - "core.mjs's three hand-copied done/cancelled/canceled terminal-check closures (depsSatisfied, descDepsSatisfied, detectParentDone) are collapsed into calls to the single shared isTerminalIssueStatus."
+  - "Zero raw issue-status string literals remain in core.mjs or auriga-router.mjs outside issue-status.mjs itself and the deliberately-out-of-scope RUN-status sets (ACTIVE_RUN_STATUSES/FAILED_RUN_STATUSES) -- verified by grep, not assumed."
+  - "Every setIssueStatus() write call and logImpl() status-value log payload in auriga-router.mjs uses the named constants too, not just comparison sites."
+  - "All existing tests pass unmodified; full npm run test:all is green after all changes."
+
+steps:
+  - id: implement
+    description: >
+      Create src/router/lib/issue-status.mjs. Update core.mjs: import it,
+      build ACTIVE_ISSUE_STATUSES from the constants, replace every raw
+      literal comparison, collapse the three terminal closures into
+      isTerminalIssueStatus. Update auriga-router.mjs: import it, replace
+      every comparison/write/log-payload site. Fix the incidental YAML
+      quoting bug found in t008's own story doc during verification
+      (unrelated to this epic's code, found via the e2e/hardening suite's
+      graceful-degradation warning output).
+    agent: developer
+  - id: test
+    description: >
+      Add src/router/test/issue-status.test.mjs covering the constants and
+      isTerminalIssueStatus directly. Run npm run test:all and confirm
+      full green. Grep both core.mjs and auriga-router.mjs to confirm zero
+      remaining raw issue-status literals outside the documented
+      out-of-scope RUN-status sets.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t009-issue-status-constants.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/issue-status.mjs
+      purpose: new shared module, single source of truth for issue-status values.
+    - path: src/router/lib/core.mjs
+      purpose: "consumer -- computeInflight/computeAssignedQueued/depsSatisfied/selectAssignments/descDepsSatisfied/detectParentDone/detectCascadeDispatch."
+    - path: src/router/auriga-router.mjs
+      purpose: "consumer -- the state-machine's own comparison/write/log-payload sites."
+
+design_decisions:
+  - decision: Extract only ISSUE status, not RUN status, this epic.
+    rationale: No comparison-site duplication of RUN-status literals was found (unlike issue status and PR state) -- nothing to de-drift yet; extracting it now would be speculative ahead of a real, concrete need.
+  - decision: Update write/log-payload sites (setIssueStatus/logImpl), not just comparison sites.
+    rationale: Operator's explicit blanket direction was "no hardcoded strings anywhere," not just comparison logic -- full consistency was the actual ask.
+
+risks:
+  - severity: low
+    description: None identified -- every change is a mechanical literal-to-constant substitution with identical runtime string values.
+    mitigation: Full existing test suite (330 router tests) plus 5 new tests confirm behavior is unchanged.

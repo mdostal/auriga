@@ -70,7 +70,7 @@ context:
     - path: src/router/lib/adapters/multica/cli-runner.mjs
       purpose: the precedent this extraction directly mirrors (same DI convention, same reason).
     - path: src/router/lib/adapters/multica/backlog.mjs
-      purpose: first consumer, passes { env: cleanEnv }.
+      purpose: "first consumer, passes { env: cleanEnv }."
     - path: src/router/lib/adapters/pantheon-v2-l2/index.mjs
       purpose: second consumer, uses the default env (process.env).
 
