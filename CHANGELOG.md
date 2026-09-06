@@ -4,6 +4,28 @@ All notable changes to Auriga are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-06
+
+**A new MemoryAdapter + orchestrator topology registry (the first real steps toward multi-instance Auriga), a real gh-CLI timeout drift bug and a real dispatch-blocking tie-break bug found and fixed, repo-wide lint enforcement, and `core.mjs` decomposed from a single 1189-line file into five focused modules.**
+
+### Added
+
+- **`MemoryAdapter` (Mnemosyne-backed) + orchestrator topology registry** (t010): a third adapter interface, `recall(query, scope, opts)`/`remember(text, scope, opts)`, backed directly by Mnemosyne's HTTP service (no Pantheon memory proxy exists yet — the same direct-integration-for-now, cut-over-later pattern `backlog.mjs` itself followed before PR #65). Deliberately asynchronous, unlike the synchronous `BacklogAdapter`/`SpawnAdapter` — there's no `cycle()` consumer yet, and Mnemosyne's real transport is genuinely async. Alongside it, a pure-data orchestrator topology registry (`orchestrator-topology.json`) lets one Auriga instance register another as its parent or a child — a plain tree node, no orchestration logic. New CLI surface: `auriga memory recall/remember` and `auriga orchestrator set-parent/clear-parent/add-child/remove-child/list`.
+- **Repo-wide lint enforcement** (t007): `oxlint --deny-warnings` now runs as the first step of `npm run test:all` across `src/router`/`src/server`/`src/ui` — the first lint tooling wired into CI-equivalent local validation anywhere in this repo. Fixed all 17 real findings it surfaced (dead code, useless conditions, unused bindings).
+
+### Fixed
+
+- **`detectVerifiedDone` never recognized a real merged PR** (GitHub issue #81): compared `pr.state === 'merged'` / `pr.merged_at` against gh's real shape, which is uppercase `state: "MERGED"` and camelCase `mergedAt` — every real PR sourced via the board-wide gh scan failed this check, leaving merged stories stuck `in_review` indefinitely (confirmed live: 19 stories stuck on one board). Extracted a `GITHUB_PR_STATE` constants module mirroring gh's actual enum casing and fixed the check against it.
+- **`heimdall-dev` silently winning a dispatch tie-break forever** (GitHub issue #80): the Heimdall project's lane listed a `heimdall-dev` agent id that doesn't exist in the corrected Multica workspace — a nonexistent agent always shows 0 inflight (nothing ever successfully assigns to it), so `chooseAgentForProject`'s sort-by-lowest-load tie-break picked it over the real, working `heimdall-dev-codex` every time. Pruned the dead entry from the lane.
+- **gh-CLI helper duplication had let a real timeout drift** (t008): `multica/backlog.mjs` and `pantheon-v2-l2/index.mjs` each hand-maintained a near-identical copy of the gh-CLI scan helpers; one copy never received the other's 15s exec timeout (originally added for GH #70/PANT-24 — a single hanging repo must never stall the whole board-wide PR scan). Unified into a shared `github-cli.mjs` module so both adapters get the same protection going forward.
+- **Terminal issue-status logic duplicated three times, with raw string literals throughout** (t009): `done`/`cancelled`/`canceled` checks were hand-copied in three places in `core.mjs`, and every issue-status comparison across `core.mjs`/`auriga-router.mjs`/`mcp/server.mjs` used raw string literals instead of a shared constant. Extracted `ISSUE_STATUS` and collapsed all three duplicated checks into one `isTerminalIssueStatus` helper; `lib/mcp/server.mjs`'s own copy (missed by the same pass) was closed in a follow-up (t014).
+
+### Changed
+
+- **`lib/core.mjs` decomposed from 1189 lines into 5 focused modules** (t011): `run-classification.mjs`, `story-identity.mjs`, `pr-matching.mjs`, `capacity.mjs`, and `review-squad.mjs`, each a self-contained, independently-tested module. `core.mjs` re-imports and re-exports everything under its original names — every existing call site (including `auriga-router.mjs`'s `coreImpl.X` property access) needed zero changes.
+- **`multica/spawn.mjs` and `pantheon-v2-l2/index.mjs`'s duplicated `dispatch()`/`describeLanes()` unified** (t013): same drift-risk shape as the gh-CLI dedup above — extracted into a shared `spawn-dispatch.mjs`, leaving each adapter's genuinely different transport-specific primitives (`assignIssue`/`rerunIssue`/`getIssueRuns`) in place.
+- **Standalone-safe post-merge redeploy hook** (t004): a `dev`→`main` merge now triggers a redeploy hook that works whether or not this Auriga instance is running inside the Pantheon docker-compose stack, rather than assuming it always is.
+
 ## [0.2.0] - 2026-09-04
 
 **Auriga now talks to Pantheon instead of Multica directly — the architecture violation the pantheon-v2-l2 adapter was always meant to close — plus multi-tenant config support and a string of real bugs found and fixed while dogfooding both against live deployments.**
