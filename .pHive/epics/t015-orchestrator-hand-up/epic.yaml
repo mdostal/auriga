@@ -1,0 +1,34 @@
+name: t015-orchestrator-hand-up
+title: Real orchestrator hand-up — cross-board ticket creation, recursive by construction
+description: >
+  First real logic on top of t010's pure-data orchestrator topology registry. When a
+  ticket carries an explicit hand-up label and this instance can't/shouldn't resolve it
+  locally, Auriga creates the ticket on its registered PARENT's board (a genuinely new
+  createIssue capability — confirmed live against core-api's real POST
+  /api/backlog/issues endpoint), then closes/comments/unassigns the original. No
+  configured parent (or no reachability config) falls to the existing human-todo path.
+  Because every instance runs this identical rule against its own topology.parent,
+  multi-hop hand-up across a real N-level orchestrator tree (Dostal Tech / Firefly
+  Events / Personal level instances, a hypothetical top-level "meta of everything") is
+  recursive by construction -- no multi-level code required. Hand-down (to a specific
+  child, reusing this same cross-board-write primitive) is deliberately split into a
+  follow-up epic (t016, not started) since it needs an additional child-selection
+  routing-table extension this epic doesn't.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t015-cross-board-create-issue
+    title: Add createIssue capability + parent reachability config
+    complexity: medium
+    depends_on: []
+  - id: t015-hand-up-routing
+    title: Wire hand-up routing logic into selectAssignments
+    complexity: medium
+    depends_on: [t015-cross-board-create-issue]

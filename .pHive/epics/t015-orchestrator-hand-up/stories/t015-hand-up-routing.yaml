@@ -1,0 +1,95 @@
+id: t015-hand-up-routing
+epic: t015-orchestrator-hand-up
+title: Wire hand-up routing logic into selectAssignments
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [t015-cross-board-create-issue]
+
+description: |
+  The actual routing decision, built on t015-cross-board-create-issue's new createIssue
+  capability + parent-reachability resolver. Mirrors isSeed()'s existing shape exactly: a
+  pure label-driven predicate (isHandUp) plus a routing branch in selectAssignments.
+
+  core.mjs stays a PURE, synchronous, no-I/O module (its existing, deliberate
+  convention -- see run-classification.mjs/capacity.mjs/etc., none of which perform I/O).
+  selectAssignments therefore does NOT call backlog.createIssue itself -- it returns hand-up
+  DECISIONS as data (mirroring how it already returns `chosen` assignments as data), and
+  auriga-router.mjs's cycle() (the imperative shell) is the one that actually performs the
+  cross-board createIssue call plus the local commentOnIssue/unassignIssue/setIssueStatus
+  writes, exactly like every other decision->action split already in this router.
+
+  Because every instance runs this identical rule against its own topology.parent, a
+  multi-hop hand-up across a real N-level tree (see this epic's design-discussion.md for
+  the operator's real deployment shape: Dostal Tech / Firefly Events / Personal level
+  instances today, a hypothetical top-level "meta of everything" instance) is recursive by
+  construction -- the parent's own next cycle applies this exact same logic against ITS
+  own topology.parent, with zero special multi-level code anywhere.
+
+acceptance_criteria:
+  - "core.mjs gains isHandUp(issue): checks for a `hand-up` label, using the same label-object-vs-string normalization isSeed() already handles (multica issue list/get return labels as [{id, name, ...}], not plain strings)."
+  - "selectAssignments gains a new opts field (e.g. opts.parentBoardConfig, the resolveParentBoardConfig(...) result -- { baseUrl, projectId } | null) and returns a new `handUps` array alongside its existing return value: [{ identifier, issueId, reason: 'no-local-route' | 'explicit-hand-up' }]."
+  - "Routing order in selectAssignments's per-candidate loop: existing hive-story check -> existing isSeed() check -> [NEW] if isHandUp(issue) AND opts.parentBoardConfig is non-null AND no earlier branch already claimed this candidate -> push to handUps, do NOT add to chosen -> existing normal PROJECT_LANE/DEFAULT_LANE dispatch unchanged. Hand-up must never preempt a normal, resolvable local dispatch -- a hand-up-labeled ticket that ALSO has a working local route is not handed up (the label signals \"if nothing else fits\", not \"always escalate\")."
+  - "If isHandUp(issue) is true but opts.parentBoardConfig is null (no configured parent/reachability), the candidate is left alone by this new branch entirely -- falls through to the existing isHumanTodo/human-queue-export path exactly as it does today for any other unroutable ticket, per the operator's 'no knowledge or nowhere to move it -- 100% human job' framing. No new human-queue code needed -- this is confirming the existing path already handles it, with a regression test proving so."
+  - "auriga-router.mjs's cycle() reads orchestrator-topology.mjs's loadRealTopology() + resolveParentBoardConfig(...) once per cycle (same pattern as every other per-cycle config read), passes the result into selectAssignments, and for each returned handUps[] entry: instantiates createPantheonV2L2BacklogAdapter({ baseUrl, project: projectId }) (or the equivalent real adapter per the instance's own configured adapter kind), calls .createIssue({ title, description, metadata: { handed_up_from: identifier, ...} }), then on the ORIGINAL local issue calls backlog.commentOnIssue(identifier, '...linking to the new ticket...'), backlog.unassignIssue(identifier), backlog.setIssueStatus(identifier, ISSUE_STATUS.CANCELLED) (or DONE -- pick whichever this repo's existing terminal-status convention treats as 'closed without building it', matching how detectFalseDone/other terminal transitions already use ISSUE_STATUS), and logImpl('hand_up', { identifier, parent: ..., newIdentifier: ... })."
+  - "A cross-board createIssue failure (network error, 502, etc.) is caught and logged (logImpl('hand_up_error', ...)) -- it must NEVER throw out of cycle() and must NEVER apply the local comment/unassign/status-change side effects if the remote create failed (no orphaned 'we handed it up' state pointing at a ticket that doesn't exist)."
+  - "New tests (core.test.mjs or a dedicated hand-up test file, matching this repo's existing per-concept test-file convention): isHandUp's label detection + normalization: selectAssignments's handUps output for (a) a hand-up-labeled ticket with a configured parent and no working local route, (b) a hand-up-labeled ticket that ALSO has a working local route (must dispatch locally, NOT hand up), (c) a hand-up-labeled ticket with no configured parent (must produce zero handUps entries, confirmed to still be visible to the existing human-todo path); cycle()'s remote-create-then-local-cleanup sequencing including the failure-doesn't-apply-local-side-effects case, against the stub adapters."
+
+steps:
+  - id: research
+    description: >
+      Re-read core.mjs's current isSeed()/selectAssignments implementation (post-t011
+      decomposition) to confirm the exact insertion point and current parameter/return
+      shape before editing.
+    agent: researcher
+  - id: implement
+    description: >
+      Add isHandUp to core.mjs, extend selectAssignments's signature/return value and
+      routing loop per the acceptance criteria, and wire cycle() in auriga-router.mjs to
+      read topology + resolveParentBoardConfig once per cycle and act on returned
+      handUps[] entries.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: >
+      Add the test coverage described in the acceptance criteria. Run npm run test:all
+      and confirm full green, including the existing router-cycle.e2e.test.mjs suite
+      (must remain green unchanged for any ticket that doesn't carry the hand-up label).
+    agent: developer
+    depends_on: [implement]
+  - id: review
+    description: Review implementation and tests for correctness and convention compliance.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit on branch feat/t015-orchestrator-hand-up, merge, push, update VISION.md/memory to mark t015 shipped and t016 (hand-down) as the queued next epic.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: "isSeed()'s existing shape (label-driven predicate + routing branch in selectAssignments) is the exact precedent isHandUp mirrors."
+    - path: src/router/auriga-router.mjs
+      purpose: "cycle()'s existing 'route new todos' / advance/cascade blocks are the precedent for the new remote-create-then-local-cleanup sequencing (assign-then-verify pattern, try/catch around each side effect, logImpl on every branch)."
+    - path: src/router/lib/orchestrator-topology.mjs
+      purpose: "loadRealTopology() + this epic's new resolveParentBoardConfig() (t015-cross-board-create-issue) are read once per cycle, same pattern as every other per-cycle config read."
+    - path: .pHive/epics/t015-orchestrator-hand-up/design-discussion.md
+      purpose: full design rationale, including the three real operator corrections that shaped this story's exact shape.
+
+design_decisions:
+  - decision: selectAssignments returns handUps as data; it never calls createIssue/commentOnIssue/etc. itself.
+    rationale: core.mjs is a deliberately pure, synchronous, no-I/O module (t011's own decomposition preserved this invariant across every extracted file) -- this story does not become the first exception. auriga-router.mjs (the existing imperative shell) performs the actual writes, exactly like every other decision this router already makes.
+  - decision: hand-up only fires when NO local route exists, even if the label is present.
+    rationale: Directly from the operator's own framing -- the label signals "this doesn't fit anything I have access to," which is a statement about the absence of a working local route, not an unconditional override of one that already exists.
+  - decision: no configured parent -> fall through to the existing human-todo path, not a new mechanism.
+    rationale: The operator's own words: "if there is no knowledge or nowhere to move it up to -- 100% human job." The human-todo path already exists and already handles "Auriga can't resolve this" -- reuse it rather than inventing a parallel one.
+
+risks:
+  - severity: medium
+    description: A hand-up that succeeds remotely but whose local cleanup (comment/unassign/status) then fails would leave the ORIGINAL ticket still active locally even though a duplicate now exists on the parent board -- a real double-dispatch risk if not handled.
+    mitigation: Named explicitly in acceptance criteria as its own failure-ordering requirement (log the partial-failure state clearly via logImpl even though full atomicity across two separate systems isn't achievable); a follow-up test asserts this exact partial-failure path is at least visible in logs, not silently swallowed.
+  - severity: low
+    description: This story doesn't yet handle hand-DOWN (t016) -- a ticket could theoretically need routing to a specific child rather than the single parent, which this story's routing table doesn't express.
+    mitigation: Explicitly out of scope per this epic's design-discussion.md; t016 is queued as the immediate next epic reusing this story's createIssue primitive unchanged.

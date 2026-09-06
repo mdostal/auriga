@@ -66,18 +66,40 @@ substantial enough to deserve their own future epic, not a rider on this one).
 
 ### Revised concrete shape (supersedes the "Proposed implementation shape" section below)
 
-- **New `BacklogAdapter` capability**: `createIssue(target, ticketInfo)` — a genuinely new
-  method (no adapter implements ticket creation today; every existing method acts on an
-  EXISTING issue). Implemented for `pantheon-v2-l2` first (`POST /api/backlog/issues` —
-  real, live path); a `multica`-CLI equivalent (`multica issue create`, if the CLI
-  supports it — to be confirmed during implementation, not blocking this design) mirrors
-  it for parity, matching every other dual-implementation in this adapters directory.
-- **Topology schema, extended per the operator's "both, combined" answer**: a topology
-  node (`parent` or a `children[]` entry) gains real reachability fields (adapter kind +
-  enough config to instantiate that adapter against the TARGET board — mirroring
-  `pantheon-v2-l2`'s own config shape), AND that reachability can instead be a reference
-  into `AURIGA_CONFIG`'s existing multi-tenant pattern (already used for per-tenant
-  project lists) rather than duplicating connection details per topology node.
+- **New `BacklogAdapter` capability**: `createIssue(ticketInfo)` — a genuinely new method
+  (no adapter implements ticket creation today; every existing method acts on an EXISTING
+  issue). **Confirmed live 2026-09-06** (cross-session peer `pantheon-v2-6e`, read
+  directly from `core/api/backlog.ts` lines 165-185, not guessed): `POST
+  /api/backlog/issues` is real and already exists. Body: `{ title (required),
+  description?, status?, labels?, metadata?, parent?, project? }` — note the field is
+  `project`, not `project_id` (matches the BoardQueue port's own naming, not Multica's raw
+  field name — same naming mismatch class as every other `toRawIssue()`-mapped field in
+  this adapter). Response: `201` with the created issue on success, `502` with
+  `{error: message}` on any backend failure; the handler is a thin passthrough
+  (`getBoard().create(request.body)`), no auth/validation beyond the required-title check.
+  The created-issue response gets passed through the file's existing `toRawIssue()` mapper
+  so `core.mjs` sees the same snake_case shape it already expects everywhere else in this
+  adapter. A `multica`-CLI equivalent (`multica issue create`, if the CLI supports it — to
+  be confirmed during implementation, not blocking this design) mirrors it for parity,
+  matching every other dual-implementation in this adapters directory.
+- **Topology schema, extended per the operator's "both, combined" answer**: since
+  `createPantheonV2L2BacklogAdapter(cfg)` already takes exactly `{ baseUrl, project, ... }`
+  (confirmed: `index.mjs` line ~117), reaching the parent's board needs no new adapter
+  TYPE — just a second instance of the SAME existing adapter, pointed at the parent's
+  `baseUrl`/`project` instead of this instance's own. Two ways to supply that pair, both
+  wired in (the operator's "both, combined" answer):
+  1. `orchestrator-topology.mjs`'s `setParent()`/`addChild()` gain optional `baseUrl`/
+     `projectId` fields, stored directly in `orchestrator-topology.json` alongside
+     `id`/`notes`.
+  2. `AURIGA_CONFIG`'s existing per-tenant JSON override file (already used for
+     `CAPS`/`PROJECT_LANE`/etc. per `config-loader.mjs`) may instead carry a
+     `parentBoard: { baseUrl, projectId }` block, letting an operator manage a tenant's
+     parent-reachability config in the SAME file they already maintain per tenant,
+     without duplicating it into `orchestrator-topology.json`.
+  Resolution order: `AURIGA_CONFIG`'s `parentBoard` block (if present) wins, else fall
+  back to `topology.parent`'s own `baseUrl`/`projectId` fields; if NEITHER supplies both
+  fields, there is no real destination — hand-up falls to the human-todo path (per the
+  operator's "no knowledge or nowhere to move it -- 100% human job").
 - **`isHandUp(issue)`**: unchanged from the original draft — an explicit label
   (mirrors `isSeed()`'s label-normalization handling), the judgment call staying outside
   the router.

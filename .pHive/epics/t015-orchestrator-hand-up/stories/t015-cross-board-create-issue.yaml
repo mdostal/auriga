@@ -1,0 +1,87 @@
+id: t015-cross-board-create-issue
+epic: t015-orchestrator-hand-up
+title: Add createIssue capability + parent reachability config
+status: pending
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Foundation layer for t015's hand-up logic: a genuinely new BacklogAdapter capability
+  (createIssue — every existing method acts on an EXISTING issue, none create one) plus
+  the config plumbing to know WHERE to create it (the parent's board reachability).
+
+  Real endpoint confirmed live 2026-09-06 (cross-session peer pantheon-v2-6e, read
+  directly from core/api/backlog.ts lines 165-185): POST /api/backlog/issues exists.
+  Body: { title (required), description?, status?, labels?, metadata?, parent?, project? }
+  -- field is `project`, not `project_id` (BoardQueue port's own naming). Response: 201
+  with the created issue, 502 with {error} on backend failure. Thin passthrough handler
+  (getBoard().create(request.body)), no auth beyond the required-title check.
+
+acceptance_criteria:
+  - "BacklogAdapter typedef (backlog-adapter.mjs) documents a new createIssue(ticketInfo) => object method."
+  - "pantheon-v2-l2/index.mjs implements createIssue: POST /api/backlog/issues with { title, description, project, labels, metadata, parent }, response passed through the file's existing toRawIssue() mapper so core.mjs sees the same snake_case shape as every other read from this adapter."
+  - "multica/backlog.mjs implements createIssue if `multica issue create` (or equivalent) is a real CLI subcommand -- verify against the actual CLI (`multica issue --help` or existing docs) before implementing; if no create subcommand exists, createIssue throws a clear 'not supported by this adapter' error rather than guessing a wrong invocation. Document whichever is true in this file's own header comment."
+  - "stub/backlog.mjs implements createIssue as a straightforward in-memory push onto the stub's own issue list, returning a fabricated identifier, for use by tests and by t015-hand-up-routing's own test suite."
+  - "orchestrator-topology.mjs's setParent()/addChild() accept optional baseUrl/projectId fields, stored in orchestrator-topology.json alongside id/notes; readTopologyFile/writeTopologyFile pass them through unchanged (no new validation beyond what already exists for id/notes)."
+  - "A new resolveParentBoardConfig(topology, externalConfig) function (orchestrator-topology.mjs or a new small sibling module) returns { baseUrl, projectId } | null: prefers externalConfig.parentBoard (AURIGA_CONFIG's parentBoard block, read via the existing loadExternalConfig()) when both baseUrl and projectId are present there; else falls back to topology.parent's own baseUrl/projectId when both are present there; else null (no real destination configured)."
+  - "New tests: createIssue's real-shape correctness for pantheon-v2-l2 (mocked execFileSync/curl -- asserts the exact path/method/body sent and the toRawIssue()-mapped return value), createIssue for the stub adapter, the topology setParent/addChild field pass-through, and resolveParentBoardConfig's three cases (AURIGA_CONFIG wins, topology-only fallback, neither present -> null)."
+
+steps:
+  - id: research
+    description: >
+      Confirm whether `multica issue create` (or an equivalent subcommand) exists in the
+      real multica CLI before writing multica/backlog.mjs's createIssue -- do not guess
+      subcommand syntax. If genuinely unconfirmable this session, implement the
+      throws-not-supported fallback instead and note why in the file's header comment.
+    agent: researcher
+  - id: implement
+    description: >
+      Add createIssue to backlog-adapter.mjs's typedef, pantheon-v2-l2/index.mjs (real,
+      per the confirmed endpoint shape above), multica/backlog.mjs (per research step
+      findings), and stub/backlog.mjs. Extend orchestrator-topology.mjs's setParent/
+      addChild with baseUrl/projectId fields and add resolveParentBoardConfig.
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: >
+      Add/extend test coverage per the acceptance criteria above. Run npm run test:all
+      and confirm full green.
+    agent: developer
+    depends_on: [implement]
+  - id: review
+    description: Review implementation and tests for correctness and convention compliance.
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit on branch feat/t015-orchestrator-hand-up.
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/adapters/pantheon-v2-l2/index.mjs
+      purpose: "createPantheonV2L2BacklogAdapter(cfg) already takes exactly { baseUrl, project, ... } -- reaching the parent's board is a SECOND instance of this same adapter, no new adapter type needed."
+      relevant_excerpt: |
+        export function createPantheonV2L2BacklogAdapter(cfg = {}) {
+          const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+    - path: src/router/lib/adapters/pantheon-v2-l2/http-runner.mjs
+      purpose: "makeHttpRun(execFileSync, baseUrl) returns httpRun(method, path, body) -- createIssue is just run('POST', '/api/backlog/issues', {...})."
+    - path: src/router/lib/orchestrator-topology.mjs
+      purpose: t010's pure-data registry this story extends with reachability fields.
+    - path: src/router/lib/config-loader.mjs
+      purpose: "loadExternalConfig() already reads AURIGA_CONFIG generically -- reuse directly, read externalConfig.parentBoard, no changes needed to this file itself."
+    - path: src/router/lib/adapters/backlog-adapter.mjs
+      purpose: the typedef this story adds createIssue to.
+
+design_decisions:
+  - decision: createIssue targets a board via cfg (baseUrl/project), not a topology id directly.
+    rationale: Keeps the adapter itself topology-agnostic (it already only knows baseUrl/project) -- topology resolution (which baseUrl/project a given parent id maps to) is a separate, pure concern handled by resolveParentBoardConfig, not baked into the adapter.
+  - decision: AURIGA_CONFIG's parentBoard block takes precedence over topology.json's own baseUrl/projectId fields.
+    rationale: Matches the operator's explicit "both, combined" answer -- AURIGA_CONFIG is the existing per-tenant deployment-config mechanism (already used for CAPS/PROJECT_LANE), so an operator managing many tenant deployments can keep parent-reachability alongside every other per-tenant override rather than hand-editing topology.json per instance.
+
+risks:
+  - severity: medium
+    description: The real POST /api/backlog/issues endpoint could still reject a request shape this story assumes correct (confirmed via source read, not a live test call) -- e.g. an undocumented required field beyond title.
+    mitigation: Endpoint shape was read directly from core-api's real source by a peer with live access, not guessed; the handler is a thin passthrough with no validation beyond the required-title check per that same read. Full live verification (an actual cross-tenant hand-up in production) is separate, Pantheon-owned follow-up work, consistent with this repo's existing "no live Multica testing" convention -- unit tests here are against mocked responses matching the confirmed real shape.
