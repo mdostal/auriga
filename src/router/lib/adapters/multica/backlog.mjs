@@ -45,6 +45,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { cleanEnv, makeRun } from './cli-runner.mjs';
+import { makeGhRun, makeGhListRepos, makeGhPrs, gatherReviewRepos, makeListCandidatePullRequests } from '../github-cli.mjs';
 
 /**
  * @param {{ cli?: string, profile?: string, ghCli?: string, reviewRepoOwner?: string, reviewSearchRepos?: string[] }} [cfg]
@@ -68,15 +69,15 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // rather than imported by cli-runner.mjs itself).
   const run = makeRun(execFileSync, CLI, PROFILE);
 
-  function ghRun(args, maxBuffer = 32 * 1024 * 1024) {
-    const out = execFileSync(GH, args, {
-      env: cleanEnv(),
-      encoding: 'utf8',
-      maxBuffer,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return out.trim() ? JSON.parse(out) : [];
-  }
+  // ghRun/ghListRepos/ghPrs now live in ../github-cli.mjs — shared with
+  // pantheon-v2-l2/index.mjs (see that module's header comment for why
+  // execFileSync is INJECTED here, and for the real 15s-timeout drift this
+  // dedupe found and fixed). env stays this file's own cleanEnv() — this
+  // process holds real Multica credentials that must never reach a gh
+  // subprocess, unlike pantheon-v2-l2's.
+  const ghRun = makeGhRun(execFileSync, GH, { env: cleanEnv });
+  const ghListRepos = makeGhListRepos(ghRun);
+  const ghPrs = makeGhPrs(ghRun);
 
   // `multica issue list` caps at --limit (default 50) issues per call. Projects
   // with more than a page of issues (Pantheon Core — the seed-flood project)
@@ -175,34 +176,9 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // ---- private gh-backed PR-discovery helpers (were top-level exports in
   // lib/multica.mjs; nothing outside getIssuePullRequests needs them
   // directly anymore — see the file-header note on Open Question 1). ----
-
-  // Open PRs for a repo via gh, as [{number,title,headRefName,baseRefName,body,url,state}].
-  // All PRs (any state) for a repo, as [{...,mergedAt}]. getIssuePullRequests
-  // needs every state (not just open) because a caller (detectVerifiedDone)
-  // must be able to see a MERGED PR too — run status alone is never trusted
-  // as "done".
-  function ghPrs(repo, state = 'all') {
-    try {
-      return ghRun(['pr', 'list', '--repo', repo, '--state', state,
-        '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100']);
-    } catch (e) {
-      process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
-      return [];
-    }
-  }
-
-  // Every repo slug for an owner via `gh repo list`, as ['owner/name', ...].
-  // Used only by getIssuePullRequests's repo-discovery fallback. Returns []
-  // on any error so the fallback simply finds nothing rather than throwing.
-  function ghListRepos(owner, limit = 300) {
-    try {
-      const arr = ghRun(['repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner'], 16 * 1024 * 1024);
-      return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
-    } catch (e) {
-      process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
-      return [];
-    }
-  }
+  //
+  // ghPrs/ghListRepos are now bound above (right after ghRun) from
+  // ../github-cli.mjs — shared with pantheon-v2-l2/index.mjs.
 
   // Simple identity heuristic for "does this PR belong to this issue" when
   // discovered via gh rather than Multica's native linkage: the identifier
@@ -249,20 +225,9 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // concept simply doesn't implement it; auriga-router.mjs's cycle() checks
   // for its presence and falls back to getIssuePullRequests per-identifier
   // when absent (e.g. stub/test adapters).
-  function listCandidatePullRequests() {
-    const repos = new Set([
-      ...(REVIEW_REPO_OWNER ? ghListRepos(REVIEW_REPO_OWNER) : []),
-      ...REVIEW_SEARCH_REPOS,
-    ]);
-    const all = [];
-    for (const repo of repos) {
-      for (const pr of ghPrs(repo, 'all')) {
-        pr._repo = repo;
-        all.push(pr);
-      }
-    }
-    return all;
-  }
+  const listCandidatePullRequests = makeListCandidatePullRequests(
+    ghListRepos, ghPrs, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  );
 
   // Pull/merge requests linked to one issue (was issuePullRequests). This
   // INTERNALLY calls BOTH Multica's native `issue pull-requests` linkage AND
@@ -300,10 +265,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
       process.stderr.write(`issuePullRequests(${identifier}) failed: ${e.message}\n`);
     }
 
-    const repos = new Set([
-      ...(REVIEW_REPO_OWNER ? ghListRepos(REVIEW_REPO_OWNER) : []),
-      ...REVIEW_SEARCH_REPOS,
-    ]);
+    const repos = gatherReviewRepos(ghListRepos, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS);
     for (const repo of repos) {
       for (const pr of ghPrs(repo, 'all')) {
         if (prMatchesIdentifier(pr, identifier)) {
