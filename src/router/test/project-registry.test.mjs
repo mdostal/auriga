@@ -204,19 +204,40 @@ test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches 
   assert.ok(!PROJECT_IDS.includes('6327fdaf-789e-4290-ab41-1421957b55c6'), 'Minerva must stay dispatch-ineligible');
 });
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the registry (PANT-59 2026-08-31) — Pantheon Core, 6 per-god projects, plus Minerva placeholder', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the registry (PANT-59 2026-08-31, pruned per GH #80 2026-09-06) — Pantheon Core, 6 per-god projects, plus Minerva placeholder', async () => {
   const { PROJECT_LANE } = await import('../lib/config-substrate.mjs');
   assert.deepEqual(PROJECT_LANE, {
     '032ea2e7-39b0-46d4-804e-57e74f627310': ['auriga-build'],              // Pantheon Core
     '8c13f273-ab62-425f-aee2-45e7c324dc09': ['consus-dev', 'auriga-build'],// Consus (god)
     '9ebce7eb-01db-4274-8829-5472d13b76ae': ['auriga-build'],              // Auriga (god)
-    '4aa2f07d-79e0-421f-9618-fae642056237': ['heimdall-dev', 'heimdall-dev-codex'], // Heimdall (god)
+    // GH #80: 'heimdall-dev' pruned -- confirmed live it does not exist as
+    // a real Multica agent, and its presence here always won
+    // chooseAgentForProject's tie-break (a nonexistent agent's inflight is
+    // always 0), so every Heimdall dispatch attempt failed with
+    // assign_error before ever reaching the one real agent.
+    '4aa2f07d-79e0-421f-9618-fae642056237': ['heimdall-dev-codex'], // Heimdall (god)
     '6a21cc72-5ca5-47d2-a791-9db5dce112bb': ['mnemosyne-dev', 'auriga-build'],     // Mnemosyne (god)
     '23dd7a13-d801-4d68-9886-ed5a86b3ec40': ['auriga-build'],              // Janus (god)
     '0e3d94f1-4846-43b9-90c3-b449d26869d6': ['auriga-build'],              // Portunus (god)
     '6327fdaf-789e-4290-ab41-1421957b55c6': ['auriga-dev'],                // Minerva (placeholder)
   });
   assert.equal(Object.keys(PROJECT_LANE).length, 8);
+});
+
+// GH #80 regression: chooseAgentForProject must never be ABLE to select a
+// lane entry that was pruned for not existing. Proven at the level that
+// actually matters (real, live-loaded config), not just a synthetic fixture
+// that could pass even if projects.json regressed.
+test('GH #80: the real Heimdall lane never offers heimdall-dev as a candidate — chooseAgentForProject can only ever pick a real agent', async () => {
+  const { PROJECT_LANE, AGENTS, RUNTIME_CAP } = await import('../lib/config-substrate.mjs');
+  const core = await import('../lib/core.mjs');
+  const heimdallProjectId = '4aa2f07d-79e0-421f-9618-fae642056237';
+  assert.ok(!PROJECT_LANE[heimdallProjectId].includes('heimdall-dev'));
+
+  const cfg = { PROJECT_LANE, DEFAULT_LANE: [], HIVE_LANE: [], AGENTS, RUNTIME_CAP };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForProject(heimdallProjectId, cfg, {}, {}, empty, false);
+  assert.equal(agent, 'heimdall-dev-codex');
 });
 
 test('HARD GATE: config-substrate.mjs\'s real PROJECT_NAMES resolves the 2 remaining registered ids (cosmetic, but must not regress)', async () => {

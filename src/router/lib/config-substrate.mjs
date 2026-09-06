@@ -43,14 +43,20 @@ export const AGENTS = _ext.AGENTS ?? {
     maxInflight: 1, // sparing: at most one Consus/Claude ticket in flight
     repo: 'mdostal/consus',
   },
-  // UNRESOLVED (#80): GET /api/backlog/agents/heimdall-dev 404s against the
-  // corrected workspace f32af269 — either this lane's agent genuinely
-  // doesn't exist there yet, or Multica calls it something else now. Left
-  // UNCHANGED (not blanked/guessed) pending that investigation — an absent
-  // id here fails the exact same way a wrong one does (never matches a real
-  // assignee_id), so leaving the old value causes no additional harm while
-  // it's open, and chooseAgentForProject already falls back to
-  // heimdall-dev-codex when this lane has no capacity/match.
+  // RESOLVED (#80, 2026-09-06): confirmed live that this agent genuinely
+  // does not exist in the corrected workspace f32af269 at all (GET
+  // /api/backlog/agents/heimdall-dev 404s; a full agent-name scan for
+  // "heimdall" finds only heimdall-dev-codex). This was WORSE than a
+  // harmless gap: chooseAgentForProject's tie-break prefers the first lane
+  // entry with the lowest inflight load, and a nonexistent agent's inflight
+  // is always 0 (nothing ever successfully assigns to it) — so this entry
+  // always WON the tie-break in projects.json's Heimdall lane and every
+  // dispatch attempt likely failed with assign_error before ever reaching
+  // heimdall-dev-codex, not a graceful fallback. Pruned from the real lane
+  // list in projects.json — this AGENTS entry is left in place (harmless
+  // when no lane references it) only in case a real opencode Heimdall
+  // agent is created later; re-verify its id live before re-adding it to
+  // any lane, never guess it's still correct.
   'heimdall-dev': {
     id: 'e56643ab-ec07-4347-a284-221c2f03a62d',
     runtime: 'opencode',
