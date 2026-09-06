@@ -2,13 +2,22 @@
 // Everything here is deterministic and unit-tested with mocked inputs.
 
 import { isPrOpen, isPrMerged } from './github-pr-state.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './issue-status.mjs';
 export { isPrMerged };
 
+// Run (task/job) statuses — a separate vocabulary from ISSUE_STATUS above
+// (a run is one execution attempt on an issue, not the issue's own
+// lifecycle state). Not yet extracted to a shared constants module — no
+// comparison-site duplication of these specific values has been found
+// (unlike issue status and PR state), so there's nothing to de-drift yet;
+// see the no-pre-emptive-integrations principle.
 const ACTIVE_RUN_STATUSES = new Set([
   'running', 'in_progress', 'in progress', 'queued', 'pending', 'dispatched', 'started', 'assigned',
 ]);
 const FAILED_RUN_STATUSES = new Set(['failed', 'error', 'errored', 'cancelled', 'canceled', 'timeout']);
-const ACTIVE_ISSUE_STATUSES = new Set(['in_progress', 'in progress', 'running']);
+const ACTIVE_ISSUE_STATUSES = new Set([
+  ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
+]);
 
 // Ignore smoke/scratch/verification tickets by title.
 export function isSmokeScratch(title = '') {
@@ -228,7 +237,7 @@ export function computeAssignedQueued(issues, agents) {
     const name = idToName[i.assignee_id];
     if (!name) continue;
     const st = (i.status || '').toLowerCase();
-    if (st === 'todo') counts[name] += 1;
+    if (st === ISSUE_STATUS.TODO) counts[name] += 1;
   }
   return counts;
 }
@@ -319,7 +328,7 @@ export function depsSatisfied(issue, statusById) {
   for (const id of ids) {
     const st = statusById.get(id);
     if (st === undefined) continue; // unseen dep -> don't block (avoid deadlock)
-    if (st !== 'done' && st !== 'cancelled' && st !== 'canceled') return false;
+    if (!isTerminalIssueStatus(st)) return false;
   }
   return true;
 }
@@ -368,7 +377,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never dispatch a
   // decomposed story whose dependency stories aren't done yet — see depsSatisfied).
   const candidates = issues
-    .filter((i) => (i.status || '').toLowerCase() === 'todo')
+    .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id)
     .filter((i) => !isSmokeScratch(i.title))
@@ -809,7 +818,6 @@ export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
   const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
-  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -819,7 +827,7 @@ export function descDepsSatisfied(issue, allIssues = []) {
       dep = siblings.find((s) => storyKey(s) === k);
       if (!dep) continue; // unresolved — don't block (avoid deadlock)
     }
-    if (!terminal((dep.status || '').toLowerCase())) return false;
+    if (!isTerminalIssueStatus((dep.status || '').toLowerCase())) return false;
   }
   return true;
 }
@@ -957,16 +965,15 @@ export function detectParentDone(issues) {
     if (!childrenByParent.has(i.parent_issue_id)) childrenByParent.set(i.parent_issue_id, []);
     childrenByParent.get(i.parent_issue_id).push(i);
   }
-  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
   const actions = [];
   for (const [parentId, kids] of childrenByParent) {
     const parent = byId.get(parentId);
     if (!parent) continue; // parent not in scanned set — can't judge
     if (isSmokeScratch(parent.title)) continue;
     const pst = (parent.status || '').toLowerCase();
-    if (terminal(pst)) continue; // already closed
+    if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
-    const allDone = kids.every((k) => terminal((k.status || '').toLowerCase()));
+    const allDone = kids.every((k) => isTerminalIssueStatus((k.status || '').toLowerCase()));
     if (allDone) actions.push({ identifier: parent.identifier, issueId: parent.id, projectId: parent.project_id, action: 'advance-parent-done' });
   }
   return actions;
@@ -1176,7 +1183,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   const actions = [];
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
-    if (st !== 'todo' && st !== 'blocked') continue;
+    if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
