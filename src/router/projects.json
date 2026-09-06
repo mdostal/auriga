@@ -78,8 +78,8 @@
     {
       "id": "4aa2f07d-79e0-421f-9618-fae642056237",
       "name": "Heimdall (god)",
-      "notes": "Per-god project for Heimdall in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Heimdall god stories route to heimdall-dev (opencode, aligned) then heimdall-dev-codex (codex fallback). Confirmed live 2026-08-31.",
-      "lane": ["heimdall-dev", "heimdall-dev-codex"],
+      "notes": "Per-god project for Heimdall in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). GH #80 (2026-09-06): 'heimdall-dev' (the intended aligned, non-codex lane) was confirmed live to not exist as a real Multica agent in this workspace at all -- GET /api/backlog/agents/heimdall-dev 404s, and a full agent-name scan for 'heimdall' finds only heimdall-dev-codex. Worse than a cosmetic gap: chooseAgentForProject's tie-break always preferred the first lane entry with the lowest inflight load, and a nonexistent agent's inflight count is always 0 (nothing ever successfully assigns to it) -- so heimdall-dev always won the tie-break and every Heimdall dispatch attempt likely failed with assign_error before ever reaching heimdall-dev-codex. Pruned to the one real agent. If an aligned opencode Heimdall lane is created in Multica later, re-add it here once its real id is confirmed live -- never guessed.",
+      "lane": ["heimdall-dev-codex"],
       "registered_at": "2026-08-31T23:59:00Z"
     },
     {

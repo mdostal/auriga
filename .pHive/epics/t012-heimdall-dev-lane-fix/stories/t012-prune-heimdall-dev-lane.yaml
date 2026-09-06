@@ -1,0 +1,82 @@
+id: t012-prune-heimdall-dev-lane
+epic: t012-heimdall-dev-lane-fix
+title: Prune heimdall-dev from the real Heimdall lane, fix the misleading fallback comment
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #80 (mdostal/auriga#80). A cross-session peer with live
+  production access confirmed heimdall-dev does not exist as a real
+  Multica agent in the corrected workspace f32af269 -- only
+  heimdall-dev-codex does (GET /api/backlog/agents/heimdall-dev 404s; a
+  full agent-name scan for "heimdall" finds only heimdall-dev-codex).
+
+  Investigation found this was worse than a cosmetic gap: core.mjs's
+  chooseAgentForProject sorts a lane's eligible candidates by lowest
+  inflight+projected load, breaking ties by lane order. A nonexistent
+  agent's inflight is always 0 (nothing ever successfully assigns to it),
+  so heimdall-dev (listed first in projects.json's Heimdall lane) always
+  won the tie-break over heimdall-dev-codex. The resulting
+  spawn.assignIssue('heimdall-dev', ...) call would fail with a real
+  404-style error, caught and logged as assign_error by
+  auriga-router.mjs's try/catch (the cycle survives), but the story stays
+  unassigned and gets re-picked next cycle -- likely selecting
+  heimdall-dev again. Heimdall dispatch may never have successfully
+  reached heimdall-dev-codex at all, contradicting the existing
+  projects.json note's claim of a working fallback.
+
+acceptance_criteria:
+  - "projects.json's Heimdall project entry's lane is ['heimdall-dev-codex'] -- heimdall-dev is no longer listed."
+  - "config-substrate.mjs's heimdall-dev AGENTS entry remains in place (harmless, no lane references it) but its comment is corrected to state the confirmed-nonexistent status, not the previous (wrong) claim of a working fallback."
+  - "The existing HARD GATE test in project-registry.test.mjs asserting the real, live-loaded PROJECT_LANE shape is updated to reflect the pruned lane."
+  - "A new regression test proves chooseAgentForProject against the REAL, live-loaded config-substrate.mjs config can only select heimdall-dev-codex for the Heimdall project -- not a synthetic fixture that could pass even if projects.json regressed."
+  - "Full npm run test:all is green after the change."
+
+steps:
+  - id: implement
+    description: >
+      Edit projects.json: remove 'heimdall-dev' from the Heimdall project's
+      lane array, update its notes field with the GH #80 finding. Edit
+      config-substrate.mjs: correct the heimdall-dev AGENTS entry's comment
+      to state the confirmed-nonexistent status and drop the wrong
+      fallback claim.
+    agent: developer
+  - id: test
+    description: >
+      Update the existing "HARD GATE" PROJECT_LANE test in
+      project-registry.test.mjs to match the pruned lane. Add a new test
+      proving chooseAgentForProject against the real, live-loaded config
+      can only select heimdall-dev-codex. Run npm run test:all and confirm
+      full green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t012-heimdall-dev-lane-fix.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/projects.json
+      purpose: the real, committed lane data this fix mutates.
+    - path: src/router/lib/config-substrate.mjs
+      purpose: heimdall-dev's AGENTS entry, comment corrected.
+    - path: src/router/lib/core.mjs
+      purpose: "chooseAgentForProject (~line 340) -- the tie-break logic that turned a missing agent into a real dispatch bug, not touched by this fix (the bug was in the DATA, not the decision logic)."
+    - path: src/router/test/project-registry.test.mjs
+      purpose: HARD GATE test updated + new regression test against real config.
+
+design_decisions:
+  - decision: Keep the heimdall-dev AGENTS entry in config-substrate.mjs rather than deleting it.
+    rationale: Harmless dead data with no lane referencing it; useful as a placeholder if a real opencode Heimdall agent is created later, PROVIDED its id is re-verified live before re-adding it to any lane.
+  - decision: Fix chooseAgentForProject's tie-break DATA (the lane list), not its LOGIC.
+    rationale: The tie-break logic itself (prefer lowest load, then lane order) is correct and reasonable in general -- the bug was that stale data let it select an agent that could never actually receive work. Fixing the data is the minimal, correct fix; changing the tie-break algorithm itself would be solving a problem that doesn't exist.
+
+risks:
+  - severity: low
+    description: None identified beyond the data change itself, which is fully covered by updated + new tests against the real config.
+    mitigation: n/a

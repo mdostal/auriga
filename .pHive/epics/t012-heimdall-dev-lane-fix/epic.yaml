@@ -1,0 +1,26 @@
+name: t012-heimdall-dev-lane-fix
+title: Prune nonexistent heimdall-dev agent from the real Heimdall dispatch lane
+description: >
+  Fixes GitHub issue #80: heimdall-dev confirmed live (cross-session peer,
+  production access) to not exist as a real Multica agent. Worse than a
+  cosmetic gap -- chooseAgentForProject's tie-break always preferred this
+  nonexistent-but-always-zero-load entry over the one real agent
+  (heimdall-dev-codex), likely blocking all Heimdall dispatch. Pruned the
+  lane, corrected the misleading fallback claim in the AGENTS comment,
+  added regression coverage against the real, live-loaded config.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/80"
+
+stories:
+  - id: t012-prune-heimdall-dev-lane
+    title: Prune heimdall-dev from the real Heimdall lane, fix the misleading fallback comment
+    complexity: low
+    depends_on: []
