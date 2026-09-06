@@ -1,0 +1,25 @@
+name: t011-core-decomposition
+title: Decompose core.mjs into 5 cohesive modules, core.mjs re-exports as a stable facade
+description: >
+  Fourth of four originally-agreed cleanup workstreams (deferred earlier as
+  needing its own dedicated pass). Mapped core.mjs's real dependency graph
+  and extracted 5 fully self-contained leaf/near-leaf modules
+  (run-classification, story-identity, pr-matching, capacity, review-squad)
+  with a one-directional dependency chain and no cycles. core.mjs re-imports
+  and re-exports everything under its original names, so every existing
+  call site (auriga-router.mjs's coreImpl.X, every test file) needed zero
+  changes. core.mjs: 1189 -> 763 lines. Zero behavior change.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t011-extract-core-modules
+    title: Extract run-classification/story-identity/pr-matching/capacity/review-squad from core.mjs
+    complexity: high
+    depends_on: []
