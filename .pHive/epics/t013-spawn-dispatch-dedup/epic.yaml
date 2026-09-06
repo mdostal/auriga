@@ -1,0 +1,28 @@
+name: t013-spawn-dispatch-dedup
+title: Extract shared spawn dispatch()/describeLanes(), closing a hand-copy drift risk
+description: >
+  Found during the post-t011 full deep-dive refactor pass: multica/spawn.mjs
+  and pantheon-v2-l2/index.mjs each carried a byte-identical private copy of
+  dispatch() (assign -> verify a run started -> force-rerun) and
+  describeLanes() (assembles the LaneMap). Same drift-risk class already
+  found and fixed for the backlog-side gh-CLI helpers (t008) and GH #81's
+  PR-state casing check. Extracts both into a shared
+  src/router/lib/adapters/spawn-dispatch.mjs, following github-cli.mjs's
+  established dependency-injection convention. No behavior change --
+  assignIssue/rerunIssue/unassignIssue/getIssueRuns stay adapter-specific
+  (genuinely different transports), only the transport-agnostic
+  orchestration logic built on top of them is shared.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t013-extract-spawn-dispatch-module
+    title: Extract shared spawn-dispatch.mjs, wire both adapters to it
+    complexity: small
+    depends_on: []
