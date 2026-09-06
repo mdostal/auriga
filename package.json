@@ -4,7 +4,11 @@
   "private": true,
   "description": "Auriga — Pantheon auto-router. Root test entrypoint so CI's generic Node gate (ci.yml) actually runs the router's unit + loop-level e2e suite.",
   "scripts": {
+    "lint": "oxlint --deny-warnings src/router src/server && npm run lint --prefix src/ui",
     "test": "node --experimental-test-module-mocks --test src/router/test/*.test.mjs",
-    "test:all": "npm test && npm test --prefix src/server && npm run build --prefix src/ui && npm run test:e2e --prefix src/ui && npm run test:e2e:hardening --prefix src/ui"
+    "test:all": "npm run lint && npm test && npm test --prefix src/server && npm run build --prefix src/ui && npm run test:e2e --prefix src/ui && npm run test:e2e:hardening --prefix src/ui"
+  },
+  "devDependencies": {
+    "oxlint": "^1.81.0"
   }
 }

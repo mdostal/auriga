@@ -216,7 +216,7 @@ test('listCandidatePullRequests() isolates a single repo\'s failure -- other rep
 });
 
 test('setIssueStatus() POSTs {status} and PROPAGATES a failure (write methods never degrade)', async (t) => {
-  const calls = makeCurlMock(t, () => new Error('HTTP 502'));
+  makeCurlMock(t, () => new Error('HTTP 502'));
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
   const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
 

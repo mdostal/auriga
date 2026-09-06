@@ -562,7 +562,7 @@ export async function cycle(opts = {}) {
     // that doesn't need non-blocking behavior (e.g. a short-lived CLI tool).
     await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
     const runs = backlog.getIssueRuns(p.identifier);
-    const started = runs.length > 0 && runs.some((r) => {
+    const started = runs.some((r) => {
       const c = coreImpl.classifyRun(r, Date.now());
       return c.active || c.done || c.failed; // any run row means it dispatched
     });

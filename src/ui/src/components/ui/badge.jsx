@@ -31,4 +31,8 @@ function Badge({
   return (<div className={cn(badgeVariants({ variant }), className)} {...props} />);
 }
 
-export { Badge, badgeVariants }
+// Standard shadcn/ui pattern: badgeVariants (a cva() call) is exported
+// alongside the component so callers can reuse the same variant classes
+// elsewhere; not a fast-refresh concern worth restructuring this vendored
+// primitive over.
+export { Badge, badgeVariants } // oxlint-disable-line react/only-export-components

@@ -56,7 +56,7 @@ const MIME_TYPES = {
 function safeDecode(raw) {
   try {
     return decodeURIComponent(raw);
-  } catch (e) {
+  } catch {
     return undefined;
   }
 }
@@ -116,12 +116,12 @@ function serveStatic(res, pathname) {
     }
     sendFile(res, filePath);
     return true;
-  } catch (e) {
+  } catch {
     if (path.extname(pathname) !== '') return false; // real asset request, genuinely missing
     try {
       sendFile(res, path.join(UI_DIST_DIR, 'index.html'));
       return true;
-    } catch (e2) {
+    } catch {
       return false; // dist/ not built yet
     }
   }
@@ -138,7 +138,7 @@ export function createServer() {
     let url;
     try {
       url = new URL(req.url, 'http://localhost');
-    } catch (e) {
+    } catch {
       sendJson(res, 400, { error: 'bad request' });
       return;
     }

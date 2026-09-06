@@ -398,7 +398,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
 
     const runs = getIssueRunsForVerify(identifier);
     const now = Date.now();
-    const started = runs.length > 0 && runs.some((r) => {
+    const started = runs.some((r) => {
       const c = classifyRun(r, now);
       return c.active || c.done || c.failed;
     });

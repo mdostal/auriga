@@ -1,0 +1,76 @@
+id: t007-wire-lint-and-fix-findings
+epic: t007-lint-tooling
+title: Add root lint tooling, fix all real oxlint findings across the repo
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  First of four agreed workstreams from the 2026-09-05 codebase-wide cleanup
+  discussion (operator: "yeah, i think that's solid" on the proposed order —
+  lint first, then gh-CLI dedup, then issue-status constants, then core.mjs
+  decomposition as its own later discussion).
+
+  src/ui already had oxlint installed with a `lint` script, but npm run
+  test:all never called it. src/router and src/server had zero lint tooling
+  of any kind. Ran oxlint against the whole repo and found 17 real findings
+  (dead code, unused vars/params, useless length checks, useless spread
+  fallbacks) plus 1 pre-existing src/ui warning (a standard, not-a-defect
+  shadcn/ui cva()-export pattern).
+
+acceptance_criteria:
+  - "npm run lint exists at the repo root, runs oxlint --deny-warnings against src/router and src/server, then fans out to npm run lint --prefix src/ui, and exits 0 on the current, cleaned-up tree."
+  - "npm run test:all runs npm run lint as its first step."
+  - "src/ui's own lint script also uses --deny-warnings for consistent enforcement."
+  - "Zero real oxlint findings remain anywhere in src/router or src/server."
+  - "The one src/ui finding (badge.jsx's cva()-export pattern) is suppressed with an inline oxlint-disable-line directive and an explanatory comment, not silently ignored or globally disabled."
+  - "--deny-warnings is verified to actually fail the build on a real violation (not just assumed from documentation) -- confirmed by manually reintroducing one and observing a non-zero exit, then reverting."
+  - "All existing tests continue to pass unmodified; full npm run test:all is green after all fixes."
+
+steps:
+  - id: implement
+    description: >
+      Add oxlint as a root devDependency. Add root package.json's `lint`
+      script and wire it as the first step of `test:all`. Add
+      --deny-warnings to src/ui's own lint script. Fix all 17 real findings:
+      remove dead code (ghOpenPrs in multica/backlog.mjs), remove an unused
+      local (vulcan-hook.mjs), simplify 3 useless length-checks before
+      .some(), simplify 2 useless spread fallbacks, convert 7 unused catch
+      bindings to bindingless catch {}, fix 3 unused test params/vars.
+      Suppress the one real src/ui finding inline with oxlint-disable-line
+      and an explanatory comment.
+    agent: developer
+  - id: test
+    description: >
+      Run npm run lint standalone and confirm clean exit. Manually
+      reintroduce one real violation (an unused catch param) and confirm
+      npm run lint exits non-zero before reverting it -- proves
+      --deny-warnings has real teeth, not just correct-looking plumbing.
+      Run the full npm run test:all and confirm green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t007-lint-tooling.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: package.json
+      purpose: new root lint script + oxlint devDependency, test:all now runs lint first.
+    - path: src/ui/package.json
+      purpose: lint script gained --deny-warnings for consistent enforcement.
+
+design_decisions:
+  - decision: Enforce lint locally (--deny-warnings in npm run test:all) rather than adding a new blocking GHA step.
+    rationale: Standing repo rule -- never block on GitHub Actions, validate/release from local. CI can optionally mirror this later as a non-blocking signal, but the real gate is the local command, same as every other check in this repo's history.
+  - decision: Suppress the one real src/ui shadcn/ui pattern inline rather than disabling the rule repo-wide or globally for the ui/ directory.
+    rationale: It is genuinely the only offender today; a targeted, explained suppression keeps the rule fully active for every other file, including any future addition to that same directory.
+
+risks:
+  - severity: low
+    description: Removing the "kept for potential future direct reuse" ghOpenPrs function means a future story that actually needs an open-only GitHub PR scan will need to re-add it.
+    mitigation: This is the correct, intended outcome per the no-pre-emptive-integrations standing rule -- add it back in the story that actually needs it, not before.
