@@ -28,6 +28,8 @@ import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
+import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
+import { loadExternalConfig } from './lib/config-loader.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
 // no HTTP call happens until a method is actually invoked), exactly
@@ -134,6 +136,16 @@ export async function cycle(opts = {}) {
   const noZombie = opts.noZombie ?? NO_ZOMBIE;
   const maxAssign = opts.maxAssign ?? Infinity;
   const now = opts.now ?? Date.now();
+
+  // t015 — orchestrator hand-up: read once per cycle, same pattern as every
+  // other per-cycle config read. `createRemoteBacklog` is injectable so a
+  // test can stand up a stub adapter instead of a real cross-board HTTP
+  // call — see this file's own opts.backlog/opts.spawn precedent.
+  const loadTopologyImpl = opts.loadTopology || loadRealTopology;
+  const loadExternalConfigImpl = opts.loadExternalConfig || loadExternalConfig;
+  const createRemoteBacklog = opts.createRemoteBacklog || createPantheonV2L2BacklogAdapter;
+  const topology = loadTopologyImpl();
+  const parentBoardConfig = resolveParentBoardConfig(topology, loadExternalConfigImpl());
 
   let assigned = 0;
 
@@ -528,6 +540,7 @@ export async function cycle(opts = {}) {
     blockedRuntimes,
     exclude: cascaded,
     maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining || cfgImpl.CAPS.perCycleTotal),
+    parentBoardConfig,
   });
 
   for (const p of picks) {
@@ -577,6 +590,51 @@ export async function cycle(opts = {}) {
       const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
       logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     }
+  }
+
+  // ---- route hand-ups (t015 — orchestrator hand-up) ----
+  // coreImpl.selectAssignments only ever populates picks.handUps when
+  // parentBoardConfig was non-null (see that function's own routing branch),
+  // so this loop is a no-op whenever no real parent board is configured —
+  // exactly the "no knowledge or nowhere to move it -- 100% human job"
+  // fallback; those tickets already fell through to the existing
+  // isHumanTodo/human-queue-export path untouched.
+  for (const h of picks.handUps || []) {
+    logImpl('hand_up', {
+      identifier: h.identifier, reason: h.reason,
+      parent: topology.parent ? topology.parent.id : null,
+      targetProjectId: parentBoardConfig.projectId,
+      applied: !dryRun,
+    });
+    if (dryRun) continue;
+
+    const issue = issues.find((i) => i.identifier === h.identifier);
+    let createdIssue;
+    try {
+      const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
+      createdIssue = remoteBacklog.createIssue({
+        title: issue ? issue.title : h.identifier,
+        description: issue ? issue.description : undefined,
+        metadata: { handed_up_from: h.identifier },
+      });
+    } catch (e) {
+      // Remote create failed -- NEVER apply the local comment/unassign/
+      // status-change side effects below (would otherwise leave a "handed
+      // up" ticket pointing at nothing).
+      logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
+      continue;
+    }
+
+    logImpl('hand_up_ok', { identifier: h.identifier, newIdentifier: createdIssue && createdIssue.identifier });
+    try {
+      backlog.commentOnIssue(h.identifier, `Handed up — created ${createdIssue && createdIssue.identifier} on the parent board.`);
+    } catch (e) { logImpl('hand_up_comment_error', { identifier: h.identifier, error: e.message }); }
+    try {
+      spawn.unassignIssue(h.identifier);
+    } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
+    try {
+      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
+    } catch (e) { logImpl('hand_up_status_error', { identifier: h.identifier, error: e.message }); }
   }
 
   return { todo: todo.length, picked: picks.length, assigned };

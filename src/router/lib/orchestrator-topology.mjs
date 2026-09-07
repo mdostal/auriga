@@ -12,8 +12,15 @@
 // discover, validate, or reach another Auriga instance in any way — `id` is
 // a free-form operator-supplied string (a tenant id, a URL, a hostname,
 // whatever the operator finds meaningful for a future consumer to resolve).
-// Adding real handoff/escalation behavior on top of this registry is
-// explicitly future, separate work — see this epic's design-discussion.md.
+// Adding real handoff/escalation behavior on top of this registry was
+// explicitly future, separate work as of t010 — that work is t015 (see
+// .pHive/epics/t015-orchestrator-hand-up/design-discussion.md), which adds
+// the OPTIONAL baseUrl/projectId reachability fields below plus
+// resolveParentBoardConfig(). This module STILL does not dial, discover, or
+// validate reachability itself — it only stores/resolves the config a
+// caller (auriga-router.mjs's cycle()) uses to instantiate a real adapter
+// pointed at another board. `id` remains a free-form operator-supplied
+// string when reachability isn't set.
 //
 // Mirrors project-registry.mjs's own conventions exactly (same injected
 // read/write I/O, same env-var path override, same graceful-degrade
@@ -79,12 +86,20 @@ export function loadRealTopology() {
 
 /**
  * Sets (or replaces) this instance's parent. Pure function — returns a new
- * data object, does not mutate `data`.
+ * data object, does not mutate `data`. `baseUrl`/`projectId` (t015) are
+ * OPTIONAL cross-board reachability fields — set them when the operator
+ * wants this topology entry itself to carry connection info for the
+ * hand-up write; omit them when reachability instead comes from
+ * AURIGA_CONFIG's `parentBoard` block (see resolveParentBoardConfig below,
+ * which prefers that block when present).
  * @param {{ parent: object|null, children: object[] }} data
- * @param {{ id: string, notes?: string }} parent
+ * @param {{ id: string, notes?: string, baseUrl?: string, projectId?: string }} parent
  */
 export function setParent(data, parent) {
-  return { ...data, parent: { id: parent.id, notes: parent.notes || '' } };
+  const entry = { id: parent.id, notes: parent.notes || '' };
+  if (parent.baseUrl) entry.baseUrl = parent.baseUrl;
+  if (parent.projectId) entry.projectId = parent.projectId;
+  return { ...data, parent: entry };
 }
 
 /**
@@ -96,15 +111,23 @@ export function clearParent(data) {
 }
 
 /**
- * Adds a child, or updates its notes if already present (idempotent by id —
- * same upsert convention as project-registry.mjs's upsertProject).
+ * Adds a child, or updates its notes/reachability if already present
+ * (idempotent by id — same upsert convention as project-registry.mjs's
+ * upsertProject). `baseUrl`/`projectId` (t015) are the same optional
+ * cross-board reachability fields setParent accepts — see that function's
+ * doc comment.
  * @param {{ parent: object|null, children: object[] }} data
- * @param {{ id: string, notes?: string }} child
+ * @param {{ id: string, notes?: string, baseUrl?: string, projectId?: string }} child
  */
 export function addChild(data, child) {
   const children = [...(data.children || [])];
   const idx = children.findIndex((c) => c && c.id === child.id);
-  const entry = { id: child.id, notes: child.notes || (idx !== -1 ? children[idx].notes || '' : '') };
+  const existing = idx !== -1 ? children[idx] : null;
+  const entry = { id: child.id, notes: child.notes || (existing && existing.notes) || '' };
+  const baseUrl = child.baseUrl || (existing && existing.baseUrl);
+  const projectId = child.projectId || (existing && existing.projectId);
+  if (baseUrl) entry.baseUrl = baseUrl;
+  if (projectId) entry.projectId = projectId;
   if (idx === -1) children.push(entry);
   else children[idx] = entry;
   return { ...data, children };
@@ -122,4 +145,39 @@ export function removeChild(data, id) {
   if (idx === -1) return { removed: false, data };
   const next = [...children.slice(0, idx), ...children.slice(idx + 1)];
   return { removed: true, data: { ...data, children: next } };
+}
+
+/**
+ * Resolves the effective cross-board reachability config for THIS
+ * instance's parent (t015) — the thing hand-up needs to actually
+ * instantiate a real adapter pointed at the parent's board. Pure function,
+ * no I/O of its own (both inputs are already-loaded data):
+ *
+ *   1. `externalConfig.parentBoard` wins when it supplies BOTH `baseUrl`
+ *      and `projectId` — this is AURIGA_CONFIG's per-tenant override file
+ *      (see lib/config-loader.mjs), letting an operator manage parent
+ *      reachability alongside every other per-tenant setting (CAPS,
+ *      PROJECT_LANE, ...) rather than hand-editing topology.json per
+ *      instance.
+ *   2. Else, `topology.parent`'s OWN `baseUrl`/`projectId` fields (set via
+ *      setParent) are used when both are present.
+ *   3. Else `null` — no real destination is configured. Per the operator's
+ *      own framing, this is NOT an error case for the caller to guess
+ *      around: a hand-up candidate with no resolvable parent board falls
+ *      through to the existing human-todo path unchanged.
+ *
+ * @param {{ parent: {id: string, notes?: string, baseUrl?: string, projectId?: string}|null }} topology
+ * @param {{ parentBoard?: { baseUrl?: string, projectId?: string } }} [externalConfig]
+ * @returns {{ baseUrl: string, projectId: string } | null}
+ */
+export function resolveParentBoardConfig(topology, externalConfig = {}) {
+  const fromConfig = externalConfig && externalConfig.parentBoard;
+  if (fromConfig && fromConfig.baseUrl && fromConfig.projectId) {
+    return { baseUrl: fromConfig.baseUrl, projectId: fromConfig.projectId };
+  }
+  const parent = topology && topology.parent;
+  if (parent && parent.baseUrl && parent.projectId) {
+    return { baseUrl: parent.baseUrl, projectId: parent.projectId };
+  }
+  return null;
 }

@@ -11,6 +11,7 @@ import {
   clearParent,
   addChild,
   removeChild,
+  resolveParentBoardConfig,
 } from '../lib/orchestrator-topology.mjs';
 
 const EMPTY = { parent: null, children: [] };
@@ -92,4 +93,44 @@ test('removeChild: a nonexistent id is reported as not-removed, no mutation', ()
   const { removed, data } = removeChild(before, 'does-not-exist');
   assert.equal(removed, false);
   assert.deepEqual(data.children, [{ id: 'a' }]);
+});
+
+// ---- t015: cross-board reachability fields on setParent/addChild ----------
+
+test('setParent: accepts optional baseUrl/projectId reachability fields', () => {
+  const next = setParent(EMPTY, { id: 'firefly-events', baseUrl: 'http://core-api:3012', projectId: 'proj-1' });
+  assert.deepEqual(next.parent, { id: 'firefly-events', notes: '', baseUrl: 'http://core-api:3012', projectId: 'proj-1' });
+});
+
+test('setParent: omitting baseUrl/projectId produces a parent entry with neither field (not undefined-valued keys)', () => {
+  const next = setParent(EMPTY, { id: 'firefly-events' });
+  assert.deepEqual(next.parent, { id: 'firefly-events', notes: '' });
+  assert.ok(!('baseUrl' in next.parent));
+});
+
+test('addChild: accepts optional baseUrl/projectId, preserved on a notes-only re-add (same fallback convention as notes)', () => {
+  const before = addChild(EMPTY, { id: 'flayr', baseUrl: 'http://flayr-core-api:3012', projectId: 'flayr-proj' });
+  const next = addChild(before, { id: 'flayr', notes: 'updated' });
+  assert.deepEqual(next.children[0], {
+    id: 'flayr', notes: 'updated', baseUrl: 'http://flayr-core-api:3012', projectId: 'flayr-proj',
+  });
+});
+
+// ---- t015: resolveParentBoardConfig ----------------------------------------
+
+test('resolveParentBoardConfig: AURIGA_CONFIG\'s parentBoard block wins when both baseUrl and projectId are present there', () => {
+  const topology = { parent: { id: 'p', baseUrl: 'http://topology-url:3012', projectId: 'topology-proj' } };
+  const externalConfig = { parentBoard: { baseUrl: 'http://config-url:3012', projectId: 'config-proj' } };
+  assert.deepEqual(resolveParentBoardConfig(topology, externalConfig), { baseUrl: 'http://config-url:3012', projectId: 'config-proj' });
+});
+
+test('resolveParentBoardConfig: falls back to topology.parent\'s own baseUrl/projectId when AURIGA_CONFIG has none', () => {
+  const topology = { parent: { id: 'p', baseUrl: 'http://topology-url:3012', projectId: 'topology-proj' } };
+  assert.deepEqual(resolveParentBoardConfig(topology, {}), { baseUrl: 'http://topology-url:3012', projectId: 'topology-proj' });
+});
+
+test('resolveParentBoardConfig: null when neither source supplies both fields -- no real destination, caller must fall through to human-todo', () => {
+  assert.equal(resolveParentBoardConfig({ parent: null }, {}), null);
+  assert.equal(resolveParentBoardConfig({ parent: { id: 'p' } }, {}), null, 'a parent id alone (no reachability) is not enough');
+  assert.equal(resolveParentBoardConfig({ parent: { id: 'p', baseUrl: 'http://x:3012' } }, {}), null, 'baseUrl without projectId is not enough');
 });

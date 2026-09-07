@@ -973,3 +973,59 @@ test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
   assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
   assert.equal(core.ownPrUrl({}), null);
 });
+
+// --- isHandUp / selectAssignments hand-up routing (t015) --------------------
+
+test("isHandUp: true only for the 'hand-up' label, both plain-string and real {name,...} object shapes", () => {
+  assert.equal(core.isHandUp({ labels: ['hand-up'] }), true);
+  assert.equal(core.isHandUp({ labels: [{ id: 'l1', name: 'hand-up', color: '#fff' }] }), true);
+  assert.equal(core.isHandUp({ labels: ['idea'] }), false);
+  assert.equal(core.isHandUp({ labels: [] }), false);
+  assert.equal(core.isHandUp({}), false);
+});
+
+// Uses story() (sets parent_issue_id), not todo(), so these fixtures are
+// NOT seed-classified and actually reach chooseAgentForProject -- isSeed()
+// is checked before the hand-up branch and would otherwise route an
+// unmarked top-level/childless issue to minerva-dev regardless of the
+// hand-up label, masking every assertion below.
+
+test('selectAssignments: a hand-up-labeled issue with NO local capacity and a configured parent board lands in picks.handUps, not in picks itself', () => {
+  const issue = { ...story('hu1', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  // Saturate AURIGA's sole lane agent (auriga-dev, maxInflight 3) so
+  // chooseAgentForProject returns null -- no normal local route exists.
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0, 'must NOT be dispatched to a local agent');
+  assert.deepEqual(picks.handUps, [{ identifier: 'hu1', issueId: 'hu1', reason: 'no-local-route' }]);
+});
+
+test('selectAssignments: a hand-up-labeled issue that HAS a working local route dispatches normally -- the label never preempts a resolvable dispatch', () => {
+  const issue = { ...story('hu2', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
+  assert.deepEqual(picks.handUps, []);
+});
+
+test('selectAssignments: a hand-up-labeled issue with NO local capacity and NO configured parent board produces zero handUps -- falls through unchanged to the existing human-todo path', () => {
+  const issue = { ...story('hu3', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {});
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.handUps, []);
+});
+
+test('selectAssignments: a NON-hand-up-labeled issue with no local capacity produces zero handUps regardless of parentBoardConfig', () => {
+  const issue = story('hu4', 'AURIGA', 1, 'epic1');
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.handUps, []);
+});

@@ -30,6 +30,27 @@ test('createStubBacklogAdapter() with no args: every method is callable and retu
   // Mutating methods must not throw even against an empty store.
   assert.doesNotThrow(() => backlog.setIssueStatus('ANY-1', 'todo'));
   assert.doesNotThrow(() => backlog.commentOnIssue('ANY-1', 'hello'));
+  assert.doesNotThrow(() => backlog.createIssue({ title: 'x' }));
+});
+
+test('createStubBacklogAdapter().createIssue: fabricates an identifier, is immediately visible to other reads, tracks createdIssues', () => {
+  const backlog = createStubBacklogAdapter();
+
+  const created = backlog.createIssue({
+    title: 'Handed up', description: 'desc', project: 'parent-proj', parent: 'PAN-0',
+    labels: ['hand-up'], metadata: { handed_up_from: 'PAN-1' },
+  });
+
+  assert.ok(created.identifier);
+  assert.equal(created.title, 'Handed up');
+  assert.equal(created.project_id, 'parent-proj');
+  assert.equal(created.parent_issue_id, 'PAN-0');
+  assert.deepEqual(created.metadata, { handed_up_from: 'PAN-1' });
+
+  // Immediately visible to other reads against the same in-memory store.
+  assert.deepEqual(backlog.listIssues('parent-proj'), [created]);
+  assert.deepEqual(backlog.getIssueRuns(created.identifier), []);
+  assert.deepEqual(backlog.createdIssues, [created]);
 });
 
 // ---- SpawnAdapter: empty-default shape, called with no arguments ----
