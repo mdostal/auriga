@@ -77,17 +77,21 @@ separable.
 - **MemoryAdapter + orchestrator topology registry** (epic `t010-memory-and-topology`) — a third
   adapter interface (`recall`/`remember`, Mnemosyne-backed, direct-for-now since no Pantheon memory
   proxy exists yet) plus `src/router/orchestrator-topology.json`: a plain parent/children tree node
-  an operator sets up by hand (`auriga orchestrator set-parent`/`add-child`/...). **Pure data, zero
-  orchestration logic on top of it yet** — see §③ below for the concrete next step that changes
-  that.
+  an operator sets up by hand (`auriga orchestrator set-parent`/`add-child`/...).
 - **`core.mjs` decomposed** (epic `t011-core-decomposition`) — the pure decision core split from
   one 1189-line file into five focused, independently-tested modules
   (`run-classification.mjs`/`story-identity.mjs`/`pr-matching.mjs`/`capacity.mjs`/
   `review-squad.mjs`), with `core.mjs` itself re-exporting everything so no call site changed.
+- **Orchestrator hand-up** (epic `t015-orchestrator-hand-up`) — real logic on top of `t010`'s
+  topology registry: a `hand-up`-labeled ticket this instance can't route locally is created on its
+  registered parent's board (a genuinely new `createIssue` adapter capability — confirmed live
+  against `core-api`'s real `POST /api/backlog/issues`), then closed/commented/unassigned locally.
+  No configured parent falls through to the existing human-todo path unchanged. Recursive by
+  construction — see §③. Hand-down (`t016`) is queued next, reusing the same primitive.
 
 **What is genuinely not built yet:**
 
-- Real, working **hand-off/hand-up logic on top of the orchestrator topology** — see §③.
+- Hand-**down** (parent→child) on top of the orchestrator topology — see `t016` in §③.
 - Dynamic lane/agent discovery — `config-substrate.mjs`'s `AGENTS`/`PROJECT_LANE` are still
   hand-maintained against a specific workspace, not discovered live.
 - Decision-record metrics — no per-assignment structured log (lane/runtime/rationale) exists yet
@@ -103,9 +107,10 @@ separable.
 
 ## ② Goals — near-term next steps
 
-- **Orchestrator hand-up logic** (see §③) — the concrete next slice: when this instance has a
-  registered parent and hits a case it can't/shouldn't resolve itself, hand it back up rather than
-  churning on it forever, mirroring the existing seed→Minerva hand-off pattern.
+- **Orchestrator hand-down (`t016`)** (see §③) — the concrete next slice now that hand-up (`t015`)
+  has shipped: a `PROJECT_LANE`-style routing-table extension so a project can resolve to a specific
+  CHILD board instead of a local agent, reusing `t015`'s cross-board `createIssue` primitive
+  unchanged.
 - **Methodology-aware `DEFAULT_LANE`.** Today `DEFAULT_LANE` is a flat spread across Codex agents;
   make the fallback itself capability/methodology-aware so a non-`PROJECT_LANE` story still lands on
   a runtime that can actually execute its declared methodology.
@@ -131,8 +136,8 @@ yet; this is still aspirational, not started.
 
 **Route across a tree of Auriga instances.** `t010-memory-and-topology` landed the data shape (a
 committed `orchestrator-topology.json` — one parent, many children, manually wired per instance)
-but deliberately built zero logic on top of it. Planning as of 2026-09-06 (`t015`/`t016`) landed on
-the real shape, driven by the operator's actual multi-level deployment: per-project "meta
+but deliberately built zero logic on top of it. `t015` (shipped 2026-09-06) landed the up-direction
+on the real shape, driven by the operator's actual multi-level deployment: per-project "meta
 orchestrators" at e.g. a Dostal Tech / Firefly Events / Personal level, mostly handing tickets
 directly to the right repo/runner today; a hypothetical top-level "meta of everything" orchestrator
 above them would only need to know its own children and hand a ticket down to the right one (e.g.
@@ -152,13 +157,13 @@ that conversation:
   adapter/reachability info per node, or a reference into `AURIGA_CONFIG`'s existing multi-tenant
   pattern).
 
-Sequenced as two epics sharing that one primitive: **`t015`** ships the up-direction only (one
-parent, no selection ambiguity, explicit-label-triggered) — no auto-detection of "doesn't fit,"
-no operator-chat ticket-origination surface (a separate, bigger question: does a top-level
+Sequenced as two epics sharing that one primitive: **`t015` (shipped)** did the up-direction only
+(one parent, no selection ambiguity, explicit-label-triggered) — no auto-detection of "doesn't
+fit," no operator-chat ticket-origination surface (a separate, bigger question: does a top-level
 orchestrator even have its own board, or does it work from pure conversational input?). **`t016`**
-(queued immediately after, not started) adds hand-down: a `PROJECT_LANE`-style routing-table
-extension so a project can resolve to `{ kind: 'child', childId }` instead of `{ kind: 'agent',
-lane }`, reusing `t015`'s cross-board-write primitive unchanged.
+(queued next, not started) adds hand-down: a `PROJECT_LANE`-style routing-table extension so a
+project can resolve to `{ kind: 'child', childId }` instead of `{ kind: 'agent', lane }`, reusing
+`t015`'s cross-board-write primitive unchanged.
 
 Combined with Pantheon's toggle-and-compare model, this makes routing policy — and now routing
 *topology* — a first-class, swappable, measurable thing: pick your board adapter, pick your lanes
@@ -185,10 +190,9 @@ moved out; Janus's own repo/VISION.md is the right home for it.)*
 
 ## Good first contributions
 
-- **Design the hand-up mechanism** (§③, the current active planning item) — pick up
-  `.pHive/epics/` once the design discussion lands, or help scope the open questions (what
-  triggers a hand-up? what does "handing up" concretely do against a parent instance that may run
-  against a different board entirely?).
+- **Design `t016` (hand-down)** (§③, the current active planning item) — pick up
+  `.pHive/epics/t016-*` once its design discussion exists, or help scope the child-selection
+  question (a `PROJECT_LANE`-style routing table entry resolving to `{ kind: 'child', childId }`).
 - **Add a routing unit test** — extend the relevant `src/router/test/*.test.mjs` file with an edge
   case (a new hive-story shape, a capacity boundary, a `waiting_on` variant).
 - **Sharpen `isHiveStory` detection** — cover more of the real shapes Minerva emits without producing

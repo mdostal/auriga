@@ -1,7 +1,7 @@
 id: t015-cross-board-create-issue
 epic: t015-orchestrator-hand-up
 title: Add createIssue capability + parent reachability config
-status: pending
+status: shipped
 complexity: medium
 methodology: classic
 depends_on: []

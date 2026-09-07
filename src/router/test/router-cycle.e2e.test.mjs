@@ -387,3 +387,99 @@ test('zombie give-up: a comment failure is swallowed and never crashes the cycle
   assert.equal(log.byEvent('zombie_give_up').length, 1);
   assert.equal(log.byEvent('zombie_give_up_error').length, 1);
 });
+
+// ---- t015: orchestrator hand-up (real cycle()-level, not just selectAssignments) ----
+
+function saturateAgent(fixtureCfg, agentName, projectId, n) {
+  return Array.from({ length: n }, () =>
+    makeIssue({ project_id: projectId, status: 'in_progress', assignee_id: fixtureCfg.AGENTS[agentName].id }));
+}
+
+test('t015: a hand-up-labeled issue with no local capacity and a configured parent creates a ticket on the parent board and cleans up locally', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({
+    project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic',
+    title: 'Needs a cross-project architecture decision', description: 'out of scope for this instance',
+  });
+  const { backlog, spawn, calls } = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  const remoteCreateCalls = [];
+  const createRemoteBacklog = (remoteCfg) => ({
+    createIssue: (ticket) => {
+      remoteCreateCalls.push({ remoteCfg, ticket });
+      return { identifier: 'PARENT-1', title: ticket.title };
+    },
+  });
+
+  await cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: { id: 'firefly-events' }, children: [] }),
+    loadExternalConfig: () => ({ parentBoard: { baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' } }),
+    createRemoteBacklog,
+  });
+
+  assert.ok(!calls.assign.some((c) => c.identifier === handUpIssue.identifier), 'must NOT be dispatched to a local agent');
+
+  assert.equal(remoteCreateCalls.length, 1);
+  assert.equal(remoteCreateCalls[0].remoteCfg.baseUrl, 'http://firefly-core-api:3012');
+  assert.equal(remoteCreateCalls[0].remoteCfg.project, 'firefly-proj-1');
+  assert.equal(remoteCreateCalls[0].ticket.title, handUpIssue.title);
+  assert.deepEqual(remoteCreateCalls[0].ticket.metadata, { handed_up_from: handUpIssue.identifier });
+
+  assert.ok(calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'must unassign the original locally');
+  assert.ok(calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'must comment on the original locally');
+  assert.ok(calls.status.some((c) => c.identifier === handUpIssue.identifier && c.status === 'cancelled'), 'must close the original locally');
+
+  assert.equal(log.byEvent('hand_up').length, 1);
+  assert.equal(log.byEvent('hand_up_ok').length, 1);
+  assert.equal(log.byEvent('hand_up_ok')[0].newIdentifier, 'PARENT-1');
+});
+
+test('t015: no configured parent -- zero remote calls, ticket falls through to the normal human-todo/unassigned pool unchanged', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
+  const { backlog, spawn, calls } = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  const createRemoteBacklog = () => { throw new Error('must never be constructed with no configured parent'); };
+
+  await cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: null, children: [] }),
+    loadExternalConfig: () => ({}),
+    createRemoteBacklog,
+  });
+
+  assert.ok(!calls.assign.some((c) => c.identifier === handUpIssue.identifier));
+  assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier));
+  assert.ok(!calls.status.some((c) => c.identifier === handUpIssue.identifier));
+  assert.equal(log.byEvent('hand_up').length, 0);
+});
+
+test('t015: a remote create failure logs hand_up_error and applies NONE of the local comment/unassign/status side effects', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
+  const { backlog, spawn, calls } = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  const createRemoteBacklog = () => ({
+    createIssue: () => { throw new Error('parent board unreachable'); },
+  });
+
+  await assert.doesNotReject(cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: { id: 'firefly-events' }, children: [] }),
+    loadExternalConfig: () => ({ parentBoard: { baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' } }),
+    createRemoteBacklog,
+  }));
+
+  assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'no local unassign on remote failure');
+  assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no local comment on remote failure');
+  assert.ok(!calls.status.some((c) => c.identifier === handUpIssue.identifier), 'no local status change on remote failure');
+  assert.equal(log.byEvent('hand_up_error').length, 1);
+  assert.equal(log.byEvent('hand_up_ok').length, 0);
+});

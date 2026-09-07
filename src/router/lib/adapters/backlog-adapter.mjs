@@ -56,6 +56,17 @@
  * @property {(id: string, body: string) => void} commentOnIssue
  *   Post a comment onto an issue (e.g. the review-squad plan — see
  *   lib/core.mjs's squadPlanSummary).
+ *
+ * @property {(ticket: {title: string, description?: string, project?: string, status?: string, labels?: string[], metadata?: object, parent?: string}) => object} createIssue
+ *   Create a NEW issue (t015 — orchestrator hand-up). Every other method
+ *   above acts on an EXISTING issue; this is the one genuinely new write
+ *   capability. `title` is the only required field (matches every real
+ *   backend's own validation). Returns the created issue in this adapter's
+ *   normal read-shape (same fields listIssues/getIssueRuns callers already
+ *   expect). An implementation MAY target a board other than the one its
+ *   other methods read/write (see pantheon-v2-l2's cfg.baseUrl/cfg.project —
+ *   a second adapter instance pointed at a parent board's config is how
+ *   cross-board hand-up works, not a new adapter type).
  */
 
 export {};

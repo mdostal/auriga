@@ -299,6 +299,54 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
   }
 
+  // Create a NEW issue (t015 — orchestrator hand-up). Genuinely new
+  // capability: every other method above acts on an EXISTING issue.
+  // Confirmed real via `multica issue create --help` (2026-09-06, not
+  // guessed): --title (required), --description, --project, --parent,
+  // --status. WRITE method: propagates any CLI failure to the caller (no
+  // try/catch), matching every other write method's convention above.
+  //
+  // Labels have NO create-time support and no follow-up attempt here: `multica
+  // issue label add <issue-id> <label-id>` takes a resolved label UUID as a
+  // positional argument, not a name — this adapter has no label-name->id
+  // resolution, and guessing one would be worse than not attaching labels at
+  // all. `ticket.labels` is accepted (matches the BacklogAdapter typedef) but
+  // silently ignored by this adapter; a stderr note is written when non-empty
+  // so a caller relying on labels notices the gap rather than assuming they
+  // landed.
+  //
+  // Metadata IS supported, one key at a time via `multica issue metadata set`
+  // (no create-time flag for it either) — attached as a best-effort follow-up
+  // AFTER creation succeeds, so a metadata-set failure never undoes a
+  // successful create (matches commentOnIssue's degrade-gracefully
+  // convention above, not setIssueStatus's propagate convention, since this
+  // is a secondary enrichment of an already-created issue, not the create
+  // itself).
+  function createIssue(ticket = {}) {
+    const args = ['issue', 'create', '--title', ticket.title, '--output', 'json'];
+    if (ticket.description) args.push('--description', ticket.description);
+    if (ticket.project) args.push('--project', ticket.project);
+    if (ticket.parent) args.push('--parent', ticket.parent);
+    if (ticket.status) args.push('--status', ticket.status);
+    const created = run(args);
+
+    if (Array.isArray(ticket.labels) && ticket.labels.length) {
+      process.stderr.write(`createIssue: labels not supported by this adapter (no label-name->id resolution) — ignored: ${ticket.labels.join(', ')}\n`);
+    }
+
+    const id = created && (created.identifier || created.id);
+    if (id && ticket.metadata && typeof ticket.metadata === 'object') {
+      for (const [key, value] of Object.entries(ticket.metadata)) {
+        try {
+          run(['issue', 'metadata', 'set', id, '--key', key, '--value', String(value), '--output', 'json']);
+        } catch (e) {
+          process.stderr.write(`createIssue(${id}): metadata set "${key}" failed: ${e.message}\n`);
+        }
+      }
+    }
+    return created;
+  }
+
   return Object.freeze({
     listIssues,
     listAllProjectIds,
@@ -306,6 +354,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    createIssue,
 
     // ---- ported/adapter-specific extras, NOT part of the BacklogAdapter
     // contract (see the doc comments on listAllIssues/

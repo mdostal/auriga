@@ -1,7 +1,7 @@
 id: t015-hand-up-routing
 epic: t015-orchestrator-hand-up
 title: Wire hand-up routing logic into selectAssignments
-status: pending
+status: shipped
 complexity: medium
 methodology: classic
 depends_on: [t015-cross-board-create-issue]
@@ -82,9 +82,15 @@ design_decisions:
   - decision: selectAssignments returns handUps as data; it never calls createIssue/commentOnIssue/etc. itself.
     rationale: core.mjs is a deliberately pure, synchronous, no-I/O module (t011's own decomposition preserved this invariant across every extracted file) -- this story does not become the first exception. auriga-router.mjs (the existing imperative shell) performs the actual writes, exactly like every other decision this router already makes.
   - decision: hand-up only fires when NO local route exists, even if the label is present.
-    rationale: Directly from the operator's own framing -- the label signals "this doesn't fit anything I have access to," which is a statement about the absence of a working local route, not an unconditional override of one that already exists.
+    rationale: >
+      Directly from the operator's own framing -- the label signals "this doesn't fit
+      anything I have access to," which is a statement about the absence of a working
+      local route, not an unconditional override of one that already exists.
   - decision: no configured parent -> fall through to the existing human-todo path, not a new mechanism.
-    rationale: The operator's own words: "if there is no knowledge or nowhere to move it up to -- 100% human job." The human-todo path already exists and already handles "Auriga can't resolve this" -- reuse it rather than inventing a parallel one.
+    rationale: >
+      The operator's own words: "if there is no knowledge or nowhere to move it up to --
+      100% human job." The human-todo path already exists and already handles "Auriga
+      can't resolve this" -- reuse it rather than inventing a parallel one.
 
 risks:
   - severity: medium

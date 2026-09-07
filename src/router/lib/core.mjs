@@ -128,6 +128,26 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// Is this issue explicitly marked for hand-up to this instance's registered
+// parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
+// shape exactly: a `hand-up` label is the durable, human/Minerva-applied
+// signal that "this doesn't fit anything I have access to" — a judgment
+// call the router never makes on its own (see this epic's design-discussion.md,
+// Open Question 1). Same label-object-vs-string normalization isSeed() needs
+// (`multica issue list`/`get` return labels as [{id, name, ...}], not plain
+// strings).
+//
+// This predicate alone does NOT decide whether a hand-up actually happens —
+// selectAssignments only acts on it when NO normal local route exists (the
+// label means "if nothing else fits", never an unconditional override of a
+// working local dispatch) AND a real parent board is configured
+// (opts.parentBoardConfig, from orchestrator-topology.mjs's
+// resolveParentBoardConfig()) — see selectAssignments below.
+export function isHandUp(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  return labelNames.includes('hand-up');
+}
+
 // Dependency gate: is this issue's declared depends_on satisfied enough to dispatch?
 // Minerva carries a decomposed story's story->story DAG into Multica as a `depends_on`
 // metadata value (comma-separated dependency ISSUE ids — see fileStoriesToMultica). The router
@@ -213,6 +233,16 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 
   const PLANNING_AGENT = 'minerva-dev';
 
+  // t015 — orchestrator hand-up: decisions are returned as DATA (never
+  // acted on here — core.mjs stays pure/no-I/O, same invariant t011's
+  // decomposition preserved everywhere else). auriga-router.mjs's cycle()
+  // performs the actual cross-board createIssue + local comment/unassign/
+  // status-change for each entry. Attached to the returned `chosen` array
+  // as a non-array-breaking extra property (see the `return` below) so
+  // every existing caller that treats this return value as a plain array
+  // (`.length`, `for...of`, etc.) is unaffected.
+  const handUps = [];
+
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
@@ -243,7 +273,18 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     }
 
     const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
-    if (!agent) continue;
+    if (!agent) {
+      // Hand-up fallback: ONLY when no normal local route exists (the
+      // hand-up label means "if nothing else fits", never an unconditional
+      // override of a working local dispatch) AND a real parent board is
+      // configured. No configured parent -> falls through unchanged to the
+      // existing isHumanTodo/human-queue-export path, exactly like any
+      // other unroutable ticket.
+      if (isHandUp(issue) && opts.parentBoardConfig) {
+        handUps.push({ identifier: issue.identifier, issueId: issue.id, reason: 'no-local-route' });
+      }
+      continue;
+    }
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
     if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
@@ -262,6 +303,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       runtime,
     });
   }
+  chosen.handUps = handUps;
   return chosen;
 }
 

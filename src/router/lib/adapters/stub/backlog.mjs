@@ -31,6 +31,8 @@ export function createStubBacklogAdapter(seedData = {}) {
   const runsByIdentifier = { ...seedData.runsByIdentifier };
   const pullRequestsByIdentifier = { ...seedData.pullRequestsByIdentifier };
   const comments = [];
+  const createdIssues = [];
+  let nextCreatedId = 1;
 
   return Object.freeze({
     listIssues(projectId) {
@@ -58,7 +60,32 @@ export function createStubBacklogAdapter(seedData = {}) {
       comments.push({ id, body });
     },
 
+    // Fabricates an identifier (stub-created-N) and pushes a new raw-shape
+    // issue into the same in-memory map every other method reads/writes —
+    // it is immediately visible to a subsequent listIssues()/getIssueRuns()
+    // etc. call, matching this stub's existing mutate-in-place convention.
+    createIssue(ticket = {}) {
+      const identifier = `stub-created-${nextCreatedId++}`;
+      const issue = {
+        id: identifier,
+        identifier,
+        title: ticket.title,
+        description: ticket.description || '',
+        status: ticket.status || 'todo',
+        labels: ticket.labels || [],
+        assignee_id: null,
+        assignee_type: null,
+        project_id: ticket.project ?? null,
+        parent_issue_id: ticket.parent ?? null,
+        metadata: ticket.metadata || {},
+      };
+      issuesByIdentifier.set(identifier, issue);
+      createdIssues.push(issue);
+      return issue;
+    },
+
     // ---- test-observability extras (NOT part of the BacklogAdapter contract) ----
     comments,
+    createdIssues,
   });
 }

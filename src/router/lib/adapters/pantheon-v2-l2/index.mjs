@@ -103,7 +103,7 @@ function toRawIssue(issue) {
 /**
  * @param {{
  *   baseUrl?: string, exec?: Function, ghExec?: Function, ghCli?: string,
- *   reviewRepoOwner?: string, reviewSearchRepos?: string[],
+ *   reviewRepoOwner?: string, reviewSearchRepos?: string[], project?: string,
  * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
@@ -111,7 +111,10 @@ function toRawIssue(issue) {
  *   same for the `gh` calls below (kept separate so a test can fake one
  *   without the other). ghCli/reviewRepoOwner/reviewSearchRepos default to
  *   GH_CLI env / config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS
- *   -- mirrors multica/backlog.mjs's own constructor shape exactly.
+ *   -- mirrors multica/backlog.mjs's own constructor shape exactly. project
+ *   is createIssue's default target project (t015) -- lets a caller stand
+ *   up a whole adapter instance pointed at a specific board+project (e.g. a
+ *   hand-up target) without repeating the project on every createIssue call.
  * @returns {import('../backlog-adapter.mjs').BacklogAdapter}
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
@@ -224,6 +227,34 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     }
   }
 
+  // WRITE method: propagates any failure to the caller (no try/catch) —
+  // genuinely NEW capability (t015 — orchestrator hand-up): every other
+  // method on this adapter acts on an EXISTING issue; this creates one.
+  // Confirmed live 2026-09-06 (cross-session peer read core/api/backlog.ts
+  // lines 165-185 directly, not guessed): POST /api/backlog/issues, body
+  // { title (required), description?, status?, labels?, metadata?,
+  // parent?, project? } — the field is `project`, not `project_id`
+  // (BoardQueue port's own naming, matching this file's own toRawIssue()
+  // mapping convention elsewhere). Response is the created issue in
+  // BoardQueue's own camelCase shape, mapped through toRawIssue() so
+  // callers see the same snake_case fields every other read from this
+  // adapter already returns. cfg.project is a default target (the board
+  // this adapter instance was configured against); ticket.project
+  // overrides it per-call when the caller targets a different project on
+  // the same board.
+  function createIssue(ticket = {}) {
+    const res = run('POST', '/api/backlog/issues', {
+      title: ticket.title,
+      description: ticket.description,
+      status: ticket.status,
+      labels: ticket.labels,
+      metadata: ticket.metadata,
+      parent: ticket.parent,
+      project: ticket.project ?? cfg.project,
+    });
+    return toRawIssue(res);
+  }
+
   return Object.freeze({
     listIssues,
     listAllProjectIds,
@@ -231,6 +262,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    createIssue,
 
     // "Ported extra", not part of the BacklogAdapter typedef contract, but
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's

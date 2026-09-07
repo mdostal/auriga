@@ -194,6 +194,92 @@ test('commentOnIssue degrades to null (best-effort — a comment failure must ne
   assert.equal(backlog.commentOnIssue('PAN-1', 'hello'), null);
 });
 
+// ---- createIssue() (t015 -- orchestrator hand-up) --------------------------------------
+// Confirmed real via `multica issue create --help` (2026-09-06, not guessed):
+// --title/--description/--project/--parent/--status. Labels have no create-time
+// flag and no name->id resolution in this adapter (ignored, logged); metadata
+// is a best-effort follow-up via `multica issue metadata set` (one call per key).
+
+test('createIssue propagates a CLI failure (writes do not degrade gracefully)', async (t) => {
+  makeExecMock(t, { multica: () => new Error('multica: invalid project') });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  assert.throws(() => backlog.createIssue({ title: 'Handed up' }), /invalid project/);
+});
+
+test('createIssue sends --title/--description/--project/--parent/--status and returns the parsed result', async (t) => {
+  const calls = makeExecMock(t, {
+    multica: (args) => {
+      if (args[0] === 'issue' && args[1] === 'create') return { identifier: 'PAN-99', title: 'Handed up' };
+      throw new Error('unexpected args ' + args.join(' '));
+    },
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  const created = backlog.createIssue({
+    title: 'Handed up', description: 'needs cross-project decision',
+    project: 'parent-project-id', parent: 'PAN-0', status: 'todo',
+  });
+
+  assert.deepEqual(created, { identifier: 'PAN-99', title: 'Handed up' });
+  const createCall = calls.find((c) => c.cmd === MULTICA_CLI);
+  assert.deepEqual(stripProfile(createCall.args), [
+    'issue', 'create', '--title', 'Handed up', '--output', 'json',
+    '--description', 'needs cross-project decision',
+    '--project', 'parent-project-id', '--parent', 'PAN-0', '--status', 'todo',
+  ]);
+});
+
+test('createIssue: labels are NOT attached (no name->id resolution) and never fail the create', async (t) => {
+  makeExecMock(t, {
+    multica: (args) => {
+      if (args[0] === 'issue' && args[1] === 'create') return { identifier: 'PAN-99' };
+      throw new Error('label add should never be called: ' + args.join(' '));
+    },
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  const created = backlog.createIssue({ title: 'Handed up', labels: ['hand-up'] });
+  assert.equal(created.identifier, 'PAN-99');
+});
+
+test('createIssue: metadata is attached via a best-effort follow-up `metadata set` call per key, after create succeeds', async (t) => {
+  const calls = makeExecMock(t, {
+    multica: (args) => {
+      if (args[0] === 'issue' && args[1] === 'create') return { identifier: 'PAN-99' };
+      if (args[0] === 'issue' && args[1] === 'metadata' && args[2] === 'set') return { ok: true };
+      throw new Error('unexpected args ' + args.join(' '));
+    },
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  backlog.createIssue({ title: 'Handed up', metadata: { handed_up_from: 'PAN-1' } });
+
+  const metaCall = calls.find((c) => stripProfile(c.args)[1] === 'metadata');
+  assert.deepEqual(stripProfile(metaCall.args), [
+    'issue', 'metadata', 'set', 'PAN-99', '--key', 'handed_up_from', '--value', 'PAN-1', '--output', 'json',
+  ]);
+});
+
+test('createIssue: a metadata-set failure is caught and does not undo the successful create', async (t) => {
+  const calls = makeExecMock(t, {
+    multica: (args) => {
+      if (args[0] === 'issue' && args[1] === 'create') return { identifier: 'PAN-99' };
+      if (args[0] === 'issue' && args[1] === 'metadata') return new Error('multica: metadata write failed');
+      throw new Error('unexpected args ' + args.join(' '));
+    },
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  const created = backlog.createIssue({ title: 'Handed up', metadata: { handed_up_from: 'PAN-1' } });
+  assert.equal(created.identifier, 'PAN-99');
+  assert.ok(calls.some((c) => stripProfile(c.args)[1] === 'metadata'), 'metadata set was attempted');
+});
+
 // ---- getIssuePullRequests: gh-backed PR discovery (high-risk per story) ----
 
 test('getIssuePullRequests: non-empty gh-mocked response is discovered and returned (repo-discovery fallback)', async (t) => {

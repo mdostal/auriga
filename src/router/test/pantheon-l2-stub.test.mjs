@@ -253,6 +253,59 @@ test('commentOnIssue() success path sends the right body', async (t) => {
   assert.deepEqual(calls[0].body, { body: 'hello', author: 'auriga' });
 });
 
+// ---- createIssue() (t015 -- orchestrator hand-up) --------------------------------------
+
+test('createIssue() POSTs to /api/backlog/issues with the confirmed real body shape and PROPAGATES a failure', async (t) => {
+  makeCurlMock(t, () => new Error('HTTP 502'));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  assert.throws(() => backlog.createIssue({ title: 'Handed up' }), /HTTP 502/);
+});
+
+test('createIssue() success path sends title/description/status/labels/metadata/parent/project and maps the response through toRawIssue()', async (t) => {
+  const calls = makeCurlMock(t, () => ({
+    status: 201,
+    body: rawBoardIssue({ identifier: 'PAN-99', title: 'Handed up', project: 'parent-project-id' }),
+  }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  const created = backlog.createIssue({
+    title: 'Handed up',
+    description: 'needs cross-project decision',
+    status: 'todo',
+    labels: ['hand-up'],
+    metadata: { handed_up_from: 'PAN-1' },
+    parent: 'PAN-0',
+    project: 'parent-project-id',
+  });
+
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues`);
+  assert.deepEqual(calls[0].body, {
+    title: 'Handed up',
+    description: 'needs cross-project decision',
+    status: 'todo',
+    labels: ['hand-up'],
+    metadata: { handed_up_from: 'PAN-1' },
+    parent: 'PAN-0',
+    project: 'parent-project-id',
+  });
+  assert.equal(created.identifier, 'PAN-99');
+  assert.equal(created.title, 'Handed up');
+});
+
+test('createIssue() falls back to cfg.project as the default target when ticket.project is omitted', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 201, body: rawBoardIssue({ identifier: 'PAN-100' }) }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, project: 'default-project-id' });
+
+  backlog.createIssue({ title: 'Handed up' });
+
+  assert.equal(calls[0].body.project, 'default-project-id');
+});
+
 // ---- SpawnAdapter ----------------------------------------------------------------------
 
 test('describeLanes(): unchanged from the multica-direct adapter -- zero Pantheon dependency', async (t) => {
