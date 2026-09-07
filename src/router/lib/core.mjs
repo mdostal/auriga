@@ -803,3 +803,17 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   }
   return actions;
 }
+
+// Pure-code state-machine: advance changes_requested issues back to todo so a
+// build lane can iterate on the reviewer's feedback. The review lane sets this
+// status as the formal "send back" signal; the router owns the transition to
+// todo + unassign (the router must never rely solely on agent free-text for a
+// status mutation the state machine should handle).
+export function detectChangesRequested(changesRequestedIssues) {
+  const actions = [];
+  for (const i of changesRequestedIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
+  }
+  return actions;
+}

@@ -1029,3 +1029,39 @@ test('selectAssignments: a NON-hand-up-labeled issue with no local capacity prod
   assert.equal(picks.length, 0);
   assert.deepEqual(picks.handUps, []);
 });
+
+// ============================================================================
+// detectChangesRequested — changes_requested -> todo (review loop-back)
+// ============================================================================
+
+const cr = (id, num, assigneeId = 'RV', title = 'work') => ({
+  id, identifier: id, project_id: 'PCORE', number: num,
+  status: 'changes_requested', assignee_id: assigneeId, title,
+});
+
+test('detectChangesRequested: a changes_requested issue returns a changeback-to-todo action', () => {
+  const issue = cr('PAN-50', 50);
+  const actions = core.detectChangesRequested([issue]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-50');
+  assert.equal(actions[0].action, 'changeback-to-todo');
+});
+
+test('detectChangesRequested: multiple changes_requested issues all get changeback actions', () => {
+  const issues = [cr('PAN-51', 51), cr('PAN-52', 52)];
+  const actions = core.detectChangesRequested(issues);
+  assert.equal(actions.length, 2);
+  assert.deepEqual(actions.map((a) => a.identifier), ['PAN-51', 'PAN-52']);
+});
+
+test('detectChangesRequested: smoke/scratch issues are skipped', () => {
+  const smokeIssue = cr('PAN-53', 53, 'RV', 'SMOKE: dispatch probe');
+  const realIssue = cr('PAN-54', 54);
+  const actions = core.detectChangesRequested([smokeIssue, realIssue]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-54');
+});
+
+test('detectChangesRequested: empty input returns empty array', () => {
+  assert.deepEqual(core.detectChangesRequested([]), []);
+});
