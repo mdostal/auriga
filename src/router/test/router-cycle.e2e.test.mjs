@@ -483,3 +483,78 @@ test('t015: a remote create failure logs hand_up_error and applies NONE of the l
   assert.equal(log.byEvent('hand_up_error').length, 1);
   assert.equal(log.byEvent('hand_up_ok').length, 0);
 });
+
+// ---- review changes_requested -> todo (changeback) --------------------------
+
+test('changeback: a changes_requested issue is set back to todo and unassigned within one cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const reviewAgentId = cfg.AGENTS['auriga-review'] && cfg.AGENTS['auriga-review'].id;
+  const issue = makeIssue({
+    project_id: AURIGA,
+    status: 'changes_requested',
+    assignee_id: reviewAgentId,
+    parent_issue_id: 'fake-parent',
+  });
+  const { backlog, spawn, calls } = createMockAdapters([issue], cfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  // Router must have set the issue back to todo.
+  assert.ok(calls.status.some((c) => c.identifier === issue.identifier && c.status === 'todo'),
+    'changes_requested story must be set back to todo');
+  // Router must have unassigned it so the build lane can pick it up.
+  assert.ok(calls.unassign.some((c) => c.identifier === issue.identifier),
+    'changes_requested story must be unassigned');
+  // The advance log event must carry the correct from/to shape.
+  const advance = log.byEvent('advance').find((e) =>
+    e.identifier === issue.identifier && e.from === 'changes_requested' && e.to === 'todo');
+  assert.ok(advance, 'advance log event must record the changes_requested -> todo transition');
+});
+
+test('changeback: an unassign failure is swallowed and never crashes the cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const reviewAgentId = cfg.AGENTS['auriga-review'] && cfg.AGENTS['auriga-review'].id;
+  const issue = makeIssue({
+    project_id: AURIGA,
+    status: 'changes_requested',
+    assignee_id: reviewAgentId,
+    parent_issue_id: 'fake-parent',
+  });
+  const { backlog, spawn, calls } = createMockAdapters([issue], cfg.AGENTS);
+  spawn.unassignIssue = (identifier) => {
+    calls.unassign.push({ identifier });
+    throw new Error('unassign API down');
+  };
+  const log = createLogSink();
+
+  await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
+
+  assert.ok(calls.status.some((c) => c.identifier === issue.identifier && c.status === 'todo'),
+    'setIssueStatus to todo must still succeed even when unassign throws');
+  assert.equal(log.byEvent('changeback_unassign_error').length, 1);
+  assert.equal(log.byEvent('changeback_unassign_error')[0].identifier, issue.identifier);
+});
+
+test('changeback: dry-run does NOT call setIssueStatus or unassignIssue, but logs the advance', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const issue = makeIssue({
+    project_id: AURIGA,
+    status: 'changes_requested',
+    assignee_id: 'some-review-agent',
+    parent_issue_id: 'fake-parent',
+  });
+  const { backlog, spawn, calls } = createMockAdapters([issue], cfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, dryRun: true });
+
+  assert.ok(!calls.status.some((c) => c.identifier === issue.identifier),
+    'dry-run must not call setIssueStatus');
+  assert.ok(!calls.unassign.some((c) => c.identifier === issue.identifier),
+    'dry-run must not call unassignIssue');
+  const advance = log.byEvent('advance').find((e) =>
+    e.identifier === issue.identifier && e.from === 'changes_requested' && e.to === 'todo');
+  assert.ok(advance, 'dry-run must still log the advance event');
+  assert.equal(advance.applied, false);
+});

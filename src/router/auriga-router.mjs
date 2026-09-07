@@ -287,6 +287,25 @@ export async function cycle(opts = {}) {
     }
   }
 
+  // ---- state-machine: changes_requested -> todo (review loop-back) ----
+  // The review lane sets changes_requested as the formal "send back" signal;
+  // the router owns the todo transition + unassign so a build lane can pick
+  // the story up again. This is the durable code path — never rely solely on
+  // agent free-text for a status mutation the state machine should handle.
+  {
+    const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested);
+    for (const cb of changeBacks) {
+      logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
+      if (!dryRun) {
+        try {
+          backlog.setIssueStatus(cb.identifier, ISSUE_STATUS.TODO);
+          try { spawn.unassignIssue(cb.identifier); } catch (e) { logImpl('changeback_unassign_error', { identifier: cb.identifier, error: e.message }); }
+        } catch (e) { logImpl('advance_error', { identifier: cb.identifier, to: ISSUE_STATUS.TODO, error: e.message }); }
+      }
+    }
+  }
+
   // ---- CASCADE RE-DISPATCH: a completed story enqueues its now-unblocked dependents ----
   // THE self-draining fix. Pure code, no agent/LLM. When a story is done, any
   // dependent whose FULL dependency graph is now satisfied is ENQUEUED immediately

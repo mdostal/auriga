@@ -19,6 +19,7 @@ export const ISSUE_STATUS = Object.freeze({
   BLOCKED: 'blocked',
   IN_PROGRESS: 'in_progress',
   IN_REVIEW: 'in_review',
+  CHANGES_REQUESTED: 'changes_requested',
   DONE: 'done',
   CANCELLED: 'cancelled',
   CANCELED: 'canceled', // both spellings seen live; kept distinct, never silently merged
