@@ -42,7 +42,7 @@ function normalizePr(pr) {
 export function makePantheonGhListRepos(run) {
   return function listRepos(owner, limit = 300) {
     try {
-      const arr = run('GET', `/api/github/repos?org=${encodeURIComponent(owner)}&per_page=${limit}`);
+      const arr = run('GET', `/api/github/repos?owner=${encodeURIComponent(owner)}&per_page=${limit}`);
       return Array.isArray(arr) ? arr.map((r) => r && r.full_name).filter(Boolean) : [];
     } catch (e) {
       process.stderr.write('pantheon-github: listRepos(' + owner + ') failed: ' + e.message + '\n');

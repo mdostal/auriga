@@ -172,6 +172,7 @@ test('listCandidatePullRequests() calls Pantheon GitHub facade: repos listing th
   const repoCalls = calls.filter((c) => c.url.includes('/api/github/repos?'));
   const prCalls = calls.filter((c) => c.url.includes('/pulls?'));
   assert.equal(repoCalls.length, 1, 'one repo-listing call for reviewRepoOwner');
+  assert.ok(repoCalls[0].url.includes('owner=mdostal'), 'repo listing must use ?owner= (not ?org=) to match Pantheon facade query param');
   assert.ok(prCalls.length >= 2, 'at least one pulls call per repo (auriga + heimdall from listing, plus pantheon-v2 from reviewSearchRepos)');
 });
 
