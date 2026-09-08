@@ -134,85 +134,91 @@ test('getIssuePullRequests() unwraps {pull_requests} and degrades to [] on failu
   assert.deepEqual(backlog.getIssuePullRequests('PAN-1'), [{ number: 42 }]);
 });
 
-// ---- listCandidatePullRequests() -- re-ported gh scan (found live 2026-08-29: Multica's
-// native issue<->PR linkage is empty on this workspace, so getIssuePullRequests alone can
-// never find a real PR; this board-wide scan is what auriga-router.mjs's cycle() actually
-// uses for review-lane matching). `ghExec` is injected separately from the Pantheon `exec`
-// so these tests never touch the curl mock at all.
-function makeGhMock(t, handler) {
+// ---- listCandidatePullRequests() -- Pantheon GitHub facade (PANT-133) ----
+// PR discovery now routes through Pantheon's GitHub facade (GET
+// /api/github/repos and GET /api/github/repos/:owner/:repo/pulls) via the
+// same curl-based `exec` injection the other tests above use — no `ghExec`
+// parameter and no gh binary. All three tests inject `exec` directly
+// (createPantheonV2L2BacklogAdapter({ exec })) and parse the URL from curl's
+// argv to dispatch the right fake response, matching makeCurlMock's own
+// argv-parsing shape.
+
+function makePantheonGhExec(t, handler) {
   const calls = [];
-  const fn = t.mock.fn((cmd, args, opts) => {
-    calls.push({ cmd, args, opts });
-    const result = handler(args);
+  const fn = t.mock.fn((cmd, args) => {
+    if (cmd !== 'curl') throw new Error('unexpected exec cmd: ' + cmd);
+    // Extract the URL from curl args (the first bare arg after -X GET)
+    const xIdx = args.indexOf('-X');
+    const url = args[xIdx + 2];
+    calls.push({ url, args });
+    const result = handler(url);
     if (result instanceof Error) throw result;
-    return JSON.stringify(result);
+    return `${JSON.stringify(result)}\n200`;
   });
   return { fn, calls };
 }
 
-test('ghRun() passes a 15s timeout to every gh call -- a single slow/hanging repo must not stall the whole board-wide scan indefinitely (found live 2026-08-29)', async (t) => {
-  const { fn: ghExec, calls } = makeGhMock(t, (args) => {
-    if (args[0] === 'repo' && args[1] === 'list') return [];
-    return [];
+test('listCandidatePullRequests() calls Pantheon GitHub facade: repos listing then per-repo pulls', async (t) => {
+  const { fn: exec, calls } = makePantheonGhExec(t, (url) => {
+    if (url.includes('/api/github/repos?')) return [{ full_name: 'mdostal/auriga' }, { full_name: 'mdostal/heimdall' }];
+    if (url.includes('/pulls?')) return [];
+    return null;
   });
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
-  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/pantheon-v2'] });
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/pantheon-v2'] });
 
   backlog.listCandidatePullRequests();
 
-  assert.ok(calls.length > 0);
-  for (const c of calls) assert.equal(c.opts.timeout, 15000);
+  const repoCalls = calls.filter((c) => c.url.includes('/api/github/repos?'));
+  const prCalls = calls.filter((c) => c.url.includes('/pulls?'));
+  assert.equal(repoCalls.length, 1, 'one repo-listing call for reviewRepoOwner');
+  assert.ok(prCalls.length >= 2, 'at least one pulls call per repo (auriga + heimdall from listing, plus pantheon-v2 from reviewSearchRepos)');
 });
 
-test('listCandidatePullRequests() unions ghListRepos(owner) with reviewSearchRepos, dedupes, tags each PR with _repo', async (t) => {
-  const { fn: ghExec, calls } = makeGhMock(t, (args) => {
-    if (args[0] === 'repo' && args[1] === 'list') return [{ nameWithOwner: 'mdostal/auriga' }, { nameWithOwner: 'mdostal/heimdall' }];
-    if (args[0] === 'pr' && args[1] === 'list') {
-      const repo = args[args.indexOf('--repo') + 1];
-      if (repo === 'mdostal/auriga') return [{ number: 1, title: 'a PR' }];
-      if (repo === 'mdostal/heimdall') return [{ number: 2, title: 'h PR' }];
-      if (repo === 'mdostal/consus') return [{ number: 3, title: 'c PR' }];
-      return [];
-    }
-    throw new Error('unexpected gh args: ' + args.join(' '));
+test('listCandidatePullRequests() unions Pantheon repo listing with reviewSearchRepos, dedupes, tags each PR with _repo', async (t) => {
+  const { fn: exec } = makePantheonGhExec(t, (url) => {
+    if (url.includes('/api/github/repos?')) return [{ full_name: 'mdostal/auriga' }, { full_name: 'mdostal/heimdall' }];
+    if (url.includes('/mdostal/auriga/pulls')) return [{ number: 1, title: 'a PR', head: { ref: 'feat/pant-1' }, state: 'open' }];
+    if (url.includes('/mdostal/heimdall/pulls')) return [{ number: 2, title: 'h PR', head: { ref: 'feat/h-1' }, state: 'open' }];
+    if (url.includes('/mdostal/consus/pulls')) return [{ number: 3, title: 'c PR', head: { ref: 'feat/c-1' }, state: 'open' }];
+    return [];
   });
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
   const backlog = createPantheonV2L2BacklogAdapter({
-    baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
+    baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
   });
 
   const prs = backlog.listCandidatePullRequests();
 
-  assert.deepEqual(prs.sort((a, b) => a.number - b.number), [
-    { number: 1, title: 'a PR', _repo: 'mdostal/auriga' },
-    { number: 2, title: 'h PR', _repo: 'mdostal/heimdall' },
-    { number: 3, title: 'c PR', _repo: 'mdostal/consus' },
-  ].sort((a, b) => a.number - b.number));
-  // mdostal/auriga appears in both ghListRepos() and reviewSearchRepos -- deduped to one scan.
-  const prListCalls = calls.filter((c) => c.args[0] === 'pr');
-  assert.equal(prListCalls.length, 3);
+  // mdostal/auriga is in both ghListRepos result AND reviewSearchRepos — deduped to one scan.
+  const sorted = prs.slice().sort((a, b) => a.number - b.number);
+  assert.equal(sorted.length, 3);
+  assert.equal(sorted[0].number, 1); assert.equal(sorted[0]._repo, 'mdostal/auriga');
+  assert.equal(sorted[1].number, 2); assert.equal(sorted[1]._repo, 'mdostal/heimdall');
+  assert.equal(sorted[2].number, 3); assert.equal(sorted[2]._repo, 'mdostal/consus');
+  // head_ref is flattened from head.ref by pantheon-github.mjs
+  assert.equal(sorted[0].head_ref, 'feat/pant-1');
 });
 
 test('listCandidatePullRequests() isolates a single repo\'s failure -- other repos still scanned, never throws', async (t) => {
-  const { fn: ghExec } = makeGhMock(t, (args) => {
-    if (args[0] === 'repo' && args[1] === 'list') throw new Error('gh repo list: rate limited');
-    if (args[0] === 'pr' && args[1] === 'list') {
-      const repo = args[args.indexOf('--repo') + 1];
-      if (repo === 'mdostal/auriga') throw new Error('gh pr list: 404');
-      return [{ number: 9, title: 'ok' }];
-    }
-    throw new Error('unexpected gh args: ' + args.join(' '));
+  const { fn: exec } = makePantheonGhExec(t, (url) => {
+    if (url.includes('/api/github/repos?')) throw new Error('Pantheon: 503 GITHUB_TOKEN absent');
+    if (url.includes('/mdostal/auriga/pulls')) throw new Error('Pantheon: 404 Not Found');
+    if (url.includes('/mdostal/consus/pulls')) return [{ number: 9, title: 'ok', head: { ref: 'feat/ok' }, state: 'open' }];
+    return [];
   });
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
   const backlog = createPantheonV2L2BacklogAdapter({
-    baseUrl: BASE_URL, ghExec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
+    baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
   });
 
   const prs = backlog.listCandidatePullRequests();
 
-  // owner-discovery failed (falls back to just reviewSearchRepos), auriga's own PR list
+  // repo-listing failed (falls back to just reviewSearchRepos), auriga's own PR list
   // failed too, but consus's succeeded -- one real PR survives, nothing throws.
-  assert.deepEqual(prs, [{ number: 9, title: 'ok', _repo: 'mdostal/consus' }]);
+  assert.equal(prs.length, 1);
+  assert.equal(prs[0].number, 9);
+  assert.equal(prs[0]._repo, 'mdostal/consus');
 });
 
 test('setIssueStatus() POSTs {status} and PROPAGATES a failure (write methods never degrade)', async (t) => {

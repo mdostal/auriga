@@ -16,9 +16,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import * as cfg from '../lib/config.mjs';
 import * as core from '../lib/core.mjs';
 import * as mca from '../lib/multica.mjs';
+// host-only: gh CLI acceptable here (Story 5 / PANT-134 decision: host scripts
+// may use gh directly; the gh-CLI ban applies to containerized gods only).
+import { makeGhRun, makeGhPrs } from '../lib/adapters/github-cli.mjs';
+const _ghRun = makeGhRun(execFileSync, process.env.GH_CLI || 'gh');
+const ghPrs = makeGhPrs(_ghRun);
 
 const APPLY = process.argv.includes('--apply');
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -46,7 +52,7 @@ for (const b of blocked) {
   // Guard: if the story already has an open/merged PR, it is already in flight —
   // don't re-open it as a fresh todo. (gh, best-effort; a lookup error is non-fatal.)
   let hasPr = false;
-  try { hasPr = mca.ghPrs(repo, 'all').some((pr) => core.prMatchesStory(pr, b)); } catch {}
+  try { hasPr = ghPrs(repo, 'all').some((pr) => core.prMatchesStory(pr, b)); } catch {}
   if (hasPr) { alreadyInFlight.push({ b, repo }); continue; }
   unblock.push({ b, repo });
 }
