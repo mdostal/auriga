@@ -103,67 +103,12 @@ export function issuePullRequests(identifier) {
   }
 }
 
-const GH = process.env.GH_CLI || 'gh';
-
-// Open PRs for a repo via gh, as [{number,title,headRefName,baseRefName,body,url,state}].
-// Used by the review lane to discover a story's real open PR: Multica's issue<->PR
-// linkage is empty in practice, and the feat/<id> branch convention is too narrow.
-export function ghOpenPrs(repo) {
-  try {
-    const out = execFileSync(GH, [
-      'pr', 'list', '--repo', repo, '--state', 'open',
-      '--json', 'number,title,headRefName,baseRefName,body,url,state', '--limit', '100',
-    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    const arr = out.trim() ? JSON.parse(out) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    process.stderr.write('ghOpenPrs(' + repo + ') failed: ' + e.message + '\n');
-    return [];
-  }
-}
-
-// Every repo slug for an owner via `gh repo list`, as ['owner/name', ...]. Lets the
-// review lane sweep ALL of the owner's repos for open PRs — not just a hardcoded
-// subset (logic-loops PR#1 sat forever because its repo was not in the static list).
-// Returns [] on any error so the caller falls back to REVIEW_SEARCH_REPOS.
-export function ghListRepos(owner, limit = 300) {
-  try {
-    const out = execFileSync(GH, [
-      'repo', 'list', owner, '--no-archived', '--limit', String(limit), '--json', 'nameWithOwner',
-    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    const arr = out.trim() ? JSON.parse(out) : [];
-    return Array.isArray(arr) ? arr.map((r) => r && r.nameWithOwner).filter(Boolean) : [];
-  } catch (e) {
-    process.stderr.write('ghListRepos(' + owner + ') failed: ' + e.message + '\n');
-    return [];
-  }
-}
-
 // Remove an issue's current assignee. Used by the blocked->todo auto-unblock pass
 // so a freshly-unblocked story re-enters build routing as an UNASSIGNED candidate
 // (selectAssignments only considers unassigned todos), instead of keeping its
 // stale plan-time assignee which would exclude it from the candidate pool.
 export function unassignIssue(identifier) {
   return run(['issue', 'assign', identifier, '--unassign', '--output', 'json']);
-}
-
-// All PRs (any state) for a repo, as [{number,title,headRefName,baseRefName,body,url,state,mergedAt}].
-// Used by the blocked->todo unblock guard: a story that already has an OPEN or
-// MERGED PR referencing it has progressed past build (in review / shipped) and
-// must NOT be re-dispatched — even though a stale/failed run from earlier churn
-// would (wrongly) make a runs-based guard skip it.
-export function ghPrs(repo, state = 'all') {
-  try {
-    const out = execFileSync(GH, [
-      'pr', 'list', '--repo', repo, '--state', state,
-      '--json', 'number,title,headRefName,baseRefName,body,url,state,mergedAt', '--limit', '100',
-    ], { env: cleanEnv(), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-    const arr = out.trim() ? JSON.parse(out) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) {
-    process.stderr.write('ghPrs(' + repo + ') failed: ' + e.message + '\n');
-    return [];
-  }
 }
 
 // Post a comment onto a Multica issue (used to publish the review-squad plan onto

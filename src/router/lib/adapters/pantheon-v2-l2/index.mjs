@@ -33,24 +33,18 @@
 // aspiration to be), so this adapter preserves that shape rather than
 // silently changing it and risking a subtle behavior break.
 //
-// GitHub-based PR discovery (multica/backlog.mjs's ghOpenPrs/ghPrs/
-// ghListRepos/listCandidatePullRequests) was ORIGINALLY left unported here
-// as a deliberate, documented scope cut (out of scope for the Multica-board-
-// bridge epic that first wrote this file). Found live, 2026-08-29: Multica's
-// own native issue<->PR linkage (getIssuePullRequests's only remaining path)
-// is EMPTY on this workspace -- no GitHub App integration is configured on
-// it -- so with the gh scan absent, the review lane's board-wide PR scan
-// (auriga-router.mjs's own `candidatePrs` cache) always returned [], and
-// EVERY in_review issue sat forever un-reviewed/un-shipped regardless of how
-// many real PRs existed. Ported listCandidatePullRequests (+ its ghListRepos/
-// ghPrs/ghRun helpers) back in from multica/backlog.mjs, byte-faithful to
-// that implementation, closing the gap the original scope cut left open.
-// `gh` itself now ships in this image (see Dockerfile.auriga's git/
-// github-cli comment) and reads GH_TOKEN directly -- no `gh auth login`.
+// GitHub-based PR discovery: routes through Pantheon's own GitHub facade
+// (core/api/github.ts, Story 1 of the Pantheon-native GitHub plugin epic) via
+// the same `run` HTTP runner this adapter already uses for backlog calls.
+// GITHUB_TOKEN is held centrally in Pantheon -- Auriga's container needs no
+// GH_TOKEN and no gh/git binaries. See ../pantheon-github.mjs for the
+// makePantheonGhListRepos / makePantheonGhPrs factories that replace the old
+// gh-CLI-based makeGhRun/makeGhListRepos/makeGhPrs from github-cli.mjs.
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
-import { makeGhRun, makeGhListRepos, makeGhPrs, makeListCandidatePullRequests } from '../github-cli.mjs';
+import { gatherReviewRepos, makeListCandidatePullRequests } from '../github-cli.mjs';
+import { makePantheonGhListRepos, makePantheonGhPrs } from '../pantheon-github.mjs';
 import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
@@ -102,42 +96,35 @@ function toRawIssue(issue) {
 
 /**
  * @param {{
- *   baseUrl?: string, exec?: Function, ghExec?: Function, ghCli?: string,
+ *   baseUrl?: string, exec?: Function,
  *   reviewRepoOwner?: string, reviewSearchRepos?: string[], project?: string,
  * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
- *   inject a fake execFileSync for the Pantheon HTTP calls; ghExec does the
- *   same for the `gh` calls below (kept separate so a test can fake one
- *   without the other). ghCli/reviewRepoOwner/reviewSearchRepos default to
- *   GH_CLI env / config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS
- *   -- mirrors multica/backlog.mjs's own constructor shape exactly. project
- *   is createIssue's default target project (t015) -- lets a caller stand
- *   up a whole adapter instance pointed at a specific board+project (e.g. a
- *   hand-up target) without repeating the project on every createIssue call.
+ *   inject a fake execFileSync for all HTTP calls (both backlog and GitHub
+ *   facade). reviewRepoOwner/reviewSearchRepos default to
+ *   config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS.
+ *   project is createIssue's default target project (t015) -- lets a caller
+ *   stand up a whole adapter instance pointed at a specific board+project
+ *   (e.g. a hand-up target) without repeating the project on every createIssue
+ *   call.
  * @returns {import('../backlog-adapter.mjs').BacklogAdapter}
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
 
-  const ghExecFn = cfg.ghExec || execFileSync;
-  const GH = cfg.ghCli || process.env.GH_CLI || 'gh';
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
 
-  // ghRun/ghListRepos/ghPrs/listCandidatePullRequests now live in
-  // ../github-cli.mjs -- shared with multica/backlog.mjs, which this file
-  // was previously a hand-copied, drifted port of (that dedupe found this
-  // file's own 15s timeout, added 2026-08-29 for PANT-24, had NEVER been
-  // ported back to multica/backlog.mjs -- exactly the risk of the
-  // hand-copy pattern this shared module now closes). env stays
-  // process.env here (unchanged): this container holds no Multica
-  // credentials by design, so there's nothing to scrub before a gh call,
-  // unlike multica/backlog.mjs's own cleanEnv().
-  const ghRun = makeGhRun(ghExecFn, GH);
-  const ghListRepos = makeGhListRepos(ghRun);
-  const ghPrs = makeGhPrs(ghRun);
+  // PR discovery now routes through Pantheon's GitHub facade (GET
+  // /api/github/repos and GET /api/github/repos/:owner/:repo/pulls) via the
+  // same `run` HTTP runner used for backlog calls. GITHUB_TOKEN is held
+  // centrally in Pantheon -- no gh binary or GH_TOKEN env var needed here.
+  // gatherReviewRepos / makeListCandidatePullRequests are pure logic from
+  // github-cli.mjs and are reused unchanged.
+  const ghListRepos = makePantheonGhListRepos(run);
+  const ghPrs = makePantheonGhPrs(run);
   const listCandidatePullRequests = makeListCandidatePullRequests(
     ghListRepos, ghPrs, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
   );
