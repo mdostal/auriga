@@ -149,11 +149,23 @@ export async function cycle(opts = {}) {
 
   let assigned = 0;
 
-  // BOARD-WIDE scan for the STATUS passes (unblock, parent-rollup, false-done,
-  // run-completion, verified-done): the blocked/done lies live in projects the
-  // build-DISPATCH set (cfgImpl.PROJECT_IDS) deliberately excludes, so scanning only
-  // those 4 hid them. selectAssignments still filters to cfgImpl.PROJECT_IDS internally
-  // (dispatch stays gated to aligned lanes); only observation goes board-wide.
+  // `issues` itself is fetched board-wide (scanIds spans every known project, not
+  // just this tenant's own cfgImpl.PROJECT_IDS) because dependency-graph resolution
+  // (detectUnblocks' declared-deps check, etc.) needs to see the WHOLE board to
+  // read a sibling issue's status, even outside this tenant's own aligned set.
+  //
+  // CORRECTION (2026-09-13): an earlier version of this comment claimed "only
+  // observation goes board-wide" and asserted selectAssignments was the only pass
+  // that needed a cfgImpl.PROJECT_IDS filter. That was WRONG and caused a real,
+  // live incident — every one of the STATUS passes below (unblock, parent-rollup,
+  // run-completion, verified-done, changeback, false-done) actually WRITES
+  // (setIssueStatus/unassignIssue), it is not read-only observation, and none of
+  // them were filtering their own input to cfgImpl.PROJECT_IDS before this fix. A
+  // second tenant's Auriga instance was confirmed live mutating another tenant's
+  // ticket status (a real dostal-tech PANT-* ticket, unblocked by the
+  // firefly-events instance). Every pass below now filters its own candidate set
+  // to cfgImpl.PROJECT_IDS at the point it's computed — look for that filter
+  // locally at each pass rather than trusting a blanket claim here again.
   const discovered = backlog.listAllProjectIds();
   const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
   const issues = backlog.listAllIssues(scanIds);
@@ -212,7 +224,13 @@ export async function cycle(opts = {}) {
   // fresh candidates. Guard: skip any that already have runs (already built / in flight),
   // so an anomalous blocked-with-open-PR story is never re-dispatched.
   {
-    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.BLOCKED);
+    // DISPATCH stays gated to this tenant's own aligned projects (2026-09-13 fix —
+    // this pass WRITES setIssueStatus/unassignIssue, it is not observation; a
+    // second tenant instance could otherwise unblock/reassign another tenant's
+    // own blocked ticket, confirmed live). statusById/issues below stay
+    // board-wide on purpose — they're read-only context for resolving a
+    // declared dependency's status, never mutated.
+    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.BLOCKED && cfgImpl.PROJECT_IDS.includes(i.project_id));
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
@@ -247,8 +265,9 @@ export async function cycle(opts = {}) {
     // ---- state-machine: parent/epic -> done when every child is terminal ----
     // Nothing else closes a parent when its last child completes. Fires only when
     // ALL of a parent's visible children are done/cancelled and the parent isn't
-    // already terminal.
-    const parentDone = coreImpl.detectParentDone(issues);
+    // already terminal. DISPATCH-scoped (writes setIssueStatus) — see the
+    // blocked->todo pass above for why this can't be board-wide.
+    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)));
     for (const pd of parentDone) {
       logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {
@@ -262,9 +281,10 @@ export async function cycle(opts = {}) {
   // makes each cycle atomic w.r.t. other router processes; re-deriving the
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
+  // DISPATCH-scoped (writes setIssueStatus) — see the blocked->todo pass above.
   const inProgress = issues.filter((i) => [
     ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
-  ].includes((i.status || '').toLowerCase()));
+  ].includes((i.status || '').toLowerCase()) && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
@@ -276,7 +296,9 @@ export async function cycle(opts = {}) {
     }
   }
 
-  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW);
+  // DISPATCH-scoped (writes setIssueStatus via detectVerifiedDone below, and
+  // feeds review-dispatch further down) — see the blocked->todo pass above.
+  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
   for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
   const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
@@ -292,8 +314,10 @@ export async function cycle(opts = {}) {
   // the router owns the todo transition + unassign so a build lane can pick
   // the story up again. This is the durable code path — never rely solely on
   // agent free-text for a status mutation the state machine should handle.
+  // DISPATCH-scoped (writes setIssueStatus/unassignIssue) — see the
+  // blocked->todo pass above.
   {
-    const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED);
+    const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
     const changeBacks = coreImpl.detectChangesRequested(changesRequested);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
@@ -397,7 +421,9 @@ export async function cycle(opts = {}) {
   // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
   // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
   // are still found).
-  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE);
+  // DISPATCH-scoped (feeds detectFalseDone below, which writes setIssueStatus)
+  // — see the blocked->todo pass above.
+  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE && cfgImpl.PROJECT_IDS.includes(i.project_id));
 
   // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
   // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
@@ -444,19 +470,12 @@ export async function cycle(opts = {}) {
     }
   }
 
-  // DISPATCH stays gated to this tenant's own aligned projects — mirrors
-  // selectAssignments' cfg.PROJECT_IDS filter below for build-dispatch.
-  // `inReview` itself stays board-wide (used above for detectVerifiedDone
-  // observation, matching the "observation is board-wide, dispatch is
-  // project-scoped" split this router already documents elsewhere) — but
-  // review-DISPATCH was never actually applying that filter before this fix,
-  // a real pre-existing gap only ever masked by the GitHub PR-gate this same
-  // change just removed (a firefly-events instance could otherwise pick up
-  // and try to dispatch review for another tenant's in_review ticket, e.g.
-  // a PANT-* story, to its own review-lane agent — confirmed live 2026-09-13).
-  const reviewCandidates = inReview.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
-  const reviewInflight = coreImpl.computeReviewInflight(reviewCandidates, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(reviewCandidates, inReviewRuns, cfgImpl, reviewInflight, { now });
+  // inReview is already PROJECT_IDS-scoped at its own definition above (2026-09-13
+  // fix — a firefly-events instance was confirmed live trying to dispatch review
+  // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
+  // this and the whole board-wide-status-pass audit that followed it).
+  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/

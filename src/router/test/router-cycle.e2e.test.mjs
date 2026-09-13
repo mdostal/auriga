@@ -322,6 +322,80 @@ test('selectReviewDispatch is never handed another tenant\'s in_review issue —
   );
 });
 
+// PANT-40 regression, continued: the review-dispatch leak above was one of SIX
+// status-mutating passes that shared the same unscoped-board-read bug (unblock,
+// parent-rollup, run-completion, review-dispatch, changeback, false-done). This
+// test covers the other four that can be triggered without a live PR-matching
+// setup (false-done requires an authoritative matched open PR — see
+// detectFalseDone/ownPrUrl — and is exercised by its own dedicated PR-matching
+// tests elsewhere; PROJECT_IDS-scoping for it is the same one-line guard as the
+// rest and was fixed identically in auriga-router.mjs). Every pass below seeds
+// one own-tenant issue and one foreign-tenant issue in the exact shape that
+// pass's detect* function requires to fire, then asserts only the own-tenant
+// issue's board state actually changed.
+test('unblock / parent-rollup / run-completion / changeback all stay scoped to cfg.PROJECT_IDS — PANT-40 regression', async () => {
+  const OWN_PROJECT = projectId('Pantheon Core');
+  const FOREIGN_PROJECT = 'foreign-tenant-project';
+
+  // ---- unblock: blocked issue whose declared dep is already done ----
+  const ownDep = makeIssue({ project_id: OWN_PROJECT, status: 'done' });
+  const ownBlocked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', metadata: { depends_on: ownDep.id } });
+  const foreignDep = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done' });
+  const foreignBlocked = makeIssue({ project_id: FOREIGN_PROJECT, status: 'blocked', metadata: { depends_on: foreignDep.id } });
+
+  // ---- parent-rollup: parent whose only child is already terminal ----
+  const ownParent = makeIssue({ project_id: OWN_PROJECT, status: 'todo' });
+  const ownChild = makeIssue({ project_id: OWN_PROJECT, status: 'done', parent_issue_id: ownParent.id });
+  const foreignParent = makeIssue({ project_id: FOREIGN_PROJECT, status: 'todo' });
+  const foreignChild = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done', parent_issue_id: foreignParent.id });
+
+  // ---- run-completion: in_progress issue whose latest run already completed ----
+  const ownInProgress = makeIssue({ project_id: OWN_PROJECT, status: 'in_progress' });
+  const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress' });
+
+  // ---- changeback: changes_requested issue, no other precondition ----
+  const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
+  const foreignChangeback = makeIssue({ project_id: FOREIGN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
+
+  const boardIssues = [
+    ownDep, ownBlocked, foreignDep, foreignBlocked,
+    ownParent, ownChild, foreignParent, foreignChild,
+    ownInProgress, foreignInProgress,
+    ownChangeback, foreignChangeback,
+  ];
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(boardIssues, cfg.AGENTS);
+  // Same real-adapter simulation as the review-dispatch test above: board-wide
+  // discovery must span both tenants' projects for this bug class to be
+  // observable at all.
+  backlog.listAllProjectIds = () => [OWN_PROJECT, FOREIGN_PROJECT];
+  backlog.listAllIssues = (projectIds) => boardIssues.filter((i) => projectIds.includes(i.project_id));
+  runsByIdentifier[ownInProgress.identifier] = [{ status: 'completed', created_at: new Date().toISOString() }];
+  runsByIdentifier[foreignInProgress.identifier] = [{ status: 'completed', created_at: new Date().toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const statusFor = (identifier) => calls.status.filter((s) => s.identifier === identifier);
+
+  // unblock
+  assert.deepEqual(statusFor(ownBlocked.identifier).map((s) => s.status), ['todo'], 'own-tenant blocked issue must unblock to todo');
+  assert.deepEqual(statusFor(foreignBlocked.identifier), [], 'foreign-tenant blocked issue must never be touched');
+
+  // parent-rollup
+  assert.deepEqual(statusFor(ownParent.identifier).map((s) => s.status), ['done'], 'own-tenant parent must roll up to done');
+  assert.deepEqual(statusFor(foreignParent.identifier), [], 'foreign-tenant parent must never be touched');
+
+  // run-completion
+  assert.deepEqual(statusFor(ownInProgress.identifier).map((s) => s.status), ['in_review'], 'own-tenant in_progress issue must advance to in_review');
+  assert.deepEqual(statusFor(foreignInProgress.identifier), [], 'foreign-tenant in_progress issue must never be touched');
+
+  // changeback
+  assert.deepEqual(statusFor(ownChangeback.identifier).map((s) => s.status), ['todo'], 'own-tenant changes_requested issue must go back to todo');
+  assert.deepEqual(statusFor(foreignChangeback.identifier), [], 'foreign-tenant changes_requested issue must never be touched');
+  assert.ok(calls.unassign.some((u) => u.identifier === ownChangeback.identifier), 'own-tenant changeback must unassign');
+  assert.ok(!calls.unassign.some((u) => u.identifier === foreignChangeback.identifier), 'foreign-tenant changeback must never unassign');
+});
+
 // ---- regression coverage for "route new todos"'s inline assign -> verify ->
 // force-rerun sequence (see auriga-router.mjs's cycle() — this pass is
 // deliberately NOT routed through spawn.dispatch(), even though dispatch()
