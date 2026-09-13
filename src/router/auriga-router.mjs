@@ -444,8 +444,19 @@ export async function cycle(opts = {}) {
     }
   }
 
-  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
+  // DISPATCH stays gated to this tenant's own aligned projects — mirrors
+  // selectAssignments' cfg.PROJECT_IDS filter below for build-dispatch.
+  // `inReview` itself stays board-wide (used above for detectVerifiedDone
+  // observation, matching the "observation is board-wide, dispatch is
+  // project-scoped" split this router already documents elsewhere) — but
+  // review-DISPATCH was never actually applying that filter before this fix,
+  // a real pre-existing gap only ever masked by the GitHub PR-gate this same
+  // change just removed (a firefly-events instance could otherwise pick up
+  // and try to dispatch review for another tenant's in_review ticket, e.g.
+  // a PANT-* story, to its own review-lane agent — confirmed live 2026-09-13).
+  const reviewCandidates = inReview.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
+  const reviewInflight = coreImpl.computeReviewInflight(reviewCandidates, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(reviewCandidates, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
