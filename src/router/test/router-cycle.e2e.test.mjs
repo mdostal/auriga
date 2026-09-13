@@ -287,6 +287,41 @@ test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(
   assert.equal(scanCalls, 1, `expected the board-wide PR scan to run exactly once per cycle() regardless of issue count (10 issues), got ${scanCalls} calls`);
 });
 
+// ---- review-dispatch tenant scoping (2026-09-13) --------------------------
+// Regression for a real cross-tenant leak found live while removing the
+// GitHub PR-gate from reviewEligible/selectReviewDispatch: `inReview` (used
+// for review-DISPATCH, not just observation) was never filtered to cfg's own
+// PROJECT_IDS, unlike selectAssignments' build-dispatch path. This was
+// previously masked by the GitHub PR-gate (a foreign tenant's ticket almost
+// never had a PR this tenant's own repo scan would find) — removing that
+// gate exposed the real gap: any tenant's Auriga instance could try to
+// dispatch review for ANOTHER tenant's in_review ticket to its own
+// review-lane agent. Confirmed live 2026-09-13 (firefly-events instance
+// attempted to dispatch review for a real PANT-* dostal-tech ticket).
+test('selectReviewDispatch is never handed another tenant\'s in_review issue — dispatch stays scoped to cfg.PROJECT_IDS', async () => {
+  const OWN_PROJECT = projectId('Pantheon Core');
+  const ownIssue = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
+  const foreignIssue = makeIssue({ project_id: 'foreign-tenant-project', status: 'in_review' });
+  const { backlog, spawn, calls } = createMockAdapters([ownIssue, foreignIssue], cfg.AGENTS);
+  // Simulate the REAL production adapter's board-wide discovery: listAllProjectIds
+  // returns every project it knows about, including ones outside this tenant's
+  // own cfg.PROJECT_IDS — createMockAdapters' default listAllProjectIds (`[]`)
+  // would incidentally scope `issues` to cfg.PROJECT_IDS alone, hiding this bug.
+  backlog.listAllProjectIds = () => [OWN_PROJECT, 'foreign-tenant-project'];
+  backlog.listAllIssues = (projectIds) => [ownIssue, foreignIssue].filter((i) => projectIds.includes(i.project_id));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const reviewAssigns = calls.assign.filter((a) => cfg.REVIEW_LANE.includes(a.agentName));
+  assert.equal(reviewAssigns.length, 1, `expected exactly one review dispatch (this tenant's own ticket), got ${reviewAssigns.length}`);
+  assert.equal(reviewAssigns[0].identifier, ownIssue.identifier);
+  assert.ok(
+    !reviewAssigns.some((a) => a.identifier === foreignIssue.identifier),
+    'must never dispatch review for a ticket outside cfg.PROJECT_IDS',
+  );
+});
+
 // ---- regression coverage for "route new todos"'s inline assign -> verify ->
 // force-rerun sequence (see auriga-router.mjs's cycle() — this pass is
 // deliberately NOT routed through spawn.dispatch(), even though dispatch()
