@@ -437,14 +437,24 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
 // now live in ./pr-matching.mjs — imported + re-exported above (t011
 // decomposition).
 
-// Whether to burn a Claude review run on an in_review story. STRICT gate: a REAL
-// open PR referencing the ticket (hasOpenPR, computed by the router via gh). No PR
-// => a parent seed / planning / idea ticket => NOT eligible => skipped (never
-// dispatched, so the review path can never false-block it). A real matching open PR
-// is also proof the target repo is resolvable (it is the PR's own repo), satisfying
-// the "resolvable target_repo AND a real open PR" requirement.
-export function reviewEligible(issue = {}, hasOpenPR = false) {
-  return !!hasOpenPR;
+// Whether to dispatch a review run for an in_review story. Auriga orchestrates —
+// it never talks to GitHub to make this call (operator correction, repeated
+// 2026-08 through 2026-09-13: "auriga has no need to integrate with github...
+// it orchestrates, it isn't checking the PR... that is the review squad").
+//
+// The old STRICT gate required a real open PR discovered via gh, which made
+// review-dispatch silently depend on whatever GitHub adapter shape the router
+// happened to be using — it broke outright for any tenant routed through the
+// core-api facade (see mdostal/auriga#87) and was the wrong layer for this
+// decision even on the path where it happened to work. Status is the only
+// signal Auriga needs: a story only ever reaches in_review via
+// detectRunCompletions (a build agent finished a real in_progress run) — a
+// seed/idea/parent ticket is routed to the planning lane and never passes
+// through in_progress at all, so it can't legitimately land here either. If a
+// genuinely wrong ticket ever does, that's the review squad's own job to
+// notice and comment/reopen — not Auriga's job to pre-filter via GitHub.
+export function reviewEligible(_issue = {}) {
+  return true;
 }
 
 // How many review slots each review-lane agent currently occupies. An in_review
@@ -470,7 +480,6 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
-  const openPrIds = opts.openPrIds instanceof Set ? opts.openPrIds : null;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
   const reviewAgentIds = new Set(lane.map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
@@ -497,13 +506,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       continue;
     }
 
-    // not yet under review — pick a review agent with free capacity
-    // FRESH dispatch: gate on a REAL open PR referencing the ticket (opts.openPrIds,
-    // computed by the router via gh). No PR => a parent seed / planning / idea ticket
-    // => SKIP, so the review path can never false-block it. A story already assigned
-    // to a review agent (handled above) is the self-heal path and is NOT PR-gated.
-    const hasPr = openPrIds ? openPrIds.has(i.identifier) : false;
-    if (!reviewEligible(i, hasPr)) continue;
+    // not yet under review — pick a review agent with free capacity. Dispatch is
+    // status-only now (reviewEligible no longer checks GitHub) — see
+    // reviewEligible's own doc comment for why.
+    if (!reviewEligible(i)) continue;
 
     const agent = chooseReviewAgent(cfg, reviewInflight, projected);
     if (!agent) continue;

@@ -554,30 +554,34 @@ const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOStri
 const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
 const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
 
-test('reviewEligible: gates strictly on a real open PR (seeds without a PR are skipped)', () => {
+test('reviewEligible: status-only, unconditionally true — Auriga never checks GitHub to gate review dispatch', () => {
   assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
   assert.ok(!core.hasTargetRepo({ description: 'just a design note' }));
-  // reviewEligible now REQUIRES a real open PR (2nd arg). No PR -> NOT eligible, even
-  // for a build/target_repo/hive-shaped story: that is exactly the parent-seed / no-PR
-  // case the review path used to false-block.
-  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }, true));
-  assert.ok(!core.reviewEligible({ description: 'target_repo: mdostal/x' }, false));
-  assert.ok(!core.reviewEligible({ description: HIVE_DESCRIPTION }, false));
-  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }, false));
+  // reviewEligible no longer takes or requires a PR signal (operator correction,
+  // repeated 2026-08 through 2026-09-13: Auriga orchestrates, it does not talk to
+  // GitHub). Any issue the caller has already filtered to in_review is eligible —
+  // the caller (selectReviewDispatch) is only ever given in_review issues, which
+  // only ever get there via detectRunCompletions (a real build run finishing), so
+  // there is no separate "no build signal" case left to gate on here.
+  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }));
+  assert.ok(core.reviewEligible({ description: HIVE_DESCRIPTION }));
+  assert.ok(core.reviewEligible({ description: 'a Consus decision doc' }));
+  assert.ok(core.reviewEligible());
 });
 
-test('selectReviewDispatch: an in_review story with a build signal dispatches to the review lane', () => {
-  const i = inReview('PAN-1', 1); // unassigned, eligible
-  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-1']) });
+test('selectReviewDispatch: any unassigned in_review story dispatches to the review lane — no PR check', () => {
+  const i = inReview('PAN-1', 1); // unassigned, in_review
+  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].agent, 'auriga-review');
   assert.equal(picks[0].action, 'dispatch-review');
 });
 
-test('selectReviewDispatch: ineligible in_review stories (no build signal) are never dispatched', () => {
+test('selectReviewDispatch: even a plain/undecorated in_review story dispatches — Auriga hands off, the review squad decides', () => {
   const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc' };
   const picks = core.selectReviewDispatch([doc], { D1: [] }, CFG, {}, { now: NOW });
-  assert.equal(picks.length, 0);
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
 });
 
 test('selectReviewDispatch: a story already under active review is NOT re-dispatched (idempotent)', () => {
@@ -602,11 +606,11 @@ test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via
 
 test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
   const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
-  // Two eligible unassigned stories, perCycleReview=1 -> only one dispatched this cycle.
-  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-5', 'PAN-6']) });
+  // Two unassigned in_review stories, perCycleReview=1 -> only one dispatched this cycle.
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   // Lane already full (one review in flight) -> nothing new dispatched.
-  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW, openPrIds: new Set(['PAN-5']) });
+  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(full.length, 0);
 });
 
@@ -657,17 +661,9 @@ test('targetRepoValue: metadata wins, else the description target_repo line', ()
   assert.equal(core.targetRepoValue({ description: 'no repo here' }), null);
 });
 
-test('selectReviewDispatch: an eligible-shaped in_review story WITHOUT a PR is NOT dispatched (seed guard)', () => {
-  const seed = inReview('PAN-SEED', 42); // has target_repo shape but no open PR
-  const picks = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW });
-  assert.equal(picks.length, 0);
-  const picks2 = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW, openPrIds: new Set() });
-  assert.equal(picks2.length, 0);
-});
-
-test('selectReviewDispatch: dispatches a story once its id is in openPrIds (real PR found)', () => {
+test('selectReviewDispatch: dispatches an in_review story regardless of any PR shape — status is the only signal', () => {
   const s = inReview('PAN-6962', 43);
-  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-6962']) });
+  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].action, 'dispatch-review');
   assert.equal(picks[0].agent, 'auriga-review');

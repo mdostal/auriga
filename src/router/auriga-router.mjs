@@ -399,19 +399,6 @@ export async function cycle(opts = {}) {
   // are still found).
   const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE);
 
-  // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
-  // parent/seed ticket that some unrelated PR merely references is never dispatched.
-  // The candidate scan returns PRs of ANY state (unlike the old ghOpenPrs, which
-  // was open-only), so prIsOpen must be checked explicitly here.
-  const openPrIds = new Set();
-  for (const i of inReview) {
-    let prs = [];
-    try { prs = matchedPrs(i.identifier, i, coreImpl.prIdentityMatchesStory); }
-    catch (e) { logImpl('review_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
-    if (prs.some((pr) => coreImpl.prIsOpen(pr))) openPrIds.add(i.identifier);
-  }
-  if (inReview.length) logImpl('review_pr_scan', { checked: inReview.length, withPr: [...openPrIds] });
-
   // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
   // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
   // still open is a lie; demote it back to in_review (capped, so never a mass flip)
@@ -458,7 +445,7 @@ export async function cycle(opts = {}) {
   }
 
   const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now, openPrIds });
+  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
