@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — Architecture</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga architecture: component structure, adapter interface model, Pantheon integration, and configuration split." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html">Overview</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="architecture.html" class="active">Architecture</a>
+      <a href="configuration.html">Configuration</a>
+      <a href="api.html">API Reference</a>
+      <a href="guides.html">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">Architecture</span>
+      <ul class="sidebar-nav">
+        <li><a href="#components" class="current">Component overview</a></li>
+        <li><a href="#router">The router</a></li>
+        <li><a href="#adapter-interface">Adapter interface</a></li>
+        <li><a href="#three-adapters">Three adapters</a></li>
+        <li><a href="#config-split">Config split</a></li>
+        <li><a href="#pantheon-integration">Pantheon integration</a></li>
+        <li><a href="#repo-layout">Repo layout</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Other sections</span>
+      <ul class="sidebar-nav">
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="configuration.html">Configuration</a></li>
+        <li><a href="api.html">API Reference</a></li>
+        <li><a href="guides.html">Guides</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">Architecture</p>
+      <h1>How Auriga is built</h1>
+      <p class="doc-intro">Auriga is a plain Node.js service with a zero-dependency routing core, an adapter-interface boundary between decision logic and I/O, and two independent UI subsystems for local observability.</p>
+    </header>
+
+    <!-- COMPONENTS -->
+    <section class="doc-section" id="components">
+      <h2>Component overview</h2>
+      <p class="prose">The repo contains three independent subsystems. None is a dependency of any other — each has its own <code>package.json</code> and <code>npm test</code>.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead><tr><th>Subsystem</th><th>Path</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">Router</td>
+            <td><code>src/router/</code></td>
+            <td>The auto-router daemon. Plain Node, zero runtime dependencies. This is the production service.</td>
+          </tr>
+          <tr>
+            <td class="name">Server</td>
+            <td><code>src/server/</code></td>
+            <td>Read-only JSON API over the repo's own <code>.pHive/</code> state. <code>node:http</code>, no framework.</td>
+          </tr>
+          <tr>
+            <td class="name">UI</td>
+            <td><code>src/ui/</code></td>
+            <td>Operator dashboard — Vite + Tailwind + shadcn/ui — served by the server. Build-only, not shipped to production.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-tip">
+        <p class="callout-title">Server + UI are local-only</p>
+        <p>The server and UI subsystems are for local observability only — they read this repo's own <code>.pHive/</code> planning state and serve it as a dashboard. They are not part of the production Pantheon deployment. In production, only <code>src/router/</code> runs.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- THE ROUTER -->
+    <section class="doc-section" id="router">
+      <h2>The router</h2>
+      <p class="prose">The router at <code>src/router/</code> is the core of Auriga. It has zero runtime dependencies — plain Node.js ESM modules, no npm packages required to run. All decisions are pure functions; all I/O goes through injectable adapters.</p>
+
+      <h3>Key files</h3>
+      <table class="param-table">
+        <thead><tr><th>File</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td class="name">auriga-router.mjs</td><td>Entrypoint and daemon loop. Exports <code>cycle()</code>. <code>main()</code> runs when executed directly (guarded by <code>isMainModule</code>).</td></tr>
+          <tr><td class="name">lib/core.mjs</td><td>Pure decision logic — all routing decisions, state machine transitions, squad planning. No adapter calls.</td></tr>
+          <tr><td class="name">lib/config.mjs</td><td>Policy configuration: CAPS, HUMAN_NAMES, REVIEW_SQUAD_RULES. Imports from config-substrate.mjs.</td></tr>
+          <tr><td class="name">lib/config-substrate.mjs</td><td>Substrate configuration: AGENTS, PROJECT_IDS, lane maps, RUNTIME_CAP. Tenant-specific.</td></tr>
+          <tr><td class="name">lib/config-loader.mjs</td><td>Loads optional external JSON override file (<code>AURIGA_CONFIG</code> env var).</td></tr>
+          <tr><td class="name">lib/adapters/</td><td>The BacklogAdapter, SpawnAdapter, MemoryAdapter contracts + real and stub implementations.</td></tr>
+          <tr><td class="name">bin/auriga.mjs</td><td>CLI entrypoint for subcommands: <code>auriga memory recall/remember</code>, <code>auriga agent init/status</code>.</td></tr>
+          <tr><td class="name">supervisor.sh</td><td>Keeps exactly one detached router process alive. Restarts on death.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>No class declarations</h3>
+      <p class="prose">The entire codebase has zero <code>class</code> declarations. All modules export plain factory functions (<code>createXAdapter(cfg)</code>) returning frozen object literals. This is a stated project convention in <code>.pHive/CONTEXT.md</code>.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- ADAPTER INTERFACE -->
+    <section class="doc-section" id="adapter-interface">
+      <h2>Adapter interface</h2>
+      <p class="prose">Auriga's routing core (<code>lib/core.mjs</code>) never calls Multica or any external system directly. All I/O goes through a typed adapter boundary. This makes the routing logic pure and testable, and makes it possible to swap the underlying board system without touching the routing policy.</p>
+
+      <pre class="code-block"><span class="c">// cycle() accepts injectable adapters — tests can pass stubs</span>
+export async function cycle({ backlog, spawn, cfg, core, log, sleep, ...opts }) {
+  <span class="c">// backlog: BacklogAdapter — read/write the work board</span>
+  <span class="c">// spawn:   SpawnAdapter   — dispatch/assign/rerun agents</span>
+  <span class="c">// core, log, sleep: injectable for testing</span>
+}</pre>
+
+      <h3>Synchronous by design</h3>
+      <p class="prose"><code>BacklogAdapter</code> and <code>SpawnAdapter</code> are <strong>synchronous</strong> — every method returns its result directly, never a Promise. This matches the real Multica-backed implementation (which uses <code>execFileSync</code>) and all existing call sites — several methods are called inside <code>.some()</code>/<code>.filter()</code> callbacks where <code>await</code> cannot be used. Do not make these adapters async without a concrete story that requires it.</p>
+
+      <p class="prose" style="margin-top:14px"><code>MemoryAdapter</code> is the deliberate exception: it has no synchronous consumer today and Mnemosyne's real transport is genuinely async.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- THREE ADAPTERS -->
+    <section class="doc-section" id="three-adapters">
+      <h2>Three adapters, not one</h2>
+      <p class="prose">The backlog (where work items live), the runner (what actually executes work), and memory (what context informs a decision) are genuinely different concerns with different failure modes. A future implementation of any one should be swappable independently of the others.</p>
+
+      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:16px; margin-top:20px">
+        <div class="card">
+          <div class="card-title">BacklogAdapter</div>
+          <p>Read/write the work board: list issues, read runs/PRs, change status, post comments.</p>
+          <p style="margin-top:8px"><code>lib/adapters/backlog-adapter.mjs</code></p>
+        </div>
+        <div class="card">
+          <div class="card-title">SpawnAdapter</div>
+          <p>Dispatch/assign/rerun/unassign an agent against an issue.</p>
+          <p style="margin-top:8px"><code>lib/adapters/spawn-adapter.mjs</code></p>
+        </div>
+        <div class="card">
+          <div class="card-title">MemoryAdapter</div>
+          <p>Recall/remember context or knowledge from Mnemosyne.</p>
+          <p style="margin-top:8px"><code>lib/adapters/memory-adapter.mjs</code></p>
+        </div>
+      </div>
+
+      <h3>Implementations</h3>
+      <table class="param-table" style="margin-top:16px">
+        <thead><tr><th>Path</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td class="name">adapters/multica/</td><td>Real, live-default implementation backed by the <code>multica</code> CLI (<code>execFileSync</code>).</td></tr>
+          <tr><td class="name">adapters/stub/</td><td>In-memory test doubles. <code>createStubBacklogAdapter(seedData)</code> + <code>createStubSpawnAdapter()</code>. Zero external calls.</td></tr>
+          <tr><td class="name">adapters/pantheon-v2-l2/</td><td>Intentionally-unbuilt stub — the only sanctioned future path from Auriga into a Pantheon L2 host. Not production code yet.</td></tr>
+          <tr><td class="name">adapters/mnemosyne/</td><td>Real Mnemosyne-backed MemoryAdapter (HTTP recall/remember).</td></tr>
+        </tbody>
+      </table>
+
+      <h3>No speculative methods</h3>
+      <p class="prose">Neither <code>BacklogAdapter</code> nor <code>SpawnAdapter</code> has any method that <code>cycle()</code> doesn't actually consume today. Do not add methods speculatively. Every method in these contracts exists because the real dispatch loop calls the equivalent capability. When a new need arises, add the method in the story that needs it.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- CONFIG SPLIT -->
+    <section class="doc-section" id="config-split">
+      <h2>Configuration split</h2>
+      <p class="prose">Configuration is split into two files to separate policy (what the router decides) from substrate (who it routes to and where):</p>
+
+      <table class="param-table">
+        <thead><tr><th>File</th><th>Contains</th><th>Who changes it</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">lib/config.mjs</td>
+            <td>Policy: CAPS, HUMAN_NAMES, REVIEW_SQUAD_RULES, RUNTIME_CAP mutations</td>
+            <td>Routing policy changes (cycle behavior, review sizing)</td>
+          </tr>
+          <tr>
+            <td class="name">lib/config-substrate.mjs</td>
+            <td>Substrate: AGENTS, PROJECT_IDS, PROJECT_NAMES, lane maps (PROJECT_LANE, HIVE_LANE, DEFAULT_LANE, REVIEW_LANE), REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS</td>
+            <td>Tenant/deployment changes (new agents, new projects, lane rewiring)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="prose" style="margin-top:16px">An optional external JSON override file can replace any key in either module via the <code>AURIGA_CONFIG</code> environment variable. Only keys present in the override file are replaced — absent keys keep their defaults. This allows per-deployment overrides without forking the config source.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- PANTHEON INTEGRATION -->
+    <section class="doc-section" id="pantheon-integration">
+      <h2>Pantheon integration</h2>
+      <p class="prose">In a Pantheon deployment, Auriga runs as a Docker container service defined in the <a href="https://github.com/mdostal/pantheon-v2" target="_blank" rel="noopener">pantheon-v2</a> compose stack. The container image is built from a plain git checkout of this repo at <code>${AURIGA_LOCAL_PATH:-./plugins/auriga}</code>.</p>
+
+      <div class="callout callout-warn">
+        <p class="callout-title">Images don't auto-update</p>
+        <p>Nothing rebuilds the container image automatically when this repo's <code>main</code> branch gets a new commit. A merged fix sitting unreachable in a stale running container is a real incident that has already happened (see <a href="https://github.com/mdostal/auriga/issues/76" target="_blank" rel="noopener">#76</a>). Use the git hook or manual redeploy process — see <a href="guides.html#pantheon-integration">Guides: Pantheon integration</a>.</p>
+      </div>
+
+      <h3>pantheon-v2-l2 stub</h3>
+      <p class="prose">The <code>adapters/pantheon-v2-l2/</code> directory is the intentionally-unbuilt stub for Auriga's future direct integration with the Pantheon L2 host (bypassing the external Multica CLI). It is the <em>only</em> sanctioned path for Auriga to call into Pantheon internals. It is not production code yet — the stub exists to hold the interface contract, not to be wired in.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- REPO LAYOUT -->
+    <section class="doc-section" id="repo-layout">
+      <h2>Repo layout</h2>
+      <pre class="code-block">auriga/
+├── src/
+│   ├── router/                 <span class="c"># The auto-router (production)</span>
+│   │   ├── auriga-router.mjs   <span class="c"># Entrypoint, exports cycle()</span>
+│   │   ├── supervisor.sh       <span class="c"># Single-instance supervisor</span>
+│   │   ├── bin/auriga.mjs      <span class="c"># CLI subcommands</span>
+│   │   ├── lib/
+│   │   │   ├── core.mjs        <span class="c"># Pure decision logic</span>
+│   │   │   ├── config.mjs      <span class="c"># Policy config</span>
+│   │   │   ├── config-substrate.mjs  <span class="c"># Substrate config</span>
+│   │   │   ├── config-loader.mjs     <span class="c"># External JSON override</span>
+│   │   │   └── adapters/       <span class="c"># BacklogAdapter, SpawnAdapter, MemoryAdapter</span>
+│   │   ├── agents/             <span class="c"># Agent instruction files</span>
+│   │   ├── scripts/            <span class="c"># Export human queue, launchd install</span>
+│   │   └── test/               <span class="c"># Unit + e2e tests</span>
+│   ├── server/                 <span class="c"># Read-only API over .pHive/ state</span>
+│   └── ui/                     <span class="c"># Operator dashboard (Vite + Tailwind)</span>
+├── docs/                       <span class="c"># GitHub Pages source (this site)</span>
+│   ├── index.html              <span class="c"># Project page</span>
+│   └── docs/                   <span class="c"># Full documentation</span>
+├── scripts/                    <span class="c"># Repo-root convenience scripts</span>
+├── install/                    <span class="c"># Git hooks for Pantheon auto-redeploy</span>
+└── .pHive/                     <span class="c"># Planning state (epics, stories, audits)</span></pre>
+    </section>
+
+  </main>
+</div>
+
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>
