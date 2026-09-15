@@ -539,15 +539,15 @@ export async function cycle(opts = {}) {
         // the cycle (matches zombie_error/unblock_unassign_error convention).
         logImpl('zombie_give_up', { ...z, applied: !dryRun });
         if (!dryRun) {
+          try { backlog.setIssueStatus(z.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked', error: e.message }); }
           try {
             backlog.commentOnIssue(
               z.identifier,
-              `Auriga auto-retried this issue ${cfgImpl.CAPS.zombieMaxAttempts} time(s) and it is still stuck ` +
-              'in_progress with no successful run. Giving up on further automatic zombie-recovery attempts ' +
-              '(bounded-retry stopgap — see t001-zombie-give-up) to avoid looping forever. This needs manual ' +
-              'attention: please investigate and manually rerun/reassign when ready.'
+              `Auriga auto-retried this issue ${cfgImpl.CAPS.zombieMaxAttempts} time(s) and it is still stuck with no successful run.\n` +
+              'Giving up on further automatic retry attempts (bounded-retry stopgap).\n' +
+              'Status set to `blocked` — a human must review and manually re-trigger or reassign.'
             );
-          } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'comment', error: e.message }); }
         }
         continue;
       }
