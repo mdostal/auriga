@@ -585,6 +585,79 @@
   footer .foot-links a:hover{ color:var(--capella); border-color:var(--capella-line); }
   footer .foot-links .sep{ color:var(--line-hair); margin:0 8px; }
 
+  /* ============================= CAPABILITY CARDS ============================= */
+  .cap-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));
+    gap:16px;
+  }
+  .cap-card{
+    padding:26px 24px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    transition:border-color .15s ease, background .15s ease;
+  }
+  .cap-card:hover{ border-color:var(--capella-line); background:var(--bg-plate-raised); }
+  .cap-card .cap-icon{
+    width:36px; height:36px;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--capella-soft);
+    border:1px solid var(--capella-line);
+    border-radius:var(--radius-md);
+    margin-bottom:16px;
+  }
+  .cap-card .cap-icon svg{ width:18px; height:18px; fill:none; color:var(--capella); }
+  .cap-card .cap-title{ font-size:16px; color:var(--ink-1); font-weight:600; font-family:var(--font-ui); margin-bottom:10px; }
+  .cap-card .cap-desc{ font-size:14px; color:var(--ink-2); line-height:1.75; }
+
+  /* ============================= OPEN-SOURCE CALLOUT ============================= */
+  .oss-callout{
+    margin-top:36px;
+    padding:20px 24px;
+    background:var(--capella-soft);
+    border:1px solid var(--capella-line);
+    border-left:3px solid var(--capella);
+    border-radius:0 var(--radius-md) var(--radius-md) 0;
+    max-width:var(--measure);
+  }
+  .oss-callout p{ font-size:15px; color:var(--ink-2); line-height:1.7; }
+  .oss-callout p b{ color:var(--ink-1); }
+
+  /* ============================= PANTHEON GOD LIST ============================= */
+  .god-list{ display:flex; flex-direction:column; gap:10px; }
+  .god-row{
+    display:flex; align-items:center; gap:18px;
+    padding:18px 22px;
+    background:var(--bg-plate);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    transition:border-color .15s ease;
+  }
+  .god-row:hover{ border-color:var(--line-hair-soft); }
+  .god-row.is-auriga{ border-color:var(--capella-line); background:var(--bg-plate-raised); }
+  .god-badge{
+    flex:none; width:36px; height:36px;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--bg-inset);
+    border:1px solid var(--line-hair);
+    border-radius:var(--radius-md);
+    font-family:var(--font-mono); font-size:11px; color:var(--ink-2);
+  }
+  .god-row.is-auriga .god-badge{ background:var(--capella-soft); border-color:var(--capella-line); color:var(--capella); }
+  .god-body{ flex:1; min-width:0; }
+  .god-name{ font-size:15px; color:var(--ink-1); font-weight:600; font-family:var(--font-ui); }
+  .god-row.is-auriga .god-name{ color:var(--capella); }
+  .god-role{ font-size:13px; color:var(--ink-2); margin-top:2px; }
+  .god-tag{
+    flex:none;
+    font-family:var(--font-mono); font-size:11px; color:var(--ink-3);
+    padding:4px 10px;
+    border:1px solid var(--line-hair);
+    border-radius:12px;
+  }
+  .god-row.is-auriga .god-tag{ color:var(--capella); border-color:var(--capella-line); background:var(--capella-soft); }
+
   /* ============================= RESPONSIVE ============================= */
   @media (max-width:640px){
     .hero h1{ font-size:38px; }
@@ -594,6 +667,9 @@
     .tl-when{ width:auto; }
     .plate-nav a{ padding:12px 12px 10px; }
     .step{ flex-direction:column; }
+    .cap-grid{ grid-template-columns:1fr; }
+    .god-row{ flex-wrap:wrap; gap:10px; }
+    .god-tag{ display:none; }
   }
 </style>
 </head>
@@ -674,7 +750,7 @@
     <p class="sync">Sample board shown below — a static illustration, not a live feed. Run Auriga locally against your own data.</p>
     <div class="cta-row" style="justify-content:center;">
       <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
-      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">Read the docs <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="/auriga/docs/">Read the docs <span class="arrow">↗</span></a>
       <a class="btn btn-ghost" href="#install">Get started <span class="arrow">↓</span></a>
     </div>
   </header>
@@ -697,9 +773,134 @@
     <p class="lede">A swarm of agents building software needs a single thing deciding <em>who</em> does <em>what</em> and <em>when</em> — otherwise tickets pile up unassigned, hive-authored stories get routed to runtimes that can't run them, and a single overloaded runtime collapses throughput to zero. Auriga is that decision layer.</p>
     <p class="lede">Concretely, each cycle it: recovers zombies (stale or failed in-progress work), advances issue status from verifiable board facts alone — a finished run moves a ticket to review, but only a <em>merged</em> pull request marks it done, run status is never trusted on its own — then selects a small, capacity-capped batch of unassigned todos and routes each one by capability, respecting per-agent and per-runtime caps so it never mass-flips the board. Work flagged for a human is filtered out before any of that logic runs. Auriga only ever assigns and re-runs work; it never deletes or cancels — and every routing decision underneath is pure, deterministic, and unit-tested against mocked board state, not left to chance.</p>
 
+    <div class="oss-callout">
+      <p><b>Auriga is open source.</b> Drop it into any Multica-backed workflow, extend the routing policy, swap the adapter backend, or just read the decision logic — every routing choice is pure, deterministic, and unit-tested. Zero vendor lock-in by design.</p>
+    </div>
+
     <div class="cta-row">
       <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">github.com/mdostal/auriga <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="/auriga/docs/">Read the docs <span class="arrow">↗</span></a>
       <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">README &amp; architecture <span class="arrow">↗</span></a>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- CAPABILITIES -->
+  <!-- ============================================================= -->
+  <section id="capabilities" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">How it works</p>
+      <h2>Key capabilities</h2>
+      <p class="desc">Four pillars of Auriga's routing logic — all deterministic, all unit-tested against mocked board state, no runtime guessing.</p>
+    </div>
+
+    <div class="cap-grid">
+      <div class="cap-card">
+        <div class="cap-icon">
+          <!-- route / dispatch icon: branching arrow -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M15 8l4 4-4 4"/><path d="M5 6l4-2M5 18l4 2"/></svg>
+        </div>
+        <p class="cap-title">Capability-aware routing</p>
+        <p class="cap-desc">Each ticket is matched to the lane and agent best suited to handle it. Auriga reads the board's structural signals — issue type, tags, project scope — and routes deterministically. No heuristics, no LLM calls, no guessing: pure policy code you can read and test.</p>
+      </div>
+
+      <div class="cap-card">
+        <div class="cap-icon">
+          <!-- state machine / clock icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        </div>
+        <p class="cap-title">State machine transitions</p>
+        <p class="cap-desc">Auriga advances issue status from verifiable board facts alone. A finished run moves a ticket to review — but only a <em>merged pull request</em> marks it done. Run status is never trusted on its own. The transition rules are a small, pure function you can unit-test in isolation from any external service.</p>
+      </div>
+
+      <div class="cap-card">
+        <div class="cap-icon">
+          <!-- grid / capacity icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        </div>
+        <p class="cap-title">Capacity discipline</p>
+        <p class="cap-desc">Per-agent and per-runtime caps ensure Auriga never mass-flips the board in a single cycle. Each dispatch pass selects a small, capacity-capped batch. Work flagged for a human is filtered out before any routing logic runs. The board stays legible and stable under load.</p>
+      </div>
+
+      <div class="cap-card">
+        <div class="cap-icon">
+          <!-- refresh / recovery icon -->
+          <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 4v6h6"/><path d="M23 20v-6h-6"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
+        </div>
+        <p class="cap-title">Zombie recovery</p>
+        <p class="cap-desc">Auriga detects stale or failed in-progress work — tickets stuck in a terminal-looking state with no recent activity — and recovers them automatically. Retries are capped. When a ticket exhausts its retry budget, Auriga marks it blocked with a comment explaining why, rather than silently giving up.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= -->
+  <!-- PANTHEON CONTEXT -->
+  <!-- ============================================================= -->
+  <section id="pantheon" class="plate rail">
+    <div class="plate-head">
+      <p class="eyebrow">Pantheon</p>
+      <h2>Where Auriga sits in the constellation</h2>
+      <p class="desc">Auriga is one god in a coordinated agent swarm. Each god owns a distinct responsibility in the SDLC pipeline.</p>
+    </div>
+
+    <div class="god-list">
+      <div class="god-row">
+        <div class="god-badge">Mi</div>
+        <div class="god-body">
+          <p class="god-name">Minerva</p>
+          <p class="god-role">Planning &amp; decomposition — breaks operator asks into scoped epics and sub-issues, upstream of Auriga</p>
+        </div>
+        <span class="god-tag">upstream</span>
+      </div>
+
+      <div class="god-row is-auriga">
+        <div class="god-badge">Au</div>
+        <div class="god-body">
+          <p class="god-name">Auriga</p>
+          <p class="god-role">Routing &amp; dispatch — senses the work board each cycle and routes every ticket to the right lane and agent</p>
+        </div>
+        <span class="god-tag">you are here</span>
+      </div>
+
+      <div class="god-row">
+        <div class="god-badge">He</div>
+        <div class="god-body">
+          <p class="god-name">Heimdall</p>
+          <p class="god-role">Lane gateway &amp; token routing — manages provider lanes, rate-limit recovery, and request throughput</p>
+        </div>
+        <span class="god-tag">infra</span>
+      </div>
+
+      <div class="god-row">
+        <div class="god-badge">Hl</div>
+        <div class="god-body">
+          <p class="god-name">Hellsing</p>
+          <p class="god-role">Zombie &amp; worker reaping — terminates stuck or runaway agent processes across the swarm</p>
+        </div>
+        <span class="god-tag">ops</span>
+      </div>
+
+      <div class="god-row">
+        <div class="god-badge">Co</div>
+        <div class="god-body">
+          <p class="god-name">Consus</p>
+          <p class="god-role">Ideation &amp; sign-off — manages the idea pipeline from operator prompt to approved issue</p>
+        </div>
+        <span class="god-tag">upstream</span>
+      </div>
+
+      <div class="god-row">
+        <div class="god-badge">Ar</div>
+        <div class="god-body">
+          <p class="god-name">Argus</p>
+          <p class="god-role">Observability — monitors swarm health, surfacing anomalies and pipeline stalls</p>
+        </div>
+        <span class="god-tag">observability</span>
+      </div>
+    </div>
+
+    <div class="cta-row">
+      <a class="btn btn-ghost" href="https://github.com/mdostal/pantheon-v2" target="_blank" rel="noopener">Pantheon on GitHub <span class="arrow">↗</span></a>
     </div>
   </section>
 
@@ -1057,17 +1258,23 @@ node index.mjs
 
     <div class="cta-row">
       <a class="btn btn-primary" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">View source on GitHub <span class="arrow">↗</span></a>
-      <a class="btn btn-ghost" href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">Full README <span class="arrow">↗</span></a>
+      <a class="btn btn-ghost" href="/auriga/docs/">Full docs <span class="arrow">↗</span></a>
     </div>
   </section>
 
   <footer>
     <svg class="glyph-small" viewBox="0 0 24 24"><use href="#star4"/></svg>
-    Auriga · Pantheon Router — public showcase
+    Auriga · Pantheon Router — open source
     <div class="foot-links">
       <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
       <span class="sep">·</span>
+      <a href="/auriga/docs/">Docs</a>
+      <span class="sep">·</span>
       <a href="https://github.com/mdostal/auriga/blob/main/README.md" target="_blank" rel="noopener">README</a>
+      <span class="sep">·</span>
+      <a href="https://github.com/mdostal/pantheon-v2" target="_blank" rel="noopener">Pantheon</a>
+      <span class="sep">·</span>
+      <a href="https://github.com/mdostal/auriga/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
     </div>
   </footer>
 </div>
