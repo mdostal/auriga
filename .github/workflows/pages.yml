@@ -1,0 +1,54 @@
+name: Deploy Pages
+# Safe, non-destructive GitHub Pages deploy using actions/deploy-pages (artifact-based).
+# Never calls mkdocs gh-deploy --force; never pushes to any branch.
+# Assembles one _site artifact: project page at / and MkDocs docs at /docs/.
+# MkDocs step is conditional on mkdocs/mkdocs.yml existing — safe to run
+# before PANT-194 creates the docs infrastructure.
+#
+# One-time operator step after merging this PR:
+#   Repo Settings → Pages → Source → "GitHub Actions"  (change from "Deploy from a branch")
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site root (project page + install script)
+        run: |
+          mkdir -p _site/docs
+          cp docs/index.html _site/
+          cp docs/install.sh _site/
+
+      - name: Build MkDocs docs
+        if: hashFiles('mkdocs/mkdocs.yml') != ''
+        run: |
+          pip install mkdocs-material
+          mkdocs build -f mkdocs/mkdocs.yml -d "${{ github.workspace }}/_site/docs"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
