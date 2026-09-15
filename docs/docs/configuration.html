@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — Configuration</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga configuration reference: environment variables, CAPS, HUMAN_NAMES, REVIEW_SQUAD_RULES, agent config, and external overrides." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html">Overview</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="configuration.html" class="active">Configuration</a>
+      <a href="api.html">API Reference</a>
+      <a href="guides.html">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">Configuration</span>
+      <ul class="sidebar-nav">
+        <li><a href="#env-vars" class="current">Environment variables</a></li>
+        <li><a href="#caps">CAPS</a></li>
+        <li><a href="#human-names">HUMAN_NAMES</a></li>
+        <li><a href="#review-squad-rules">REVIEW_SQUAD_RULES</a></li>
+        <li><a href="#agents">AGENTS</a></li>
+        <li><a href="#runtime-cap">RUNTIME_CAP</a></li>
+        <li><a href="#lane-config">Lane configuration</a></li>
+        <li><a href="#external-override">External JSON override</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Other sections</span>
+      <ul class="sidebar-nav">
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="api.html">API Reference</a></li>
+        <li><a href="guides.html">Guides</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">Configuration</p>
+      <h1>Configuration reference</h1>
+      <p class="doc-intro">All knobs that control Auriga's routing behavior — environment variables, batch caps, human filter, review squad rules, agent registry, and runtime capacity.</p>
+    </header>
+
+    <!-- ENV VARS -->
+    <section class="doc-section" id="env-vars">
+      <h2>Environment variables</h2>
+      <p class="prose">These are read at startup and override defaults without requiring a code change.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Effect</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">AURIGA_CONFIG</td>
+            <td class="default">—</td>
+            <td>Path to an optional JSON override file. Any key present replaces the corresponding export from <code>config.mjs</code> or <code>config-substrate.mjs</code>. Absent keys keep defaults.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_PER_CYCLE_TOTAL</td>
+            <td class="default">5</td>
+            <td>Max new dispatches per cycle. Overrides <code>CAPS.perCycleTotal</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_PER_CYCLE_PER_AGENT</td>
+            <td class="default">2</td>
+            <td>Max dispatches to a single agent per cycle. Overrides <code>CAPS.perCyclePerAgent</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_CYCLE_MS</td>
+            <td class="default">75000</td>
+            <td>Sleep between cycles in milliseconds. Overrides <code>CAPS.cycleMs</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_PIDFILE</td>
+            <td class="default">/tmp/auriga-router.pid</td>
+            <td>Path to the pidfile that enforces single-instance locking.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_LOG</td>
+            <td class="default">/tmp/auriga-router.log</td>
+            <td>Path to the human-readable log file.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_MEMORY_ADAPTER</td>
+            <td class="default">mnemosyne</td>
+            <td>Which MemoryAdapter implementation to use. Set to <code>stub</code> for local testing without a live Mnemosyne instance.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-note">
+        <p class="callout-title">Log files</p>
+        <p>In addition to <code>AURIGA_LOG</code>, the router also writes a structured JSONL log at <code>/tmp/auriga-router.jsonl</code> (not overridable). The supervisor has its own log at <code>/tmp/auriga-supervisor.log</code> and <code>/tmp/auriga-supervisor.pid</code>.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- CAPS -->
+    <section class="doc-section" id="caps">
+      <h2>CAPS</h2>
+      <p class="prose">The <code>CAPS</code> object in <code>lib/config.mjs</code> controls all cycle timing and per-cycle dispatch limits. Every cap is a hard bound — once hit, no further mutations of that type happen in that cycle. Can be overridden entirely via the <code>AURIGA_CONFIG</code> external file.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead>
+          <tr><th>Key</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">perCyclePerAgent</td>
+            <td class="default">2</td>
+            <td>Max new dispatches to a single agent within one cycle. Prevents any one agent from being mass-assigned.</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleTotal</td>
+            <td class="default">5</td>
+            <td>Max new dispatches across all agents in one cycle.</td>
+          </tr>
+          <tr>
+            <td class="name">cycleMs</td>
+            <td class="default">75000</td>
+            <td>Milliseconds to sleep between cycles.</td>
+          </tr>
+          <tr>
+            <td class="name">zombieStaleMs</td>
+            <td class="default">1200000 (20 min)</td>
+            <td>Age in ms at which an in_progress issue with no run activity is considered a zombie.</td>
+          </tr>
+          <tr>
+            <td class="name">zombieMaxAttempts</td>
+            <td class="default">3</td>
+            <td>Max times a zombie is re-queued before giving up and setting it to <code>blocked</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">verifyDelayMs</td>
+            <td class="default">6000</td>
+            <td>Milliseconds to wait after assigning an issue before verifying a run actually started.</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleReview</td>
+            <td class="default">1</td>
+            <td>Max review squad dispatches per cycle. Kept tight because review runs share the Claude account.</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleFalseDone</td>
+            <td class="default">3</td>
+            <td>Max false-done corrections (done → in_review) per cycle.</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleCascade</td>
+            <td class="default">5</td>
+            <td>Max cascade (completed issue → dependent enqueue) operations per cycle.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre class="code-block"><span class="c">// Example: external override file to slow the cycle</span>
+{
+  "CAPS": {
+    "perCycleTotal": 3,
+    "cycleMs": 120000,
+    "zombieMaxAttempts": 2
+  }
+}</pre>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- HUMAN NAMES -->
+    <section class="doc-section" id="human-names">
+      <h2>HUMAN_NAMES</h2>
+      <p class="prose">The list of human names that trigger the human-todo filter. An issue with <code>waiting_on: &lt;value&gt;</code> in its metadata is excluded from agent dispatch if <code>value</code> case-insensitively contains any name in this list.</p>
+
+      <pre class="code-block"><span class="c">// Default in lib/config.mjs</span>
+export const HUMAN_NAMES = _ext.HUMAN_NAMES ?? ['mathew', 'dostal'];
+
+<span class="c">// Override via AURIGA_CONFIG:</span>
+{ "HUMAN_NAMES": ["mathew", "dostal", "alice"] }</pre>
+
+      <p class="prose" style="margin-top:16px">Add a name here when a new human joins the team and needs issues flagged for their attention routed to the human queue instead of an agent lane. See <a href="concepts.html#human-filter">Human-todo filter</a> for full semantics.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- REVIEW SQUAD RULES -->
+    <section class="doc-section" id="review-squad-rules">
+      <h2>REVIEW_SQUAD_RULES</h2>
+      <p class="prose">The explicit, inspectable rule table that <code>reviewSquadPlan(issue, cfg)</code> uses to size the review squad for each ticket. Keyword lists classify issues into tiers; the tier determines which perspectives run and whether Playwright is required.</p>
+
+      <pre class="code-block"><span class="c">// lib/config.mjs — edit keyword lists to change how tickets are sized</span>
+export const REVIEW_SQUAD_RULES = _ext.REVIEW_SQUAD_RULES ?? {
+  ui: [<span class="s">'ui'</span>, <span class="s">'ux'</span>, <span class="s">'page'</span>, <span class="s">'react'</span>, <span class="s">'dashboard'</span>, <span class="s">'css'</span>, ...],
+  backend: [<span class="s">'api'</span>, <span class="s">'endpoint'</span>, <span class="s">'router'</span>, <span class="s">'service'</span>, <span class="s">'schema'</span>, ...],
+  light: [<span class="s">'docs'</span>, <span class="s">'readme'</span>, <span class="s">'chore'</span>, <span class="s">'config'</span>, <span class="s">'typo'</span>, ...],
+  tiers: {
+    full:     { product: true,  technical: true, qa: true, ux: true,  playwright: true  },
+    backend:  { product: true,  technical: true, qa: true, ux: false, playwright: false },
+    light:    { product: false, technical: true, qa: true, ux: false, playwright: false },
+    standard: { product: true,  technical: true, qa: true, ux: true,  playwright: true  },
+  },
+};</pre>
+
+      <p class="prose" style="margin-top:16px">Classification scans the issue title and description for keywords. The first matching tier wins. If no keyword matches, the issue gets the <code>standard</code> tier (full four perspectives). No code change is needed to tune the keyword lists — update them in the override file via <code>AURIGA_CONFIG</code>.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- AGENTS -->
+    <section class="doc-section" id="agents">
+      <h2>AGENTS</h2>
+      <p class="prose">The agent registry in <code>lib/config-substrate.mjs</code>. Maps agent IDs (Multica UUIDs) to agent metadata used during dispatch.</p>
+
+      <pre class="code-block"><span class="c">// Each entry in AGENTS:</span>
+{
+  <span class="s">"&lt;uuid&gt;"</span>: {
+    name:       <span class="s">"auriga-build"</span>,    <span class="c">// display name</span>
+    runtime:    <span class="s">"claude"</span>,          <span class="c">// runtime bucket for RUNTIME_CAP</span>
+    maxInflight: 3,                   <span class="c">// max concurrent in_progress issues</span>
+    lane:       <span class="s">"hive"</span>,            <span class="c">// routing lane (optional — overrides PROJECT_LANE)</span>
+  }
+}</pre>
+
+      <p class="prose" style="margin-top:16px">Add an entry here when a new agent joins the swarm. The <code>runtime</code> field must match a key in <code>RUNTIME_CAP</code>. The <code>maxInflight</code> per-agent cap is checked independently of the per-runtime cap — both must have room for an issue to be dispatched to that agent.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- RUNTIME CAP -->
+    <section class="doc-section" id="runtime-cap">
+      <h2>RUNTIME_CAP</h2>
+      <p class="prose">A map from runtime bucket name to the maximum number of concurrently in_progress issues that bucket can hold. Defined in <code>config-substrate.mjs</code> and mutated in <code>config.mjs</code> to add the review bucket.</p>
+
+      <pre class="code-block"><span class="c">// config-substrate.mjs — base runtime caps</span>
+export let RUNTIME_CAP = {
+  claude:          4,
+  codex:           6,
+  opencode:        4,
+  'claude-planning': 1,
+};
+
+<span class="c">// config.mjs — review gets its own bucket</span>
+RUNTIME_CAP['claude-review'] = 1;</pre>
+
+      <p class="prose" style="margin-top:16px">The runtime cap check is: count the in_progress issues assigned to all agents in the same runtime bucket, then compare against the cap. If the bucket is full, no further dispatches happen to any agent in that bucket this cycle.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- LANE CONFIG -->
+    <section class="doc-section" id="lane-config">
+      <h2>Lane configuration</h2>
+      <p class="prose">Lane maps are in <code>config-substrate.mjs</code>. They determine which Multica agent lane receives each dispatched story.</p>
+
+      <table class="param-table">
+        <thead><tr><th>Export</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">PROJECT_LANE</td>
+            <td>Map from Multica project ID → lane name. Defines which lane stories from each project go to.</td>
+          </tr>
+          <tr>
+            <td class="name">DEFAULT_LANE</td>
+            <td>Fallback lane when no PROJECT_LANE entry matches (used for non-hive stories).</td>
+          </tr>
+          <tr>
+            <td class="name">HIVE_LANE</td>
+            <td>Lane used for hive stories (requires Claude + plugin-hive).</td>
+          </tr>
+          <tr>
+            <td class="name">REVIEW_LANE</td>
+            <td>Lane used for review squad dispatches.</td>
+          </tr>
+          <tr>
+            <td class="name">REVIEW_REPO_OWNER</td>
+            <td>GitHub org/user to search for PRs linked to in_review issues.</td>
+          </tr>
+          <tr>
+            <td class="name">REVIEW_SEARCH_REPOS</td>
+            <td>List of repo names to search for linked PRs (within REVIEW_REPO_OWNER).</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- EXTERNAL OVERRIDE -->
+    <section class="doc-section" id="external-override">
+      <h2>External JSON override</h2>
+      <p class="prose">Set <code>AURIGA_CONFIG=/path/to/override.json</code> to a JSON file with partial overrides. Only keys present in the file replace the in-source defaults — absent keys keep their values from the source files.</p>
+
+      <pre class="code-block"><span class="c"># Start with a custom config file</span>
+AURIGA_CONFIG=/etc/auriga/prod.json node src/router/auriga-router.mjs</pre>
+
+      <pre class="code-block"><span class="c">// /etc/auriga/prod.json — only override what differs from defaults</span>
+{
+  "CAPS": {
+    "perCycleTotal": 8,
+    "cycleMs": 60000
+  },
+  "HUMAN_NAMES": ["mathew", "dostal", "alice"],
+  "RUNTIME_CAP": {
+    "claude": 6,
+    "claude-review": 2
+  }
+}</pre>
+
+      <p class="prose" style="margin-top:16px">The override is processed at startup by <code>lib/config-loader.mjs</code> via <code>loadExternalConfig()</code>. If the file path is invalid or the file is malformed JSON, the router logs a warning and uses the built-in defaults.</p>
+
+      <div class="callout callout-warn">
+        <p class="callout-title">Not a merge — a replace</p>
+        <p>If you override <code>CAPS</code>, you must provide all CAPS keys you want to keep — the external value completely replaces the in-source default for that key. Partially overriding nested objects is not supported; the whole top-level key is replaced.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>

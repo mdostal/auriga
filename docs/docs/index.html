@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — Overview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga documentation: the router god of Pantheon's multi-agent SDLC pipeline." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- TOP NAV -->
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html" class="active">Overview</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="configuration.html">Configuration</a>
+      <a href="api.html">API Reference</a>
+      <a href="guides.html">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<!-- LAYOUT -->
+<div class="doc-layout">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">Overview</span>
+      <ul class="sidebar-nav">
+        <li><a href="#what-is-auriga" class="current">What is Auriga?</a></li>
+        <li><a href="#pantheon-role">Pantheon role</a></li>
+        <li><a href="#sibling-gods">Sibling gods</a></li>
+        <li><a href="#key-properties">Key properties</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Quick links</span>
+      <ul class="sidebar-nav">
+        <li><a href="concepts.html">Core Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="configuration.html">Configuration</a></li>
+        <li><a href="api.html">API Reference</a></li>
+        <li><a href="guides.html">Guides</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">Pantheon · Router &amp; Dispatch</p>
+      <h1>Auriga</h1>
+      <p class="doc-intro">Auriga is the routing god of the Pantheon multi-agent SDLC pipeline. It senses the shared work board and dispatches each unit of work to the right agent lane — the orchestrating layer between planned stories and the swarm that builds them.</p>
+    </header>
+
+    <!-- WHAT IS AURIGA -->
+    <section class="doc-section" id="what-is-auriga">
+      <h2>What is Auriga?</h2>
+      <p class="prose">Auriga is a standalone Node.js service that continuously monitors a <a href="https://github.com/firefly-events/multica" target="_blank" rel="noopener">Multica</a> work board and dispatches unassigned tickets to Pantheon swarm agents. It is the PM/router of the pipeline: it decides <em>who</em> does <em>what</em> and <em>when</em>, without ever writing code itself.</p>
+      <p class="prose" style="margin-top:14px">The routing core is pure, deterministic JavaScript — given issue/run/PR shapes as inputs, it produces routing decisions as outputs. No framework, no async loops inside the decision logic, no network calls from the core. This makes every routing rule unit-testable against mocked board state without touching a live Multica instance.</p>
+
+      <div class="card" style="margin-top:24px">
+        <div class="card-title">The Charioteer</div>
+        <p>The name comes from the constellation Auriga, the Charioteer, anchored by Capella — the sixth-brightest star in the sky. Auriga drives the agents (the "horses") of Pantheon, steering work from the board to the swarm and back.</p>
+      </div>
+
+      <h3>What Auriga does each cycle</h3>
+      <p class="prose">On every cycle (default: every 75 seconds), Auriga runs a single bounded pass:</p>
+      <ol class="prose" style="padding-left:22px; margin-top:12px;">
+        <li style="margin-bottom:10px"><strong>Zombie recovery</strong> — finds stale or failed in-progress issues and re-queues them (up to <code>zombieMaxAttempts</code>).</li>
+        <li style="margin-bottom:10px"><strong>Status advancement</strong> — moves <code>in_progress → in_review</code> when a run completes, and <code>in_review → done</code> when the linked PR merges. Pure board-fact derivation, no run-status trust.</li>
+        <li style="margin-bottom:10px"><strong>Review dispatch</strong> — fires the review squad for <code>in_review</code> stories with open PRs (the "back-half" of the loop).</li>
+        <li style="margin-bottom:10px"><strong>Todo dispatch</strong> — selects a capacity-capped batch of unassigned todos, routes each by capability and lane, assigns, verifies a run started.</li>
+        <li><strong>Sleep</strong> — waits <code>cycleMs</code> before the next cycle.</li>
+      </ol>
+      <p class="prose" style="margin-top:14px">A pidfile lock ensures exactly one router process is alive at a time, even if the supervisor starts multiple instances.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- PANTHEON ROLE -->
+    <section class="doc-section" id="pantheon-role">
+      <h2>Pantheon role</h2>
+      <p class="prose">Pantheon is a swarm of coordinated AI agents building software together. Each god owns its own repo and fills a specific orchestration role:</p>
+
+      <div class="card" style="margin-top:20px">
+        <div class="card-title">Work flows like this</div>
+        <pre class="code-block" style="margin:0; background:transparent; border:none; padding:0; font-size:13px">Consus (ideation) → Minerva (planning) → Multica board → Auriga (routing) → swarm agents → in_review → Auriga review squad → merged PR → done</pre>
+      </div>
+
+      <p class="prose" style="margin-top:20px">Auriga sits between the Multica board and the agent swarm. Stories are planned by Minerva upstream, land on the Multica board as <code>todo</code> issues, and Auriga drains them to the appropriate agent lanes. When an agent completes work and opens a PR, Auriga's review dispatch fires the back-half: the review squad runs, and either ships (merges) or sends the story back with concrete feedback.</p>
+      <p class="prose" style="margin-top:14px">Auriga also runs as a standalone open-source tool — its adapter interface lets it work with any backlog system that implements the <code>BacklogAdapter</code> contract, not just Multica.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- SIBLING GODS -->
+    <section class="doc-section" id="sibling-gods">
+      <h2>Sibling gods</h2>
+
+      <table class="param-table">
+        <thead>
+          <tr><th>God</th><th>Role</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="name">Minerva</td><td>Planning — decomposes operator seeds into stories for Auriga to route</td></tr>
+          <tr><td class="name">Consus</td><td>Ideation → sign-off — produces operator-reviewed seeds that land on the board</td></tr>
+          <tr><td class="name">Heimdall</td><td>Lane gateway / token routing — manages AI provider lanes Auriga dispatches into</td></tr>
+          <tr><td class="name">Hellsing</td><td>Zombie/worker reaping — handles stale agents Auriga's own recovery can't reach</td></tr>
+          <tr><td class="name">Argus</td><td>Observability — monitors what Auriga routes and what the swarm produces</td></tr>
+          <tr><td class="name">Mnemosyne</td><td>Memory service — provides recall/remember context via Auriga's MemoryAdapter</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- KEY PROPERTIES -->
+    <section class="doc-section" id="key-properties">
+      <h2>Key properties</h2>
+
+      <h3>Pure decision core</h3>
+      <p class="prose">The routing logic in <code>lib/core.mjs</code> is a pure function: given issue/run/PR shapes, it returns decisions. No I/O, no side effects, no network calls. This makes every routing rule unit-testable and auditable independently of the board it routes.</p>
+
+      <h3>Adapter-interface boundary</h3>
+      <p class="prose">Auriga never calls Multica directly from its decision core. All board access goes through the <code>BacklogAdapter</code> / <code>SpawnAdapter</code> boundary, with in-memory stubs for tests and real Multica-backed implementations for production. This seam is how Auriga stays portable and how future boards can be supported without touching the routing policy.</p>
+
+      <h3>No force — only assign</h3>
+      <p class="prose">Auriga only ever assigns and re-runs work. It never deletes issues, cancels runs, or force-merges PRs. Every routing decision is bounded by explicit caps (per-cycle, per-agent, per-runtime) so it never mass-flips the board.</p>
+
+      <h3>Board-fact status machine</h3>
+      <p class="prose">Issue status is never advanced based on run status alone. <code>in_progress → in_review</code> requires a completed run; <code>in_review → done</code> requires a merged PR. Run status is explicitly not trusted as a completion signal — a prior production incident drove this constraint.</p>
+
+      <div class="callout callout-tip" style="margin-top:28px">
+        <p class="callout-title">Where to go next</p>
+        <p>Read <a href="concepts.html">Core Concepts</a> for a deeper look at the routing cycle, state machine, and review squad. Then <a href="architecture.html">Architecture</a> for the component structure and adapter model.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- FOOTER -->
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>
