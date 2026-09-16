@@ -33,11 +33,9 @@ jobs:
           cp docs/index.html _site/
           cp docs/install.sh _site/
 
-      - name: Build MkDocs docs
-        if: hashFiles('mkdocs/mkdocs.yml') != ''
-        run: |
-          pip install mkdocs-material
-          mkdocs build -f mkdocs/mkdocs.yml -d "${{ github.workspace }}/_site/docs"
+      - name: Copy bespoke HTML docs
+        if: hashFiles('docs/docs/index.html') != ''
+        run: cp -r docs/docs/. _site/docs/
 
       - uses: actions/upload-pages-artifact@v3
         with:
