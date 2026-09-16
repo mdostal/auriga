@@ -245,3 +245,8 @@ pre { margin: 0; }
   .sidebar { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line-hair-faint); padding: 20px 24px; }
   .doc-main { padding: 32px 24px 60px; }
 }
+
+@media (max-width: 640px) {
+  .topnav-links { display: none; }
+  .topnav-gh { display: none; }
+}
