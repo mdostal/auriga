@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — Core Concepts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Core concepts of Auriga: routing cycle, state machine, capacity model, human filter, and review squad." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- TOP NAV -->
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html">Overview</a>
+      <a href="concepts.html" class="active">Concepts</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="configuration.html">Configuration</a>
+      <a href="api.html">API Reference</a>
+      <a href="guides.html">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">Core Concepts</span>
+      <ul class="sidebar-nav">
+        <li><a href="#routing-cycle" class="current">The routing cycle</a></li>
+        <li><a href="#state-machine">State machine</a></li>
+        <li><a href="#capacity-model">Capacity model</a></li>
+        <li><a href="#capability-routing">Capability routing</a></li>
+        <li><a href="#human-filter">Human-todo filter</a></li>
+        <li><a href="#review-squad">Review squad</a></li>
+        <li><a href="#zombie-recovery">Zombie recovery</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Other sections</span>
+      <ul class="sidebar-nav">
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="configuration.html">Configuration</a></li>
+        <li><a href="api.html">API Reference</a></li>
+        <li><a href="guides.html">Guides</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">Core Concepts</p>
+      <h1>How Auriga thinks</h1>
+      <p class="doc-intro">The routing cycle, state machine transitions, capacity model, human-todo filter, review squad, and zombie recovery — the core mechanisms that drive every dispatch decision.</p>
+    </header>
+
+    <!-- ROUTING CYCLE -->
+    <section class="doc-section" id="routing-cycle">
+      <h2>The routing cycle</h2>
+      <p class="prose"><code>cycle()</code> is the core function exported from <code>auriga-router.mjs</code>. It runs one complete scan-and-dispatch pass. In production, <code>main()</code> calls it in a <code>while(true)</code> loop separated by <code>sleep(cfg.CAPS.cycleMs)</code>. Each pass runs exactly this sequence:</p>
+
+      <pre class="code-block">1. acquireLock()                  <span class="c">// pidfile — single-instance safety</span>
+2. detectZombies()                 <span class="c">// find stale in_progress → requeue or give up</span>
+3. detectRunCompletions()          <span class="c">// in_progress → in_review on run done</span>
+4. detectVerifiedDone()            <span class="c">// in_review → done on PR merged</span>
+5. detectCascadeCompletions()      <span class="c">// enqueue dependents of newly-done issues</span>
+6. detectFalseDone()               <span class="c">// wrongly-done → in_review correction</span>
+7. reviewDispatch()                <span class="c">// fire review squad for in_review + open PR</span>
+8. selectAssignments()             <span class="c">// pick unassigned todos for this cycle</span>
+9. assignAndVerify() per pick      <span class="c">// assign, check a run actually started</span></pre>
+
+      <p class="prose" style="margin-top:16px">Steps 2–6 are pure status-machine passes derived entirely from live board state. Steps 7–9 are the dispatch passes. The cycle is always bounded: each step has an explicit cap on how many mutations it can make per cycle, so a single bad run can never mass-flip the board.</p>
+
+      <div class="callout callout-note">
+        <p class="callout-title">Pure inputs, pure outputs</p>
+        <p><code>cycle()</code> accepts injectable adapters (<code>backlog</code>, <code>spawn</code>, <code>cfg</code>, <code>core</code>, <code>log</code>, <code>sleep</code>) so tests can drive the entire cycle against mocked board state without any real Multica CLI calls. The decision logic in <code>lib/core.mjs</code> is always pure — no adapter calls inside core, ever.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- STATE MACHINE -->
+    <section class="doc-section" id="state-machine">
+      <h2>State machine</h2>
+      <p class="prose">Issue status transitions are driven entirely by verifiable board facts — not by trusting what a run or agent reports about itself. This is a deliberate constraint from a past incident where run-status trust caused false completions.</p>
+
+      <h3>Transitions Auriga drives</h3>
+      <table class="param-table" style="margin-top:16px">
+        <thead>
+          <tr><th>From</th><th>To</th><th>Condition</th><th>Source</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">todo</td>
+            <td class="name">in_progress</td>
+            <td>Auriga assigns the issue to an agent and verifies a run started</td>
+            <td><code>assignAndVerify</code></td>
+          </tr>
+          <tr>
+            <td class="name">in_progress</td>
+            <td class="name">in_review</td>
+            <td>Issue's latest run is done and not failed (<code>classifyRun().done</code>)</td>
+            <td><code>detectRunCompletions</code></td>
+          </tr>
+          <tr>
+            <td class="name">in_review</td>
+            <td class="name">done</td>
+            <td>A PR linked to the issue has <code>state === 'merged'</code> or non-null <code>merged_at</code></td>
+            <td><code>detectVerifiedDone</code></td>
+          </tr>
+          <tr>
+            <td class="name">in_progress</td>
+            <td class="name">blocked</td>
+            <td>Zombie recovery exhausted max attempts</td>
+            <td><code>detectZombies</code></td>
+          </tr>
+          <tr>
+            <td class="name">in_review</td>
+            <td class="name">in_review</td>
+            <td>Review squad sends story back (changes required)</td>
+            <td><code>reviewDispatch</code></td>
+          </tr>
+          <tr>
+            <td class="name">done</td>
+            <td class="name">in_review</td>
+            <td>Issue marked done without a merged PR (<code>detectFalseDone</code>)</td>
+            <td><code>detectFalseDone</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-warn" style="margin-top:24px">
+        <p class="callout-title">Run status is never trusted alone</p>
+        <p><code>in_review → done</code> requires a merged PR. A completed run alone does not mark an issue done — this constraint prevents false completions when a run finishes but the PR is not yet merged or was closed without merging.</p>
+      </div>
+
+      <h3>Idempotency</h3>
+      <p class="prose">Every transition scan re-derives its candidate set from live board state each cycle. A transitioned issue falls out of its source filter next cycle by definition — no explicit "already processed" tracking is needed.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- CAPACITY MODEL -->
+    <section class="doc-section" id="capacity-model">
+      <h2>Capacity model</h2>
+      <p class="prose">Auriga enforces a layered capacity model to prevent mass-dispatch and to keep the Claude account from being saturated by a burst of simultaneous agent runs.</p>
+
+      <h3>Cap layers</h3>
+      <table class="param-table">
+        <thead>
+          <tr><th>Cap</th><th>What it limits</th><th>Config key</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">perCycleTotal</td>
+            <td>Max new dispatches per full cycle</td>
+            <td><code>CAPS.perCycleTotal</code> (default: 5)</td>
+          </tr>
+          <tr>
+            <td class="name">perCyclePerAgent</td>
+            <td>Max dispatches to a single agent per cycle</td>
+            <td><code>CAPS.perCyclePerAgent</code> (default: 2)</td>
+          </tr>
+          <tr>
+            <td class="name">maxInflight (agent)</td>
+            <td>Max concurrently in_progress issues per agent</td>
+            <td><code>AGENTS[id].maxInflight</code></td>
+          </tr>
+          <tr>
+            <td class="name">RUNTIME_CAP</td>
+            <td>Max concurrently in_progress issues per runtime bucket</td>
+            <td><code>RUNTIME_CAP[bucket]</code></td>
+          </tr>
+          <tr>
+            <td class="name">perCycleReview</td>
+            <td>Max review dispatches per cycle (back-half)</td>
+            <td><code>CAPS.perCycleReview</code> (default: 1)</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleFalseDone</td>
+            <td>Max false-done corrections per cycle</td>
+            <td><code>CAPS.perCycleFalseDone</code> (default: 3)</td>
+          </tr>
+          <tr>
+            <td class="name">perCycleCascade</td>
+            <td>Max cascade (dependent) enqueues per cycle</td>
+            <td><code>CAPS.perCycleCascade</code> (default: 5)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Runtime buckets</h3>
+      <p class="prose">Agents are grouped into runtime buckets (e.g. <code>claude</code>, <code>claude-review</code>, <code>claude-planning</code>). Each bucket has its own <code>RUNTIME_CAP</code> so review dispatches don't compete with build-lane dispatches for the same Claude account slots.</p>
+
+      <pre class="code-block"><span class="c">// Example: review agent gets its own bucket, capped at 1</span>
+RUNTIME_CAP['claude-review'] = 1;
+
+<span class="c">// Build lane agents share the 'claude' bucket (default cap)</span>
+RUNTIME_CAP['claude'] = 4; <span class="c">// set in config-substrate.mjs</span></pre>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- CAPABILITY ROUTING -->
+    <section class="doc-section" id="capability-routing">
+      <h2>Capability routing</h2>
+      <p class="prose">Not every agent can run every kind of work. Auriga classifies each issue as a "hive story" or not, and routes accordingly.</p>
+
+      <h3>Hive stories</h3>
+      <p class="prose">A hive story is one authored for the <code>plugin-hive</code> SDLC workflow (<code>/hive:execute</code>, <code>/hive:review</code>, <code>/hive:test</code>). Only Claude+plugin-hive lanes can run hive stories — Codex/Opencode lanes do not have the plugin-hive install. <code>isHiveStory(issue, cfg)</code> detects this from the issue's content.</p>
+
+      <h3>Lane selection</h3>
+      <table class="param-table">
+        <thead><tr><th>Issue type</th><th>Lane</th><th>Config key</th></tr></thead>
+        <tbody>
+          <tr><td>Hive story</td><td>Claude + plugin-hive</td><td><code>HIVE_LANE</code></td></tr>
+          <tr><td>Non-hive story</td><td>Default (Codex/Opencode)</td><td><code>DEFAULT_LANE</code></td></tr>
+          <tr><td>in_review + open PR</td><td>Review squad</td><td><code>REVIEW_LANE</code></td></tr>
+        </tbody>
+      </table>
+
+      <p class="prose" style="margin-top:16px">Lane maps are configured in <code>config-substrate.mjs</code> as <code>PROJECT_LANE</code> — a map from Multica project ID to the lane for that project's stories. This lets different Pantheon tenants or gods route to different lane pools.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- HUMAN FILTER -->
+    <section class="doc-section" id="human-filter">
+      <h2>Human-todo filter</h2>
+      <p class="prose">Some issues are flagged for human attention, not agent dispatch. Auriga's priority-1 filter excludes these from the dispatch pool before any lane or capacity logic runs.</p>
+
+      <h3>How an issue becomes human-todo</h3>
+      <p class="prose">An issue is a human-todo if it carries the label <code>human-todo</code>, or if its metadata includes <code>waiting_on: &lt;human name&gt;</code> where the name matches one of the configured <code>HUMAN_NAMES</code> (matched case-insensitively, substring OK).</p>
+
+      <div class="callout callout-tip">
+        <p class="callout-title">Dependency waiting_on</p>
+        <p><code>waiting_on</code> values that don't match a known human name (e.g. an issue identifier like <code>PAN-1234</code>, meaning "waiting on that dependency to complete") are <strong>not</strong> treated as human-todo — the issue stays in the normal dispatch pool.</p>
+      </div>
+
+      <h3>Human queue export</h3>
+      <p class="prose">Human-todo issues are never just silently dropped. Run the export script to write them to <code>.pHive/human-queue.yaml</code> for a human to triage:</p>
+      <pre class="code-block"><span class="c"># from repo root</span>
+node scripts/export-human-queue.mjs
+
+<span class="c"># or from src/router/</span>
+node ../../scripts/export-human-queue.mjs</pre>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- REVIEW SQUAD -->
+    <section class="doc-section" id="review-squad">
+      <h2>Review squad</h2>
+      <p class="prose">When an issue enters <code>in_review</code> with an open PR, Auriga fires the review squad — the "back-half" of the loop. The squad runs four perspectives and either ships the PR (merge to <code>dev</code> + story <code>done</code>) or sends it back with concrete per-perspective feedback.</p>
+
+      <h3>The four perspectives</h3>
+      <table class="param-table">
+        <thead><tr><th>Perspective</th><th>What it judges</th><th>How</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">product (PO)</td>
+            <td>Does the diff satisfy the story's intent and acceptance criteria?</td>
+            <td>Reads ticket vs delivered diff</td>
+          </tr>
+          <tr>
+            <td class="name">technical</td>
+            <td>Correctness, conventions, security, maintainability</td>
+            <td><code>/hive:review</code> on the real diff</td>
+          </tr>
+          <tr>
+            <td class="name">qa</td>
+            <td>True verification — not a diff read</td>
+            <td>Checks out branch, runs real build + tests, Playwright/E2E</td>
+          </tr>
+          <tr>
+            <td class="name">ux</td>
+            <td>User-facing surface quality + accessibility</td>
+            <td><code>/hive:design-review</code> / visual QA against running UI</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Squad sizing (scale by ticket type)</h3>
+      <p class="prose">Running the full four perspectives on every ticket wastes resources. Auriga's <code>reviewSquadPlan(issue, cfg)</code> classifies the issue from <code>REVIEW_SQUAD_RULES</code> and drops inapplicable perspectives:</p>
+
+      <table class="param-table" style="margin-top:16px">
+        <thead><tr><th>Tier</th><th>Signal</th><th>Perspectives</th><th>Playwright</th></tr></thead>
+        <tbody>
+          <tr><td class="name">full</td><td>User-facing / UI signals (react, page, dashboard, css…)</td><td>All four</td><td>On</td></tr>
+          <tr><td class="name">backend</td><td>Headless API/service signals (endpoint, router, service…)</td><td>product + technical + qa</td><td>Off</td></tr>
+          <tr><td class="name">light</td><td>Docs/chore/config signals (readme, typo, chore…)</td><td>technical + qa-smoke</td><td>Off</td></tr>
+          <tr><td class="name">standard</td><td>No decisive signal (safe default)</td><td>All four</td><td>On</td></tr>
+        </tbody>
+      </table>
+
+      <p class="prose" style="margin-top:16px">The plan (tier, perspectives, playwright flag) is logged and posted as a comment on the ticket before the squad runs — so what the squad will do is always visible up front.</p>
+
+      <div class="callout callout-note">
+        <p class="callout-title">Never force-merges</p>
+        <p>The review squad merges only when every enabled perspective is PASS and QA actually ran. Any CHANGES verdict sends the story back to <code>todo</code> with per-perspective feedback. It never force-merges a failing PR.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- ZOMBIE RECOVERY -->
+    <section class="doc-section" id="zombie-recovery">
+      <h2>Zombie recovery</h2>
+      <p class="prose">A zombie is an <code>in_progress</code> issue whose run has stalled, failed, or simply gone quiet for longer than <code>zombieStaleMs</code> (default: 20 minutes). Auriga's <code>detectZombies()</code> pass recovers them each cycle.</p>
+
+      <h3>Recovery behavior</h3>
+      <ol class="prose" style="padding-left:22px; margin-top:12px">
+        <li style="margin-bottom:10px"><strong>Detect</strong> — find in_progress issues where the latest run is done/failed or stale past the threshold.</li>
+        <li style="margin-bottom:10px"><strong>Requeue</strong> — if attempts &lt; <code>zombieMaxAttempts</code> (default: 3), re-assign and re-run the issue.</li>
+        <li><strong>Give up</strong> — if max attempts exhausted, set status to <code>blocked</code> and post a comment explaining why. Never silently drops — always leaves a visible record.</li>
+      </ol>
+
+      <div class="callout callout-warn">
+        <p class="callout-title">Bounded retries</p>
+        <p>Without a cap, a genuinely broken story would be re-queued indefinitely. <code>zombieMaxAttempts</code> bounds this — after the cap is hit, the issue becomes <code>blocked</code> and requires human attention to unblock.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>
