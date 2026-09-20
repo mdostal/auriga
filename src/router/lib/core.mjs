@@ -486,9 +486,36 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
 
+  // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
+  // single in_review ticket that can never actually RESOLVE out of in_review
+  // (e.g. a planning-only ticket with no PR ever coming, or one detectFalseDone
+  // keeps bouncing done->in_review because a build agent lied about opening a
+  // PR) would otherwise re-consume the lone slot every cycle forever, starving
+  // every OTHER genuinely-reviewable in_review ticket sitting behind it in scan
+  // order (live-reproduced: PANT-208 oscillated done/in_review for over an hour
+  // while PANT-255..260 sat completely unreviewed).
+  //
+  // Mirrors detectZombies' own precedent exactly (see zombieMaxAttempts above):
+  // runsByIssue already gives us each issue's own accumulated run count for
+  // free — a natural, stateless "how many turns has this ticket already had"
+  // signal, no new persisted state and no GitHub call required. Below the
+  // fairness threshold, candidates are considered in the caller's given order,
+  // unchanged (Array#sort is stable). At/over it, a ticket is deprioritized
+  // behind every ticket still under threshold; it's only reconsidered once
+  // nothing under-threshold qualifies this cycle, so it's slowed, never
+  // starved outright, while every other real in_review ticket gets first
+  // crack at the slot.
+  const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
+  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).length;
+  const ordered = [...inReviewIssues].sort((a, b) => {
+    const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
+    const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
+    return ea - eb;
+  });
+
   const actions = [];
   const projected = {};
-  for (const i of inReviewIssues) {
+  for (const i of ordered) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
     const runs = runsByIssue[i.identifier] || [];

@@ -614,6 +614,70 @@ test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', (
   assert.equal(full.length, 0);
 });
 
+// ---- GH #102: anti-starvation fairness ------------------------------------
+// A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
+// keeps bouncing done->in_review because a build agent lied about a PR) can
+// never actually resolve out of in_review. With perCycleReview capped at 1,
+// selectReviewDispatch used to just walk inReviewIssues in caller order and
+// dispatch the FIRST one that qualified -- so that one ticket re-consumed the
+// lone slot every single cycle forever, starving every other real in_review
+// ticket sitting behind it. Live-reproduced: PANT-208 oscillated done/in_review
+// for over an hour while PANT-255..260 sat completely unreviewed.
+
+test('selectReviewDispatch: a ticket at the fairness threshold is deprioritized behind a fresher in_review ticket', () => {
+  const exhausted = inReview('PANT-208', 1); // many accumulated runs, never resolves
+  const fresh = inReview('PANT-255', 2); // brand-new in_review ticket, no runs yet
+  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', completed_at: new Date(NOW - 60_000).toISOString() }));
+  const picks = core.selectReviewDispatch(
+    [exhausted, fresh], { 'PANT-208': manyRuns, 'PANT-255': [] }, CFG, {}, { now: NOW }
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-255'); // fresh ticket wins the lone slot, not the exhausted one
+});
+
+test('selectReviewDispatch: below the fairness threshold, caller order is preserved (no regression)', () => {
+  const a = inReview('PAN-60', 60);
+  const b = inReview('PAN-61', 61);
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-60': [], 'PAN-61': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PAN-60'); // stable order unchanged when neither is exhausted
+});
+
+test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopolize the slot across many cycles — GH #102', () => {
+  // STARVER: every cycle it comes back in_review, unassigned (exactly like a
+  // fresh detectFalseDone demotion), so it always LOOKS like a fresh dispatch
+  // candidate to selectReviewDispatch -- only its accumulated run history (fed
+  // back in below, exactly as the real router would leave runs behind) reveals
+  // that it never actually resolves.
+  const starver = inReview('PANT-208', 208);
+  // Six OTHER genuinely different in_review tickets that need a real review turn.
+  const others = [255, 256, 257, 258, 259, 260].map((n) => inReview(`PANT-${n}`, n));
+
+  const runsByIssue = { 'PANT-208': [] };
+  for (const o of others) runsByIssue[o.identifier] = [];
+
+  const dispatchedOther = new Set();
+  const CYCLES = 40;
+  for (let c = 0; c < CYCLES; c++) {
+    const remainingOthers = others.filter((o) => !dispatchedOther.has(o.identifier));
+    const inReviewNow = [starver, ...remainingOthers];
+    const picks = core.selectReviewDispatch(inReviewNow, runsByIssue, CFG, {}, { now: NOW + c * 1000 });
+    assert.ok(picks.length <= 1); // perCycleReview cap still respected every cycle
+    for (const p of picks) {
+      // A real dispatch always leaves a run behind -- feed that back in so the
+      // fairness signal (accumulated run count) grows exactly like production.
+      runsByIssue[p.identifier].push({ status: 'completed', completed_at: new Date(NOW + c * 1000).toISOString() });
+      if (p.identifier === starver.identifier) continue; // never resolves -- stays in_review
+      dispatchedOther.add(p.identifier); // a real ticket resolved -> leaves in_review
+    }
+    if (dispatchedOther.size === others.length) break;
+  }
+
+  // Every genuinely different in_review ticket eventually got a real dispatch
+  // turn -- not just the starver, forever.
+  assert.equal(dispatchedOther.size, others.length);
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
