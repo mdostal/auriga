@@ -66,10 +66,12 @@ export function computeRuntimeInflight(inflight, agents) {
 }
 
 // Can this agent accept one more, given per-agent and per-runtime caps and
-// already-projected assignments this cycle?
+// already-projected assignments this cycle? Returns false immediately when
+// the agent's runtime is marked offline (available === false, PAN-8645).
 export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
   const a = agents[name];
   if (!a) return false;
+  if (a.available === false) return false; // PAN-8645: offline runtime block
   const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
   if (agentNow >= a.maxInflight) return false;
   const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
@@ -103,6 +105,7 @@ export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
   const eligible = lane.filter((name) => {
     const a = cfg.AGENTS[name];
     if (!a) return false;
+    if (a.available === false) return false; // PAN-8645: offline runtime
     const now = (reviewInflight[name] || 0) + (projected[name] || 0);
     return now < a.maxInflight;
   });

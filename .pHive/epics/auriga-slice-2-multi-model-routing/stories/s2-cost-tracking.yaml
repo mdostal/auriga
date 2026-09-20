@@ -1,0 +1,93 @@
+id: s2-cost-tracking
+epic: auriga-slice-2-multi-model-routing
+title: Add cost tracking and observability for multi-model dispatch
+status: pending
+complexity: medium
+methodology: classic
+
+description: |
+  Instrument the router with cost tracking across all model backends. Each dispatch
+  logs cost (tokens × per-token price), latency, success/failure. Aggregate metrics
+  enable cost monitoring, budget alerts, and routing optimization analysis.
+
+acceptance_criteria:
+  - "Given successful dispatch, when adapter returns, then log cost = tokens × model.costPerToken"
+  - "Given dispatch to any model, when completing, then emit metric with model name, latency, tokens, cost"
+  - "Given hourly window, when querying metrics, then return total cost by model"
+  - "Given cost exceeds threshold, when dispatching, then emit warning (future: circuit breaker)"
+  - "Given routing decision, when logged, then include task type, selected model, fallback chain used"
+
+steps:
+  - id: research
+    description: Review existing observability patterns in router codebase
+    agent: researcher
+  - id: implement
+    description: Add cost calculation to BaseDispatchAdapter, create metrics aggregator module
+    agent: developer
+    depends_on: [research, s2-router-integration]
+  - id: test
+    description: Write tests for cost calculation, metrics emission, aggregation
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review metrics correctness and cost calculation accuracy
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: TypeScript
+    runtime: Node.js
+  key_files:
+    - path: src/router/adapters/BaseDispatchAdapter.ts
+      purpose: Add cost calculation after each dispatch
+    - path: src/auriga/model-registry.ts
+      purpose: Cost-per-token metadata for each model
+
+files_to_modify:
+  - file: src/router/lib/metrics.mjs
+    change: Create new module for cost/latency metric aggregation
+  - file: src/router/adapters/BaseDispatchAdapter.ts
+    change: Add cost calculation and logging after dispatch
+
+code_examples:
+  - title: Cost tracking in adapter
+    snippet: |
+      // In BaseDispatchAdapter.dispatch()
+      async dispatch(prompt: string): Promise<DispatchResult> {
+        const start = Date.now();
+        const result = await this.performDispatch(prompt);
+        const latency = Date.now() - start;
+
+        const cost = result.tokens.total * this.model.costPerToken;
+        this.logMetric({
+          model: this.model.name,
+          latency,
+          tokens: result.tokens,
+          cost
+        });
+
+        return result;
+      }
+
+design_decisions:
+  - decision: Cost per token hardcoded in model registry
+    rationale: Pricing changes infrequently, simpler than live API pricing lookups
+  - decision: Metrics logged to stdout (JSON lines), not persisted
+    rationale: Router is stateless, external log aggregator handles persistence
+  - decision: No automatic circuit breaker on cost threshold in slice-2
+    rationale: Warning only for now, circuit breaker deferred to future observability epic
+
+risks:
+  - severity: medium
+    description: Token count from provider APIs may not match actual billing
+    mitigation: Document metric is estimate, cross-check with provider invoices monthly
+
+depends_on: [s2-router-integration]
+
+parallel_allowed: false

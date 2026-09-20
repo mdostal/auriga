@@ -1,0 +1,89 @@
+id: s2-model-registry
+epic: auriga-slice-2-multi-model-routing
+title: Create model registry with capability profiles
+status: pending
+complexity: low
+methodology: classic
+
+description: |
+  Build the foundational model registry that catalogs available LLM backends
+  (Claude Sonnet/Opus, Codex, Gemini 2.0) with their capability profiles,
+  rate limits, and cost metadata. This is the single source of truth for
+  what models exist and what they can do.
+
+acceptance_criteria:
+  - "Given a model name, when querying the registry, then return its capability profile"
+  - "Given a capability requirement (e.g., 'code-generation'), when querying, then return models that support it"
+  - "Given the registry is loaded, when accessing model metadata, then cost-per-token and rate limits are available"
+  - "Given invalid model name, when querying, then throw descriptive error"
+
+steps:
+  - id: research
+    description: Explore existing registry pattern in src/auriga/registry.ts
+    agent: researcher
+  - id: implement
+    description: Create src/auriga/model-registry.ts with ModelCapability enum and registry class
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write tests covering registry queries, capability lookups, error cases
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review implementation and tests for correctness
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: TypeScript
+    runtime: Node.js
+  key_files:
+    - path: src/auriga/registry.ts
+      purpose: Existing registry pattern to follow for consistency
+    - path: src/auriga/assessor.ts
+      purpose: State assessment pattern that may query model registry
+
+files_to_modify:
+  - file: src/auriga/model-registry.ts
+    change: Create new file with ModelRegistry class, ModelCapability enum, capability profiles
+
+code_examples:
+  - title: Registry pattern from existing code
+    file: src/auriga/registry.ts
+    snippet: |
+      // Follow this class structure for ModelRegistry
+      export class ProjectRegistry {
+        private projects: Map<string, ProjectConfig> = new Map();
+
+        register(id: string, config: ProjectConfig): void {
+          this.projects.set(id, config);
+        }
+
+        get(id: string): ProjectConfig | undefined {
+          return this.projects.get(id);
+        }
+      }
+
+design_decisions:
+  - decision: Use TypeScript enum for ModelCapability
+    rationale: Type-safe capability matching, easy to extend
+  - decision: Hardcode model metadata initially, not config file
+    rationale: Small set of models (3), easier to test, can externalize later
+  - decision: Registry is singleton instance
+    rationale: Single source of truth, consistent with existing registry.ts pattern
+
+risks:
+  - severity: low
+    description: Model metadata may drift from actual provider capabilities
+    mitigation: Document source of truth, add validation tests
+
+depends_on: []
+
+parallel_allowed: true
+parallel_rationale: read-only

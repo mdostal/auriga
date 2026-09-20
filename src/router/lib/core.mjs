@@ -3,6 +3,11 @@
 
 import { isPrMerged } from './github-pr-state.mjs';
 import { ISSUE_STATUS, isTerminalIssueStatus } from './issue-status.mjs';
+import {
+  assignmentFingerprint,
+  assignmentFingerprintMatches,
+  isRouterManagedAssignment,
+} from './fingerprint.mjs';
 import { classifyRun, hasActiveRun, latestRun } from './run-classification.mjs';
 import { storyKey, slugKey, descStoryDeps, descStoryId } from './story-identity.mjs';
 import {
@@ -194,6 +199,25 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
 // Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
 // Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
 // blockedRuntimes: Set of runtime names to skip this cycle (rate-limited lanes).
+function agentNameForAssignee(assigneeId, agents) {
+  if (!assigneeId) return null;
+  const found = Object.entries(agents).find(([, agent]) => agent.id === assigneeId);
+  return found ? found[0] : null;
+}
+
+// Idempotent dispatch decision for a single issue + target agent (PAN-8245).
+// Returns { action: 'assign'|'noop', reason, currentAgent }.
+export function assignmentDecision(issue, targetAgent, cfg, opts = {}) {
+  if (!issue.assignee_id) return { action: 'assign', reason: 'unassigned' };
+  const currentAgent = agentNameForAssignee(issue.assignee_id, cfg.AGENTS);
+  if (currentAgent === targetAgent) return { action: 'noop', reason: 'already-assigned-target', currentAgent };
+  if (!isRouterManagedAssignment(issue)) return { action: 'noop', reason: 'manual-assignment', currentAgent };
+  if (currentAgent && assignmentFingerprintMatches(issue, currentAgent, cfg, opts)) {
+    return { action: 'noop', reason: 'unchanged-router-assignment', currentAgent };
+  }
+  return { action: 'assign', reason: 'changed-router-assignment', currentAgent };
+}
+
 export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const blockedRuntimes = opts.blockedRuntimes || new Set();
   const maxTotal = opts.maxTotal ?? cfg.CAPS.perCycleTotal;
@@ -209,14 +233,16 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
   const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
 
-  // Candidate pool: unassigned, status todo, not smoke/scratch, project in scan set,
-  // NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the human queue instead via
-  // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never dispatch a
-  // decomposed story whose dependency stories aren't done yet — see depsSatisfied).
+  // Candidate pool: unassigned or router-managed assigned, status todo, not smoke/scratch,
+  // project in scan set, NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the
+  // human queue instead via scripts/export-human-queue.mjs), and with its depends_on graph
+  // satisfied (never dispatch a decomposed story whose dependency stories aren't done yet).
+  // Router-managed assigned todos are included so idempotent dispatch can re-evaluate them
+  // (PAN-8245: content changes trigger reassignment; unchanged router assignments noop).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter((i) => !exclude.has(i.identifier))
-    .filter((i) => !i.assignee_id)
+    .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
     .filter((i) => !isHumanTodo(i, cfg))
@@ -287,6 +313,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     }
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
+    const decision = assignmentDecision(issue, agent, cfg, opts);
+    if (decision.action === 'noop') continue;
     if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
 
     // commit projection
@@ -301,6 +329,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
       agent,
       runtime,
+      assignmentFingerprint: assignmentFingerprint(issue, agent, cfg, opts),
+      assignmentReason: decision.reason,
     });
   }
   chosen.handUps = handUps;
@@ -412,6 +442,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
       projectId: i.project_id,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
+      assigneeId: i.assignee_id || null,
       isHive,
       action: (i.assignee_id && !misLaned) ? 'rerun' : 'assign',
       reason: misLaned ? 'hive-on-noncapable-lane'
@@ -826,6 +857,8 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
     if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
+    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue; // already assigned+queued (inflight)
+    if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
@@ -849,4 +882,92 @@ export function detectChangesRequested(changesRequestedIssues) {
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
+}
+
+// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
+// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
+export function isAgentParked(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  return typeof r === 'string' && r.trim() !== '';
+}
+
+// ---- PAN-7492 self-heal: recover assigned-but-idle stories ----
+
+export function agentIdSet(agents = {}) {
+  return new Set(Object.values(agents).map((a) => a && a.id).filter(Boolean));
+}
+
+// Detect assigned `todo` issues that should have dispatched already but are
+// still idle. These do not count as capacity, so recovery is a separate bounded
+// pass instead of part of route selection.
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now()) {
+  const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  const actions = [];
+  for (const i of todoIssues) {
+    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+
+    const touchedAt = i.updated_at || i.created_at;
+    const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
+    if (idleAgeMs < staleMs) continue;
+
+    const runs = runsByIssue[i.identifier] || [];
+    if (hasActiveRun(runs, now, staleMs)) continue;
+    const lr = latestRun(runs);
+    const classified = lr ? classifyRun(lr, now) : null;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      assigneeId: i.assignee_id,
+      projectId: i.project_id,
+      lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+      idleAgeMs,
+      action: 'start',
+      reason: !lr ? 'assigned-todo-no-runs' : (classified.failed ? 'assigned-todo-last-run-failed' : 'assigned-todo-stale'),
+    });
+  }
+  return actions;
+}
+
+// Select this cycle's assigned-idle recoveries — oldest-idle-first, bounded by
+// the SAME capacity math as fresh routing (per-agent maxInflight, per-runtime
+// cap, blocked/rate-limited runtimes) instead of a flat 1-per-agent throttle.
+export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
+  const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
+  const agents = opts.agents || cfg.AGENTS;
+  const agentNameById = opts.agentNameById || Object.fromEntries(
+    Object.entries(agents).map(([name, a]) => [a.id, name])
+  );
+  const blockedRuntimes = opts.blockedRuntimes || new Set();
+  const inflight = opts.inflight || {};
+  const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
+  const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
+  const projected = { perAgent: {}, perRuntime: {} };
+
+  const selected = [];
+  const skipped = [];
+  for (const action of [...actions].sort((a, b) => b.idleAgeMs - a.idleAgeMs)) {
+    const name = agentNameById[action.assigneeId];
+    const agent = name && agents[name];
+    if (!agent) { skipped.push({ ...action, skipReason: 'unknown-agent' }); continue; }
+    if (agent.available === false) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, runtimeId: agent.runtimeId, skipReason: 'runtime-offline' });
+      continue;
+    }
+    if (selected.length >= maxTotal) { skipped.push({ ...action, agent: name, skipReason: 'per-cycle-cap' }); continue; }
+    if (blockedRuntimes.has(agent.runtime)) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'rate-limited' });
+      continue;
+    }
+    if (!agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected)) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'at-capacity' });
+      continue;
+    }
+    projected.perAgent[name] = (projected.perAgent[name] || 0) + 1;
+    projected.perRuntime[agent.runtime] = (projected.perRuntime[agent.runtime] || 0) + 1;
+    selected.push({ ...action, agent: name, runtime: agent.runtime });
+  }
+  return { selected, skipped };
 }

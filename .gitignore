@@ -3,7 +3,7 @@ node_modules/
 *.log
 .DS_Store
 
-# Local Claude Code session/harness runtime bookkeeping — not project state
-.pHive/agent-complete/
-.pHive/interrupts/
-.pHive/metrics/events/
+# Hive epic directories
+.pHive/epics/*
+!.pHive/epics/auriga-slice-2-multi-model-routing/
+!.pHive/epics/auriga-slice-2-multi-model-routing/**

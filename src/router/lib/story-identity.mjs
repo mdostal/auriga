@@ -102,5 +102,10 @@ export function descStoryDeps(issue = {}) {
 export function descStoryId(issue = {}) {
   const desc = issue.description || '';
   const m = desc.match(/(^|\n)\s*id:\s*([a-z0-9][a-z0-9_-]*)/i);
-  return m ? m[2].trim().toLowerCase() : null;
+  if (m) return m[2].trim().toLowerCase();
+  // Fallback: extract from the title bracket "[slug] ..." when no description id: field exists.
+  // Needed for p1-exact-id deps where the dep issue has a title but no Minerva YAML description.
+  const title = issue.title || '';
+  const titleMatch = title.match(/^\s*\[\s*([a-z0-9][a-z0-9_-]*)\s*\]/i);
+  return titleMatch ? titleMatch[1].trim().toLowerCase() : null;
 }

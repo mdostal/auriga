@@ -2,11 +2,21 @@
   "name": "auriga",
   "version": "0.3.0",
   "private": true,
-  "description": "Auriga — Pantheon auto-router. Root test entrypoint so CI's generic Node gate (ci.yml) actually runs the router's unit + loop-level e2e suite.",
+  "type": "module",
+  "description": "Auriga — Pantheon auto-router. Includes Config-Expose API, multi-model dispatch adapters, and resume-judge toolkit.",
+  "bin": {
+    "resume-judge": "./src/tools/resume-judge.ts"
+  },
   "scripts": {
+    "start": "node src/server.mjs",
     "lint": "oxlint --deny-warnings src/router src/server && npm run lint --prefix src/ui",
-    "test": "node --experimental-test-module-mocks --test src/router/test/*.test.mjs",
-    "test:all": "npm run lint && npm test && npm test --prefix src/server && npm run build --prefix src/ui && npm run test:e2e --prefix src/ui && npm run test:e2e:hardening --prefix src/ui"
+    "test": "node --experimental-test-module-mocks --test 'src/api/**/*.test.*' 'src/auriga/**/*.test.*' 'src/domain/**/*.test.*' 'src/repository/**/*.test.*' 'src/router/**/*.test.*' 'src/skills/**/*.test.*' 'src/tools/**/*.test.*' 'scripts/**/*.test.*' 'tests/**/*.test.*'",
+    "test:router": "node --experimental-test-module-mocks --test src/router/test/*.test.mjs",
+    "test:all": "npm run lint && npm test && npm test --prefix src/server && npm run build --prefix src/ui && npm run test:e2e --prefix src/ui && npm run test:e2e:hardening --prefix src/ui",
+    "build": "node --check src/auriga/registry.ts && node --check src/auriga/assessor.ts && node --check src/auriga/generator.ts && node --check src/auriga/hooks.ts && node --check src/auriga/model-registry.ts && node --check src/router/auriga-router.mjs && node --check src/router/lib/multica.mjs && node --check src/router/adapters/ClaudeAdapter.ts && node --check src/router/adapters/index.ts && node --check src/tools/resume-judge.ts && node --check src/tools/index.ts && node --check src/skills/taxonomy.ts && node --check src/domain/Content.ts && node --check src/domain/ContentState.ts && node --check src/domain/ContentType.ts && node --check src/domain/index.ts && node --check src/repository/FileRepository.ts && node --check src/repository/IContentRepository.ts && node --check src/repository/index.ts && node --check src/api/ContentAPI.ts && node --check src/api/index.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "oxlint": "^1.81.0"

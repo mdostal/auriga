@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as core from '../lib/core.mjs';
+import { assignmentMetadata } from '../lib/fingerprint.mjs';
+import * as liveCfg from '../lib/config.mjs';
 
 // Minimal config fixture mirroring lib/config.mjs shape.
 const CFG = {
@@ -72,6 +74,13 @@ test('classifyRun distinguishes active/done/failed', () => {
   assert.equal(core.classifyRun({ status: 'completed', error: 'boom' }, now).failed, true);
 });
 
+test('live config CAPS has required throughput and self-heal fields', () => {
+  assert.ok(typeof liveCfg.CAPS.perCycleTotal === 'number', 'perCycleTotal must be set');
+  assert.ok(typeof liveCfg.CAPS.perCyclePerAgent === 'number', 'perCyclePerAgent must be set');
+  assert.ok(typeof liveCfg.CAPS.assignedIdleStaleMs === 'number', 'assignedIdleStaleMs must be set (PAN-7492)');
+  assert.ok(typeof liveCfg.CAPS.redispatchCooldownMs === 'number', 'redispatchCooldownMs must be set (PAN-7771)');
+});
+
 test('computeInflight counts ONLY assigned+running (not assigned-todo) — P0 deadlock fix', () => {
   const issues = [
     todo('i1', 'AURIGA', 1, 'A'),                                   // assigned todo -> NOT inflight (queued, not running)
@@ -113,6 +122,14 @@ test('agentHasCapacity respects per-agent AND per-runtime caps', () => {
   assert.equal(core.agentHasCapacity('auriga-dev', CFG.AGENTS, CFG.RUNTIME_CAP, inflight, rt, empty), false);
   // opencode has room
   assert.equal(core.agentHasCapacity('heimdall-dev', CFG.AGENTS, CFG.RUNTIME_CAP, {}, {}, empty), true);
+});
+
+test('agentHasCapacity refuses a runtime-unavailable agent', () => {
+  const agents = {
+    ...CFG.AGENTS,
+    'auriga-dev': { ...CFG.AGENTS['auriga-dev'], available: false, runtimeId: 'offline-runtime' },
+  };
+  assert.equal(core.agentHasCapacity('auriga-dev', agents, CFG.RUNTIME_CAP, {}, {}, { perAgent: {}, perRuntime: {} }), false);
 });
 
 test('routing: aligned lanes go to their agent; Consus to claude', () => {
@@ -165,6 +182,41 @@ test('selection ignores smoke/scratch and assigned/backlog issues', () => {
   assert.deepEqual(picks.map((p) => p.identifier), ['a2']);
 });
 
+test('idempotent dispatch preserves manual assignments in the same routing cycle', () => {
+  const issues = [
+    story('m1', 'JANUS', 1, 'EPIC1', 'HC'), // default lane would prefer auriga-dev first
+    story('m2', 'JANUS', 2, 'EPIC1'),
+  ];
+  const picks = core.selectAssignments(issues, CFG, {}, { now: NOW, windowMs: 60_000 });
+  assert.deepEqual(picks.map((p) => p.identifier), ['m2']);
+  assert.equal(picks[0].agent, 'auriga-dev');
+});
+
+test('idempotent dispatch no-ops unchanged router-managed assignments', () => {
+  const base = story('r1', 'JANUS', 1, 'EPIC1', 'HC');
+  const tracked = {
+    ...base,
+    metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
+  assert.equal(picks.length, 0, 'unchanged router-managed assignment should produce no dispatch');
+});
+
+test('idempotent dispatch permits reassignment when router-managed story content changes', () => {
+  const base = story('r2', 'JANUS', 1, 'EPIC1', 'HC');
+  const tracked = {
+    ...base,
+    metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
+    description: 'scope changed after the previous dispatch',
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'r2');
+  assert.equal(picks[0].agent, 'auriga-dev');
+  assert.equal(picks[0].assignmentReason, 'changed-router-assignment');
+  assert.match(picks[0].assignmentFingerprint, /^[a-f0-9]{64}$/);
+});
+
 test('isHumanTodo: matches the human-todo label regardless of case', () => {
   assert.ok(core.isHumanTodo({ labels: ['human-todo'], metadata: {} }, CFG));
   assert.ok(core.isHumanTodo({ labels: ['Human-Todo'], metadata: {} }, CFG));
@@ -212,6 +264,7 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
   assert.equal(byId['z1'], 'assign');
   assert.equal(byId['z2'], 'rerun');
   assert.equal(byId['z3'], undefined); // healthy, active run
+  assert.equal(z.find((a) => a.identifier === 'z2').assigneeId, 'A');
 });
 
 test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
@@ -612,6 +665,19 @@ test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', (
   // Lane already full (one review in flight) -> nothing new dispatched.
   const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(full.length, 0);
+});
+
+test('selectReviewDispatch: does not dispatch to an offline review runtime', () => {
+  const cfg = {
+    ...CFG,
+    AGENTS: {
+      ...CFG.AGENTS,
+      'auriga-review': { ...CFG.AGENTS['auriga-review'], available: false, runtimeId: 'offline-review-runtime' },
+    },
+  };
+  const i = inReview('PAN-RV-OFF', 9);
+  const picks = core.selectReviewDispatch([i], { 'PAN-RV-OFF': [] }, cfg, {}, { now: NOW, openPrIds: new Set(['PAN-RV-OFF']) });
+  assert.deepEqual(picks, []);
 });
 
 // ---- GH #102: anti-starvation fairness ------------------------------------

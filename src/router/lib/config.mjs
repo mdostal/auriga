@@ -34,6 +34,24 @@ export {
   REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
 };
 
+// Task type -> preferred model name (PAN-7938: model selection routing).
+export const MODEL_PREFERENCES = {
+  'code-generation': 'codex',
+  reasoning: 'claude-opus',
+  'long-context': 'gemini-2.0',
+  vision: 'claude-opus',
+  'fast-response': 'claude-sonnet',
+  default: 'claude-sonnet',
+};
+
+// Model name -> ordered fallback list when the preferred model's health check fails (PAN-7938).
+export const MODEL_FALLBACK_CHAINS = {
+  codex: ['claude-sonnet', 'gemini-2.0', 'claude-opus'],
+  'claude-opus': ['claude-sonnet', 'gemini-2.0', 'codex'],
+  'gemini-2.0': ['claude-sonnet', 'codex', 'claude-opus'],
+  'claude-sonnet': ['gemini-2.0', 'codex', 'claude-opus'],
+};
+
 // Known human names for the `waiting_on: <human>` priority-1 dispatch filter
 // (see isHumanTodo in lib/core.mjs). Matched case-insensitively, substring OK
 // (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
@@ -53,6 +71,9 @@ export const CAPS = _ext.CAPS ?? {
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
   perCycleCascade: 5, // CASCADE: at most N completion->dependent enqueues per cycle (bounded self-drain, never a mass fire)
   reviewFairnessMaxAttempts: 3, // GH #102: a ticket with this many+ accumulated runs is deprioritized (not starved) behind fresher in_review tickets for the lone perCycleReview slot (see core.mjs selectReviewDispatch)
+  assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
+  assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
+  redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago (PAN-7771)
 };
 
 // ============================================================================

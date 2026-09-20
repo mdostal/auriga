@@ -1,0 +1,704 @@
+From f16ce8b445676bc6c4194a41549912873e32f098 Mon Sep 17 00:00:00 2001
+From: mdostal <mdostal@ff.events>
+Date: Mon, 27 Jul 2026 01:52:16 -0500
+Subject: [PATCH] PAN-5576: subscribe Auriga to board transitions
+
+Co-authored-by: multica-agent <github@multica.ai>
+---
+ auriga/run.ts                              |  36 ++++
+ auriga/transitions/dispatch-wiring.test.ts |  82 ++++++++
+ auriga/transitions/dispatch-wiring.ts      |  55 +++++
+ auriga/transitions/index.test.ts           | 209 +++++++++++++++++++
+ auriga/transitions/index.ts                | 224 +++++++++++++++++++++
+ 5 files changed, 606 insertions(+)
+ create mode 100644 auriga/transitions/dispatch-wiring.test.ts
+ create mode 100644 auriga/transitions/dispatch-wiring.ts
+ create mode 100644 auriga/transitions/index.test.ts
+ create mode 100644 auriga/transitions/index.ts
+
+diff --git a/auriga/run.ts b/auriga/run.ts
+index 9cf2ee4..607c40c 100644
+--- a/auriga/run.ts
++++ b/auriga/run.ts
+@@ -172,6 +172,8 @@ import { SustainedDeclineDetector, type EscalationRecord } from "./escalation/in
+ import { InstrumentedLock } from "./observability/instrumented-lock.ts";
+ import { deriveCounters, ObservabilityCounterStore } from "./observability/counters.ts";
+ import { HeartbeatWriter, detectPreviousDeath, DeathEventStore } from "./observability/death-detection.ts";
++import { BoardTransitionSubscriber, type BoardTransitionEvent } from "./transitions/index.ts";
++import { wireDispatchEligible, wireReviewEligible } from "./transitions/dispatch-wiring.ts";
+ import type { EventContract } from "../contracts/event.ts";
+ 
+ /** Reads a positive-integer env var override, falling back to `fallback` if unset/invalid. */
+@@ -199,6 +201,12 @@ const SWEEP_INTERVAL_MS = envIntMs("AURIGA_SWEEP_INTERVAL_MS", 30_000);
+ const COUNTERS_INTERVAL_MS = envIntMs("AURIGA_COUNTERS_INTERVAL_MS", 60_000);
+ const ESCALATION_THRESHOLD_COUNT = envIntOrUndefined("AURIGA_ESCALATION_THRESHOLD");
+ const ESCALATION_WINDOW_MS = envIntOrUndefined("AURIGA_ESCALATION_WINDOW_MS");
++const TRANSITION_RECONNECT_DELAY_MS = envIntMs("AURIGA_TRANSITION_RECONNECT_DELAY_MS", 5_000);
++
++/** Auriga's live Multica project id. The transition subscriber must stay
++ * scoped, otherwise workspace-wide issue transitions can dispatch unrelated
++ * projects' work. */
++export const BOARD_TRANSITION_PROJECT_ID = "d78a9f5d-8792-45e8-89e0-bd7b916564ca";
+ 
+ /** Sibling db file to auriga/observability/counters.ts, following that module's own
+  * DEFAULT_DB_PATH/DEFAULT_HEARTBEAT_PATH "alongside this module" convention. */
+@@ -285,6 +293,7 @@ async function main(): Promise<void> {
+   });
+ 
+   const counterStore = new ObservabilityCounterStore(COUNTERS_DB_PATH);
++  let transitionSubscriber: BoardTransitionSubscriber | undefined;
+ 
+   let stopping = false;
+   /** The real stop path -- see header doc, "Escalation wiring". markCleanShutdown()
+@@ -293,6 +302,7 @@ async function main(): Promise<void> {
+     if (stopping) return;
+     stopping = true;
+     console.log(`[run] stopping: markCleanShutdown() then process.exit(${exitCode})`);
++    void transitionSubscriber?.stop();
+     heartbeatWriter.markCleanShutdown();
+     counterStore.close();
+     deathEventStore.close();
+@@ -308,6 +318,30 @@ async function main(): Promise<void> {
+     console.log(`[run] ESCALATED ${JSON.stringify(record)}`);
+   });
+ 
++  // --- Board transition subscription: one cold-start baseline, then
++  // Multica's workspace WebSocket issue:updated frames. This is the primary
++  // real-board trigger path; the synthetic workload below stays only as the
++  // soak-test generator.
++  transitionSubscriber = new BoardTransitionSubscriber({
++    serverUrl: cfg.server_url,
++    workspaceId: cfg.workspace_id,
++    projectId: BOARD_TRANSITION_PROJECT_ID,
++    token: cfg.token,
++    reconnectDelayMs: TRANSITION_RECONNECT_DELAY_MS,
++  });
++  wireDispatchEligible(transitionSubscriber, consumer);
++  wireReviewEligible(transitionSubscriber, {
++    async onReviewEligible(event: BoardTransitionEvent): Promise<void> {
++      console.log(
++        `[verification] review-eligible transition consumed issueId=${event.issueId} previousStatus=${event.previousStatus ?? "(cold-start)"} status=${event.status}`,
++      );
++    },
++  });
++  transitionSubscriber.on("subscription-error", (error: unknown) => {
++    console.error("[transition-subscription] failed:", error);
++  });
++  await transitionSubscriber.start();
++
+   // --- Synthetic workload: see header doc for full rationale ---
+   const preCreatedTaskIssueIds = new Set<string>();
+   let workloadTick = 0;
+@@ -401,6 +435,7 @@ async function main(): Promise<void> {
+     console.log(`[run] received ${signal} -- treating as a human-initiated CLEAN shutdown, not a death`);
+     console.log(`[run] preCreatedTaskIssueIds=${JSON.stringify([...preCreatedTaskIssueIds])}`);
+     console.log(`[run] lockShadowIssueIds=${JSON.stringify(realLock.createdIssueIds)}`);
++    void transitionSubscriber?.stop();
+     clearInterval(workloadTimer);
+     clearInterval(sweepTimer);
+     clearInterval(countersTimer);
+@@ -413,6 +448,7 @@ async function main(): Promise<void> {
+     `[run] auriga/run.ts started. pid=${process.pid} workspace=${cfg.workspace_id} ` +
+       `staleMs=${LOCK_STALE_MS} workloadIntervalMs=${WORKLOAD_INTERVAL_MS} ` +
+       `sweepIntervalMs=${SWEEP_INTERVAL_MS} countersIntervalMs=${COUNTERS_INTERVAL_MS} ` +
++      `transitionProjectId=${BOARD_TRANSITION_PROJECT_ID} transitionReconnectDelayMs=${TRANSITION_RECONNECT_DELAY_MS} ` +
+       `escalationThreshold=${ESCALATION_THRESHOLD_COUNT ?? "default(5)"} ` +
+       `escalationWindowMs=${ESCALATION_WINDOW_MS ?? "default(60000)"}`,
+   );
+diff --git a/auriga/transitions/dispatch-wiring.test.ts b/auriga/transitions/dispatch-wiring.test.ts
+new file mode 100644
+index 0000000..2938290
+--- /dev/null
++++ b/auriga/transitions/dispatch-wiring.test.ts
+@@ -0,0 +1,82 @@
++import { EventEmitter } from "node:events";
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import type { EventContract } from "../../contracts/event.ts";
++import type { BoardTransitionEvent } from "./index.ts";
++import {
++  toDispatchEvent,
++  wireDispatchEligible,
++  wireReviewEligible,
++  type OnEventConsumer,
++  type ReviewTransitionHandler,
++} from "./dispatch-wiring.ts";
++
++class FakeSubscriber extends EventEmitter {}
++
++class RecordingConsumer implements OnEventConsumer {
++  events: EventContract[] = [];
++
++  async onEvent(event: EventContract): Promise<void> {
++    this.events.push(event);
++  }
++}
++
++class RecordingReviewHandler implements ReviewTransitionHandler {
++  events: BoardTransitionEvent[] = [];
++
++  async onReviewEligible(event: BoardTransitionEvent): Promise<void> {
++    this.events.push(event);
++  }
++}
++
++function transition(overrides: Partial<BoardTransitionEvent> = {}): BoardTransitionEvent {
++  return {
++    issueId: "issue-1",
++    projectId: "project-1",
++    previousStatus: "todo",
++    status: "in_progress",
++    timestamp: "2026-07-27T07:00:00.000Z",
++    coldStart: false,
++    ...overrides,
++  };
++}
++
++test("toDispatchEvent preserves the transitioned issue id as payload.taskId", () => {
++  const event = toDispatchEvent(transition());
++
++  assert.equal(event.type, "task.claimable");
++  assert.deepEqual(event.payload, {
++    taskId: "issue-1",
++    previousStatus: "todo",
++    status: "in_progress",
++    coldStart: false,
++  });
++  assert.equal(event.timestamp, "2026-07-27T07:00:00.000Z");
++  assert.equal(event.source, "auriga-run-board-transition-subscriber");
++});
++
++test("wireDispatchEligible calls consumer.onEvent for dispatch transitions", async () => {
++  const subscriber = new FakeSubscriber();
++  const consumer = new RecordingConsumer();
++
++  wireDispatchEligible(subscriber as never, consumer);
++  subscriber.emit("dispatch-eligible", transition({ issueId: "dispatch-issue" }));
++
++  assert.equal(consumer.events.length, 1);
++  assert.deepEqual((consumer.events[0]!.payload as { taskId: string }).taskId, "dispatch-issue");
++});
++
++test("wireReviewEligible calls the review handler for review transitions", async () => {
++  const subscriber = new FakeSubscriber();
++  const handler = new RecordingReviewHandler();
++  const reviewTransition = transition({
++    issueId: "review-issue",
++    previousStatus: "in_progress",
++    status: "in_review",
++  });
++
++  wireReviewEligible(subscriber as never, handler);
++  subscriber.emit("review-eligible", reviewTransition);
++
++  assert.deepEqual(handler.events, [reviewTransition]);
++});
+diff --git a/auriga/transitions/dispatch-wiring.ts b/auriga/transitions/dispatch-wiring.ts
+new file mode 100644
+index 0000000..1a82bda
+--- /dev/null
++++ b/auriga/transitions/dispatch-wiring.ts
+@@ -0,0 +1,55 @@
++import { randomUUID } from "node:crypto";
++import type { EventContract } from "../../contracts/event.ts";
++import type { BoardTransitionEvent, BoardTransitionSubscriber } from "./index.ts";
++
++export interface OnEventConsumer {
++  onEvent(event: EventContract): Promise<void>;
++}
++
++export interface ReviewTransitionHandler {
++  onReviewEligible(event: BoardTransitionEvent): Promise<void>;
++}
++
++export function toDispatchEvent(transition: BoardTransitionEvent): EventContract {
++  return {
++    id: `auriga-run:board-transition:${transition.issueId}:${randomUUID()}`,
++    type: "task.claimable",
++    payload: {
++      taskId: transition.issueId,
++      previousStatus: transition.previousStatus,
++      status: transition.status,
++      coldStart: transition.coldStart,
++    },
++    timestamp: transition.timestamp,
++    source: "auriga-run-board-transition-subscriber",
++  };
++}
++
++export function wireDispatchEligible(
++  subscriber: BoardTransitionSubscriber,
++  consumer: OnEventConsumer,
++): void {
++  subscriber.on("dispatch-eligible", (transition: BoardTransitionEvent) => {
++    const event = toDispatchEvent(transition);
++    console.log(
++      `[transition-dispatch] issueId=${transition.issueId} ${transition.previousStatus ?? "(cold-start)"} -> ${transition.status}`,
++    );
++    void consumer.onEvent(event).catch((error: unknown) => {
++      console.error(`[transition-dispatch] onEvent() failed for issueId=${transition.issueId}:`, error);
++    });
++  });
++}
++
++export function wireReviewEligible(
++  subscriber: BoardTransitionSubscriber,
++  handler: ReviewTransitionHandler,
++): void {
++  subscriber.on("review-eligible", (transition: BoardTransitionEvent) => {
++    console.log(
++      `[transition-review] issueId=${transition.issueId} ${transition.previousStatus ?? "(cold-start)"} -> ${transition.status}`,
++    );
++    void handler.onReviewEligible(transition).catch((error: unknown) => {
++      console.error(`[transition-review] handler failed for issueId=${transition.issueId}:`, error);
++    });
++  });
++}
+diff --git a/auriga/transitions/index.test.ts b/auriga/transitions/index.test.ts
+new file mode 100644
+index 0000000..b8ebff5
+--- /dev/null
++++ b/auriga/transitions/index.test.ts
+@@ -0,0 +1,209 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import {
++  BoardTransitionSubscriber,
++  type BoardTransitionSubscriberConfig,
++  type BoardTransitionEvent,
++  type WebSocketConstructorLike,
++} from "./index.ts";
++
++interface FakeIssue {
++  id: string;
++  status: string;
++  project_id?: string;
++}
++
++function issuesResponse(issues: FakeIssue[]): Response {
++  return new Response(JSON.stringify({ issues }), {
++    status: 200,
++    headers: { "Content-Type": "application/json" },
++  });
++}
++
++class FakeWebSocket {
++  static instances: FakeWebSocket[] = [];
++  onopen: ((event: unknown) => void) | null = null;
++  onmessage: ((event: { data: string }) => void) | null = null;
++  onerror: ((event: unknown) => void) | null = null;
++  onclose: ((event: unknown) => void) | null = null;
++  sent: string[] = [];
++  closed = false;
++
++  constructor(readonly url: string) {
++    FakeWebSocket.instances.push(this);
++  }
++
++  send(data: string): void {
++    this.sent.push(data);
++  }
++
++  close(): void {
++    this.closed = true;
++  }
++
++  open(): void {
++    this.onopen?.({});
++  }
++
++  message(data: unknown): void {
++    this.onmessage?.({ data: JSON.stringify(data) });
++  }
++}
++
++function resetFakeSockets(): void {
++  FakeWebSocket.instances = [];
++}
++
++function baseConfig(
++  overrides: Partial<BoardTransitionSubscriberConfig> = {},
++): BoardTransitionSubscriberConfig {
++  return {
++    serverUrl: "http://fake-multica.test",
++    workspaceId: "ws-1",
++    projectId: "project-1",
++    token: "fake-token",
++    reconnectDelayMs: 1_000,
++    webSocketFactory: FakeWebSocket as unknown as WebSocketConstructorLike,
++    ...overrides,
++  };
++}
++
++test("start loads a one-shot cold-start baseline and emits existing in_progress/in_review work", async (t) => {
++  resetFakeSockets();
++  const requestedUrls: string[] = [];
++  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
++    requestedUrls.push(String(input));
++    return issuesResponse([
++      { id: "dispatch-now", status: "in_progress", project_id: "project-1" },
++      { id: "verify-now", status: "in_review", project_id: "project-1" },
++      { id: "not-ready", status: "todo", project_id: "project-1" },
++      { id: "wrong-project", status: "in_progress", project_id: "project-2" },
++    ]);
++  });
++
++  const subscriber = new BoardTransitionSubscriber(baseConfig());
++  const dispatchEvents: BoardTransitionEvent[] = [];
++  const reviewEvents: BoardTransitionEvent[] = [];
++  subscriber.on("dispatch-eligible", (event: BoardTransitionEvent) => dispatchEvents.push(event));
++  subscriber.on("review-eligible", (event: BoardTransitionEvent) => reviewEvents.push(event));
++
++  await subscriber.start();
++  await subscriber.stop();
++
++  assert.equal(requestedUrls.length, 1, "baseline must be a single GET, not a polling loop");
++  assert.match(requestedUrls[0]!, /\/api\/issues\?workspace_id=ws-1&project_id=project-1$/);
++  assert.deepEqual(dispatchEvents.map((e) => e.issueId), ["dispatch-now"]);
++  assert.deepEqual(reviewEvents.map((e) => e.issueId), ["verify-now"]);
++  assert.equal(dispatchEvents[0]!.coldStart, true);
++  assert.equal(reviewEvents[0]!.coldStart, true);
++});
++
++test("the WebSocket subscription authenticates and consumes todo -> in_progress transition frames immediately", async (t) => {
++  resetFakeSockets();
++  t.mock.method(globalThis, "fetch", async () => issuesResponse([{ id: "issue-1", status: "todo", project_id: "project-1" }]));
++
++  const subscriber = new BoardTransitionSubscriber(baseConfig());
++  const dispatchEvents: BoardTransitionEvent[] = [];
++  subscriber.on("dispatch-eligible", (event: BoardTransitionEvent) => dispatchEvents.push(event));
++
++  await subscriber.start();
++  const socket = FakeWebSocket.instances[0]!;
++  socket.open();
++
++  assert.equal(socket.url, "ws://fake-multica.test/ws?workspace_id=ws-1&client_platform=auriga");
++  assert.deepEqual(JSON.parse(socket.sent[0]!), { type: "auth", payload: { token: "fake-token" } });
++
++  socket.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: true,
++      prev_status: "todo",
++      issue: { id: "issue-1", status: "in_progress", project_id: "project-1" },
++    },
++  });
++  await subscriber.stop();
++
++  assert.equal(dispatchEvents.length, 1);
++  assert.deepEqual(
++    {
++      issueId: dispatchEvents[0]!.issueId,
++      previousStatus: dispatchEvents[0]!.previousStatus,
++      status: dispatchEvents[0]!.status,
++      coldStart: dispatchEvents[0]!.coldStart,
++    },
++    { issueId: "issue-1", previousStatus: "todo", status: "in_progress", coldStart: false },
++  );
++});
++
++test("in_progress -> in_review transition frames drive review eligibility", async (t) => {
++  resetFakeSockets();
++  t.mock.method(globalThis, "fetch", async () =>
++    issuesResponse([{ id: "review-issue", status: "in_progress", project_id: "project-1" }]),
++  );
++
++  const subscriber = new BoardTransitionSubscriber(baseConfig());
++  const reviewEvents: BoardTransitionEvent[] = [];
++  subscriber.on("review-eligible", (event: BoardTransitionEvent) => reviewEvents.push(event));
++
++  await subscriber.start();
++  FakeWebSocket.instances[0]!.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: true,
++      prev_status: "in_progress",
++      issue: { id: "review-issue", status: "in_review", project_id: "project-1" },
++    },
++  });
++  await subscriber.stop();
++
++  assert.equal(reviewEvents.length, 1);
++  assert.equal(reviewEvents[0]!.issueId, "review-issue");
++  assert.equal(reviewEvents[0]!.previousStatus, "in_progress");
++});
++
++test("non-status updates, wrong projects, and duplicate status frames are ignored", async (t) => {
++  resetFakeSockets();
++  t.mock.method(globalThis, "fetch", async () => issuesResponse([{ id: "issue-1", status: "todo", project_id: "project-1" }]));
++
++  const subscriber = new BoardTransitionSubscriber(baseConfig());
++  const transitions: BoardTransitionEvent[] = [];
++  subscriber.on("transition", (event: BoardTransitionEvent) => transitions.push(event));
++
++  await subscriber.start();
++  const socket = FakeWebSocket.instances[0]!;
++  socket.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: false,
++      prev_status: "todo",
++      issue: { id: "issue-1", status: "in_progress", project_id: "project-1" },
++    },
++  });
++  socket.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: true,
++      prev_status: "todo",
++      issue: { id: "wrong-project", status: "in_progress", project_id: "project-2" },
++    },
++  });
++  socket.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: true,
++      prev_status: "todo",
++      issue: { id: "issue-1", status: "in_progress", project_id: "project-1" },
++    },
++  });
++  socket.message({
++    type: "issue:updated",
++    payload: {
++      status_changed: true,
++      prev_status: "todo",
++      issue: { id: "issue-1", status: "in_progress", project_id: "project-1" },
++    },
++  });
++  await subscriber.stop();
++
++  assert.deepEqual(transitions.map((e) => e.issueId), ["issue-1"]);
++});
+diff --git a/auriga/transitions/index.ts b/auriga/transitions/index.ts
+new file mode 100644
+index 0000000..01b88c1
+--- /dev/null
++++ b/auriga/transitions/index.ts
+@@ -0,0 +1,224 @@
++import { EventEmitter } from "node:events";
++
++export interface BoardTransitionSubscriberConfig {
++  serverUrl: string;
++  workspaceId: string;
++  projectId: string;
++  token: string;
++  reconnectDelayMs?: number;
++  webSocketFactory?: WebSocketConstructorLike;
++}
++
++export interface BoardTransitionEvent {
++  issueId: string;
++  projectId: string;
++  previousStatus: string | undefined;
++  status: string;
++  timestamp: string;
++  coldStart: boolean;
++}
++
++interface MulticaIssue {
++  id: string;
++  status: string;
++  project_id?: string | null;
++}
++
++interface IssueUpdatedPayload {
++  issue?: MulticaIssue;
++  status_changed?: boolean;
++  prev_status?: string;
++}
++
++interface WebSocketMessageEventLike {
++  data: string | Buffer | ArrayBuffer;
++}
++
++interface WebSocketLike {
++  onopen: ((event: unknown) => void) | null;
++  onmessage: ((event: WebSocketMessageEventLike) => void) | null;
++  onerror: ((event: unknown) => void) | null;
++  onclose: ((event: unknown) => void) | null;
++  send(data: string): void;
++  close(): void;
++}
++
++export interface WebSocketConstructorLike {
++  new (url: string): WebSocketLike;
++}
++
++const DEFAULT_RECONNECT_DELAY_MS = 5_000;
++const DISPATCH_TRANSITION = { from: "todo", to: "in_progress" };
++const REVIEW_TRANSITION = { from: "in_progress", to: "in_review" };
++
++function asWsUrl(serverUrl: string, workspaceId: string): string {
++  const base = serverUrl.replace(/\/+$/, "");
++  const protocol = base.startsWith("https://") ? "wss://" : "ws://";
++  const withoutProtocol = base.replace(/^https?:\/\//, "");
++  return `${protocol}${withoutProtocol}/ws?workspace_id=${encodeURIComponent(workspaceId)}&client_platform=auriga`;
++}
++
++function defaultWebSocketFactory(): WebSocketConstructorLike {
++  const candidate = (globalThis as { WebSocket?: WebSocketConstructorLike }).WebSocket;
++  if (!candidate) {
++    throw new Error("BoardTransitionSubscriber: global WebSocket is unavailable; pass webSocketFactory in this runtime");
++  }
++  return candidate;
++}
++
++function messageDataToString(data: WebSocketMessageEventLike["data"]): string {
++  if (typeof data === "string") return data;
++  if (Buffer.isBuffer(data)) return data.toString("utf8");
++  return Buffer.from(data).toString("utf8");
++}
++
++function isEligibleTransition(
++  event: BoardTransitionEvent,
++  expected: { from: string; to: string },
++): boolean {
++  if (event.status !== expected.to) return false;
++  return event.coldStart || event.previousStatus === expected.from;
++}
++
++/**
++ * Subscribes Auriga to Multica's existing workspace realtime bus.
++ *
++ * Startup does one baseline issue-list read for this project so already-in-flight
++ * `in_progress` work and already-reviewable `in_review` work are not missed.
++ * After that, `issue:updated` WebSocket frames are the primary trigger. There
++ * is no recurring issue-list poll loop here.
++ */
++export class BoardTransitionSubscriber extends EventEmitter {
++  readonly #serverUrl: string;
++  readonly #workspaceId: string;
++  readonly #projectId: string;
++  readonly #token: string;
++  readonly #reconnectDelayMs: number;
++  readonly #webSocketFactory: WebSocketConstructorLike;
++  readonly #lastKnownStatus = new Map<string, string>();
++  #socket: WebSocketLike | undefined;
++  #reconnectTimer: NodeJS.Timeout | undefined;
++  #stopped = true;
++
++  constructor(config: BoardTransitionSubscriberConfig) {
++    super();
++    this.#serverUrl = config.serverUrl.replace(/\/+$/, "");
++    this.#workspaceId = config.workspaceId;
++    this.#projectId = config.projectId;
++    this.#token = config.token;
++    this.#reconnectDelayMs = config.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
++    this.#webSocketFactory = config.webSocketFactory ?? defaultWebSocketFactory();
++  }
++
++  async start(): Promise<void> {
++    if (!this.#stopped) return;
++    this.#stopped = false;
++    await this.#loadColdStartBaseline();
++    if (this.#stopped) return;
++    this.#connect();
++  }
++
++  async stop(): Promise<void> {
++    this.#stopped = true;
++    if (this.#reconnectTimer) {
++      clearTimeout(this.#reconnectTimer);
++      this.#reconnectTimer = undefined;
++    }
++    const socket = this.#socket;
++    this.#socket = undefined;
++    socket?.close();
++  }
++
++  async #loadColdStartBaseline(): Promise<void> {
++    const url = `${this.#serverUrl}/api/issues?workspace_id=${encodeURIComponent(this.#workspaceId)}&project_id=${encodeURIComponent(this.#projectId)}`;
++    const res = await fetch(url, {
++      headers: { Authorization: `Bearer ${this.#token}` },
++    });
++    if (!res.ok) {
++      throw new Error(`BoardTransitionSubscriber: GET ${url} -> ${res.status}`);
++    }
++    const body = (await res.json()) as { issues: MulticaIssue[] };
++    for (const issue of body.issues) {
++      if (issue.project_id !== this.#projectId) continue;
++      this.#lastKnownStatus.set(issue.id, issue.status);
++      if (issue.status === DISPATCH_TRANSITION.to || issue.status === REVIEW_TRANSITION.to) {
++        this.#emitTransition({
++          issueId: issue.id,
++          projectId: this.#projectId,
++          previousStatus: undefined,
++          status: issue.status,
++          timestamp: new Date().toISOString(),
++          coldStart: true,
++        });
++      }
++    }
++  }
++
++  #connect(): void {
++    const socket = new this.#webSocketFactory(asWsUrl(this.#serverUrl, this.#workspaceId));
++    this.#socket = socket;
++
++    socket.onopen = () => {
++      socket.send(JSON.stringify({ type: "auth", payload: { token: this.#token } }));
++    };
++    socket.onmessage = (event) => {
++      this.#handleFrame(messageDataToString(event.data));
++    };
++    socket.onerror = (event) => {
++      this.emit("subscription-error", event);
++    };
++    socket.onclose = () => {
++      if (this.#socket === socket) this.#socket = undefined;
++      if (!this.#stopped) this.#scheduleReconnect();
++    };
++  }
++
++  #scheduleReconnect(): void {
++    if (this.#reconnectTimer) return;
++    this.#reconnectTimer = setTimeout(() => {
++      this.#reconnectTimer = undefined;
++      if (!this.#stopped) this.#connect();
++    }, this.#reconnectDelayMs);
++  }
++
++  #handleFrame(raw: string): void {
++    let frame: { type?: string; payload?: IssueUpdatedPayload };
++    try {
++      frame = JSON.parse(raw) as { type?: string; payload?: IssueUpdatedPayload };
++    } catch (error) {
++      this.emit("subscription-error", error);
++      return;
++    }
++
++    if (frame.type !== "issue:updated" || !frame.payload?.status_changed || !frame.payload.issue) {
++      return;
++    }
++
++    const issue = frame.payload.issue;
++    if (issue.project_id !== this.#projectId) return;
++
++    const knownPreviousStatus = this.#lastKnownStatus.get(issue.id);
++    if (knownPreviousStatus === issue.status) return;
++
++    const previousStatus = frame.payload.prev_status ?? knownPreviousStatus;
++    this.#lastKnownStatus.set(issue.id, issue.status);
++    this.#emitTransition({
++      issueId: issue.id,
++      projectId: this.#projectId,
++      previousStatus,
++      status: issue.status,
++      timestamp: new Date().toISOString(),
++      coldStart: false,
++    });
++  }
++
++  #emitTransition(event: BoardTransitionEvent): void {
++    this.emit("transition", event);
++    if (isEligibleTransition(event, DISPATCH_TRANSITION)) {
++      this.emit("dispatch-eligible", event);
++    }
++    if (isEligibleTransition(event, REVIEW_TRANSITION)) {
++      this.emit("review-eligible", event);
++    }
++  }
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,90 @@
+id: s2-dispatch-adapter-interface
+epic: auriga-slice-2-multi-model-routing
+title: Define dispatch adapter interface and base implementation
+status: pending
+complexity: low
+methodology: classic
+
+description: |
+  Create the IDispatchAdapter interface that all model-specific adapters will
+  implement. This abstraction allows the router to dispatch to any model backend
+  without knowing provider-specific details. Include a base implementation with
+  common functionality (retry logic, timeout handling, logging).
+
+acceptance_criteria:
+  - "Given a dispatch request, when calling adapter.dispatch(), then return standardized response shape"
+  - "Given adapter initialization, when config is invalid, then throw descriptive error"
+  - "Given network timeout, when dispatching, then retry with exponential backoff up to max attempts"
+  - "Given successful dispatch, when response received, then log model name, latency, token count"
+
+steps:
+  - id: research
+    description: Review existing patterns in src/router/lib/multica.mjs for API client structure
+    agent: researcher
+  - id: implement
+    description: Create src/router/adapters/IDispatchAdapter.ts and BaseDispatchAdapter.ts
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Write tests for BaseDispatchAdapter retry/timeout/logging behavior
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review interface design and base implementation
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: TypeScript
+    runtime: Node.js
+  key_files:
+    - path: src/router/lib/multica.mjs
+      purpose: Existing API client pattern showing error handling and retry logic
+    - path: src/router/lib/core.mjs
+      purpose: Core router logic that will consume the adapter interface
+
+files_to_modify:
+  - file: src/router/adapters/IDispatchAdapter.ts
+    change: Define interface with dispatch(), healthCheck() methods
+  - file: src/router/adapters/BaseDispatchAdapter.ts
+    change: Create abstract base class with retry logic, timeout handling, telemetry
+
+code_examples:
+  - title: Retry pattern from multica client
+    file: src/router/lib/multica.mjs
+    snippet: |
+      // Adapt this retry pattern for BaseDispatchAdapter
+      async function withRetry(fn, maxAttempts = 3) {
+        for (let i = 0; i < maxAttempts; i++) {
+          try {
+            return await fn();
+          } catch (err) {
+            if (i === maxAttempts - 1) throw err;
+            await sleep(Math.pow(2, i) * 1000);
+          }
+        }
+      }
+
+design_decisions:
+  - decision: Use TypeScript interface + abstract base class pattern
+    rationale: Interface defines contract, base class shares common logic across adapters
+  - decision: Standardized response shape includes tokens, latency, cost
+    rationale: Enables centralized observability and cost tracking
+  - decision: Max 3 retry attempts with exponential backoff
+    rationale: Balance reliability vs latency, matches multica client behavior
+
+risks:
+  - severity: medium
+    description: Different providers may have incompatible response shapes
+    mitigation: Adapters translate provider-specific responses to standard shape in their implementation
+
+depends_on: []
+
+parallel_allowed: true
+parallel_rationale: read-only

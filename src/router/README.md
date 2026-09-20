@@ -3,11 +3,6 @@
 The auto-router: the decide+assign layer that self-drains the Multica board by
 routing unassigned todos to Pantheon swarm agents. Runs live on the hive.
 
-This directory is the router only. Its siblings `../server/` (read-only JSON API over
-this repo's own `.pHive/` state) and `../ui/` (the dashboard that API serves) are a
-separate, independent subsystem — see the repo-root [`README.md`](../../README.md) for
-what they are; nothing below concerns them.
-
 ## State-machine transitions (pure code, no agent calls)
 
 Every cycle, before routing new todos, the router also advances issue status
@@ -42,43 +37,6 @@ nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
 (`~/Documents/work/dostal/code/auriga/src/router`) and `NODE` to the mise
 node 24 install. Override via env if needed.
 
-### Reboot survival (launchd)
-
-`supervisor.sh` alone only survives as long as the shell/session that
-launched it. To keep the router alive across logout AND reboot, install it as
-a per-user launchd LaunchAgent:
-
-```sh
-scripts/launchd/install.sh      # installs + loads com.mdostal.auriga-supervisor
-scripts/launchd/uninstall.sh    # stops + removes it
-```
-
-`install.sh` fills in `NODE`/`DIR`/`HOME` for the current machine (override
-via env, same as `supervisor.sh`) from
-`scripts/launchd/com.mdostal.auriga-supervisor.plist.template` and installs
-the result to `~/Library/LaunchAgents/`, with `RunAtLoad` + `KeepAlive` set.
-Check status with `launchctl print gui/$(id -u)/com.mdostal.auriga-supervisor`;
-launchd-level stdout/stderr land in `/tmp/auriga-supervisor-launchd.log`
-(the router's own logs are unaffected — see Files/paths below).
-
-## Testing
-
-`cycle()` (one full scan -> route -> verify pass) is exported from
-`auriga-router.mjs` and accepts an options bag (`mca`, `cfg`, `core`, `log`,
-`sleep`, `dryRun`, `noZombie`, `maxAssign`, `now`) so tests can drive it
-end-to-end against a **mock Multica layer** instead of the live `multica`/`gh`
-CLI — see `test/support/mock-mca.mjs` and `test/router-cycle.e2e.test.mjs`.
-Every dependency defaults to the live singleton, so `main()` (the actual
-daemon loop) calls `cycle()` with no behavior change; `main()` itself only
-runs when this file is executed directly (`isMainModule` guard), never when
-imported by a test.
-
-```sh
-npm test           # from this directory: node --test test/*.test.mjs
-# or from the repo root:
-npm test           # node --test src/router/test/*.test.mjs
-```
-
 ## Human-todo filter (priority-1)
 
 Issues labeled `human-todo`, or carrying metadata `waiting_on: <human name>`
@@ -95,21 +53,83 @@ Excluded issues aren't just dropped — run
 `node scripts/export-human-queue.mjs` (from the repo root) to write them to
 `.pHive/human-queue.yaml` for a human to triage.
 
+## Tree-aware routing
+
+When an issue carries `tree_path` (either as a top-level field or in metadata),
+`selectAssignments` first checks `TREE_AGENT_ATTACHMENTS` in `lib/config.mjs`.
+Attachments on the exact tree path and each ancestor path are eligible, with
+closer paths preferred. For example, a task at
+`firefly-events/events/api` considers agents attached to that path, then
+`firefly-events/events`, then `firefly-events`.
+
+If the issue has no `tree_path`, or no tree-attached agent has capacity, routing
+falls back to the existing project lane / default lane behavior.
+
+## Back-half verification
+
+The router also scans `in_review` stories in `REVIEW_PROJECT_IDS` for linked
+PRs. A merged PR advances the story to `done`. An open PR dispatches
+`verify-team-squad` (leader: `auriga-review`) by assigning the issue to the
+squad and forcing a rerun. The squad leader is responsible for running
+`/hive:review` and `/hive:test` on the PR branch, then merging to `dev` and
+marking the story done on pass, or commenting required changes and returning
+the story to `in_progress` on fail.
+
+Squad assignment is the idempotency marker. A story already assigned to
+`verify-team-squad` is not re-dispatched while its review run is fresh; stale or
+failed review runs are re-enqueued after the zombie window. This keeps the
+auriga-review lane fed without repeatedly waking an active review.
+
+## Bulk human-todo extraction (one-off triage sweep)
+
+`scripts/export-human-queue.mjs` above only exports what the *live router*
+already scans (`cfg.PROJECT_IDS` — 3 aligned projects, `status: todo` only).
+`scripts/bulk-extract-human-todos.mjs` is a separate, broader, one-off sweep
+for triaging the whole board:
+
+```sh
+node scripts/bulk-extract-human-todos.mjs              # report only (default)
+node scripts/bulk-extract-human-todos.mjs --apply       # also label eligible issues
+node scripts/bulk-extract-human-todos.mjs --no-notify   # suppress operator notification
+```
+
+- **Scope:** every project in the workspace (`mca.listAllWorkspaceIssues()`),
+  not just the router's 3 aligned ones, and every status (not just `todo`) —
+  so an already-`blocked` human-todo is still visible in the report.
+- **Detection:** `isHumanTodoBroad` = `core.isHumanTodo` (label `human-todo`
+  or `waiting_on: <human>`) **OR** a title starting with "HUMAN TODO" (e.g.
+  `PAN-6644: "HUMAN TODO (Mathew): ..."` — the concrete motivating example for
+  this sweep, which has neither a label nor `waiting_on` set).
+- **Report:** always written to `.pHive/human-todo-extraction-report.yaml`
+  (override with `AURIGA_HUMAN_TODO_REPORT`), with `already_excluded_count`
+  (blocked/cancelled — not currently reachable by any dispatch pool) and
+  `needs_attention_count` (todo/in_progress — still exposed right now).
+- **Notification (default ON):** for every entry still exposed to dispatch
+  (`todo`/`in_progress`) and not yet labeled, posts a Multica comment on that
+  issue mentioning the operator (`cfg.HUMAN_OPERATOR_MEMBER_ID`) so a human is
+  actually pinged, rather than having to remember to open the YAML report.
+  Once an issue is labeled `human-todo` it's treated as already surfaced and
+  isn't re-notified on subsequent runs. Suppress with `--no-notify` /
+  `AURIGA_HUMAN_QUEUE_NOTIFY=0`.
+- **Label mutation (opt-in, default OFF):** `--apply` /
+  `AURIGA_HUMAN_QUEUE_APPLY=1` attaches the `human-todo` label to entries that
+  are `status: todo` and not yet labeled, positively excluding them from any
+  future dispatch scan regardless of which project's router config has
+  landed. This is opt-in, not automatic, per the story's own risk mitigation:
+  "broad query + manual review before run" — review the report first.
+- **Auth note:** like `export-human-queue.mjs`, this shells out via the
+  `dostal` CLI profile (`lib/multica.mjs`), so it must be run from an
+  environment with that profile logged in — it can't run from inside a
+  Multica agent task's own scoped token sandbox.
+
 ## Files / paths
 
-- `auriga-router.mjs` — entrypoint / scan loop; exports `cycle()`.
-- `lib/` — `config.mjs`, `core.mjs`, `multica.mjs` (predates the adapter interface; no longer
-  called by `cycle()` — see `lib/adapters/`).
-- `lib/adapters/` — the `backlogAdapter` / `spawnAdapter` boundary `cycle()` calls through:
-  `backlog-adapter.mjs` / `spawn-adapter.mjs` (typedef contracts), `multica/` (real, live-default
-  implementation), `stub/` (in-memory test double), `pantheon-v2-l2/` (intentionally-unbuilt
-  stub — the only sanctioned path to Pantheon). See `lib/adapters/README.md`.
-- `test/*.test.mjs` — `npm test`; `test/support/mock-mca.mjs` is the mock
-  Multica layer `test/router-cycle.e2e.test.mjs` drives `cycle()` against.
-- `scripts/launchd/` — `install.sh` / `uninstall.sh` +
-  `com.mdostal.auriga-supervisor.plist.template` for reboot-survival.
+- `auriga-router.mjs` — entrypoint / scan loop.
+- `lib/` — `config.mjs`, `core.mjs`, `multica.mjs`.
+- `test/core.test.mjs` — `npm test`.
+- `../../scripts/export-human-queue.mjs` — per-cycle human-queue export (aligned projects, `todo` only).
+- `../../scripts/bulk-extract-human-todos.mjs` — one-off, workspace-wide human-todo triage sweep (see above).
 - Pidfiles / logs (in `/tmp`, single-instance safety):
   - `/tmp/auriga-router.pid`, `/tmp/auriga-router.log`, `/tmp/auriga-router.jsonl`
   - `/tmp/auriga-supervisor.pid`, `/tmp/auriga-supervisor.log`
-  - `/tmp/auriga-supervisor-launchd.log` (launchd's own stdout/stderr capture)
 - Overridable: `AURIGA_PIDFILE`, `AURIGA_LOG`.

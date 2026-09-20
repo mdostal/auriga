@@ -125,3 +125,10 @@ test('dependsOnAny: metadata id dep and slug dep both detected against the compl
   assert.equal(core.dependsOnAny(slugChild, new Set(['A']), [dep, slugChild]), true);
   assert.equal(core.dependsOnAny(metaChild, new Set(['Z']), [dep, metaChild]), false);
 });
+
+test('cascade: a story already in-flight (assigned+queued) is NOT re-cascade-enqueued', () => {
+  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'p' };
+  const queued = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', assignee_id: 'ag-1', title: 'c', metadata: { depends_on: 'A' } };
+  const issues = [parent, queued];
+  assert.equal(core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length, 0);
+});

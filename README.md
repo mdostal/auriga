@@ -4,9 +4,16 @@ curl -fsSL https://mdostal.github.io/auriga/install.sh | bash
 
 # Auriga
 
+[![CI](https://github.com/mdostal/auriga/actions/workflows/ci.yml/badge.svg)](https://github.com/mdostal/auriga/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![OSS](https://img.shields.io/badge/OSS-friends%20welcome-blueviolet)](CONTRIBUTING.md)
+[![Docs site](https://img.shields.io/badge/docs-mdostal.github.io%2Fauriga-orange)](https://mdostal.github.io/auriga/)
+
 **The router god of [Pantheon](https://github.com/mdostal/pantheon-v2).** Auriga senses board
 state and dispatches each unit of work to the right lane and agent — the PM/router of the
 Pantheon SDLC pipeline.
+
+📖 Full docs + architecture: **[mdostal.github.io/auriga](https://mdostal.github.io/auriga/)**
 
 ## What & why
 
@@ -63,6 +70,8 @@ flowchart TB
 `in_review`; a *merged* PR → `done`) → selects a small batch of unassigned todos → routes each by
 capability and project lane, respecting caps → assigns and verifies a run actually started
 (re-running to force-enqueue if not) → logs → sleeps. A pidfile keeps exactly one router alive.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full component/flow diagram and repo
+layout.
 
 **In Pantheon**, Auriga sits between the board and the agents. Work is planned upstream (Minerva),
 lands on the Multica board, and Auriga drains it to the swarm.
@@ -155,7 +164,18 @@ on. Neither package is a dependency of the router; each has its own `package.jso
 projects with 26 passing unit tests; capability-aware routing and pure-code state-machine transitions
 are merged on `main`. The richer TypeScript routing **engine** (board-state consumer, adapters,
 escalation, verifier pool) lives on the `feat/routing-engine` branch and is not yet integrated with
-the running router. See [VISION.md](VISION.md) for the trajectory and where to jump in.
+the running router. See [docs/VISION.md](docs/VISION.md) for the trajectory and where to jump in.
 
 > Note: `mdostal/pantheon-orchestrator` is **LEGACY** — Auriga code that used to live there has been
 > moved into this repo.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, ground rules,
+and good-first-contribution ideas. Auriga is [MIT licensed](LICENSE).
+
+## Support
+
+If Auriga is useful to you, consider supporting the project via the **Sponsor** button on this
+repo (GitHub Sponsors / Buy Me a Coffee — see [.github/FUNDING.yml](.github/FUNDING.yml)). Bug
+reports, docs fixes, and PRs are just as welcome as funding.
