@@ -497,6 +497,30 @@ export async function cycle(opts = {}) {
       squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !dryRun,
     });
     if (dryRun) continue;
+
+    // PANT-262: give-up-review parallel to zombie give-up (detectZombies/auriga-router.mjs
+    // zombie recovery). Fires after reviewMaxAttempts accumulated runs where the review
+    // agent's run is consistently stale/failed — sets blocked + posts a diagnostic comment
+    // so a human can find and fix the root-cause startup hang. Never retries further.
+    if (r.action === 'give-up-review') {
+      logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: true });
+      try { backlog.setIssueStatus(r.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked', error: e.message }); }
+      try {
+        backlog.commentOnIssue(
+          r.identifier,
+          `Auriga review dispatch accumulated ${cfgImpl.CAPS.reviewMaxAttempts ?? 5}+ runs with no successful output (status: blocked).\n\n` +
+          'The live process showed zero output tokens and near-zero CPU — consistent with a startup hang before prompt processing.\n\n' +
+          '**Leading hypothesis (PANT-262 / GitHub #94):** a Playwright/E2E MCP server registered for the auriga-review agent hangs on startup — browser binary missing or network-blocked install.\n\n' +
+          'Human investigation required:\n' +
+          '1. Inspect MCP server registrations in the auriga-review runtime: `claude mcp list` (or `claude mcp get <name>` per server)\n' +
+          '2. Look for a Playwright / browser-automation MCP server that fails to start (missing binary, blocked network)\n' +
+          '3. Either pre-install the browser binary or remove the problematic MCP registration\n' +
+          '4. Once the root cause is fixed, reset this ticket to `in_review` to re-enter the review queue'
+        );
+      } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'comment', error: e.message }); }
+      continue;
+    }
+
     try {
       if (r.action === 'dispatch-review') {
         // Publish the squad plan onto the ticket so what the squad will do is visible
@@ -527,6 +551,26 @@ export async function cycle(opts = {}) {
       }
       spawn.rerunIssue(r.identifier);
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
+      // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
+      // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
+      // For dispatch-review this is the SECOND sleep (first was pre-rerunIssue); for
+      // rerun-review there was no prior sleep, so this is the only one. Both cases end
+      // with a run-presence check that logs review_verify_ok / review_verify_no_run —
+      // the latter is the clearest early signal that the hang is happening THIS cycle
+      // (not 30 minutes later when idle_watchdog fires).
+      await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+      const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
+      const reviewRunStarted = reviewVerifyRuns.some((run) => {
+        const c = coreImpl.classifyRun(run, Date.now());
+        return c.active || c.done || c.failed;
+      });
+      if (!reviewRunStarted) {
+        logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: r.action });
+      } else {
+        const lr = coreImpl.latestRun(reviewVerifyRuns);
+        const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+        logImpl('review_verify_ok', { identifier: r.identifier, agent: r.agent, action: r.action, runStatus: c.status });
+      }
     } catch (e) {
       logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
     }
