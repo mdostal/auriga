@@ -51,10 +51,9 @@ test('describeLanes(): structurally identical to today\'s exact PROJECT_LANE/DEF
   assert.deepEqual(lanes.reviewLane, REVIEW_LANE);
   assert.deepEqual(lanes.runtimeCap, RUNTIME_CAP);
 
-  // PANT-59 (2026-08-31): 6 per-god projects added (confirmed live in workspace f32af269).
-  // PROJECT_LANE now covers 8 entries: Pantheon Core, 6 per-god projects, plus Minerva's
-  // dispatch-ineligible lane-fallback placeholder.
-  assert.equal(Object.keys(lanes.projectLane).length, 8, 'PROJECT_LANE must have 8 mapped project UUIDs after PANT-59 per-god project additions (2026-08-31)');
+  // PANT-59 (2026-08-31): 6 per-god projects added; batch onboarding (2026-09-15): 41 more repos added.
+  // PROJECT_LANE now covers 49 entries: 7 core + 1 Minerva placeholder + 41 batch-onboarded.
+  assert.equal(Object.keys(lanes.projectLane).length, 49, 'PROJECT_LANE must have 49 mapped project UUIDs: 7 core (PANT-59) + 1 Minerva + 41 batch-onboarded (2026-09-15)');
 });
 
 test('describeLanes(): a cfg-supplied fixture lane map overrides the live config-substrate.mjs defaults', async (t) => {
