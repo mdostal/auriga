@@ -557,6 +557,21 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const lr = latestRun(runs);
       const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
       if (!stale) continue; // finished recently — give the agent time to act
+      // PANT-262: give-up after reviewMaxAttempts accumulated runs, parallel to detectZombies'
+      // own give-up path (zombieMaxAttempts). runs.length counts ALL runs for this issue
+      // (build + review combined); 5 is enough to catch persistent review-startup hangs
+      // (which saw 5 consecutive idle_watchdog kills in the confirmed live incident) without
+      // misfiring on a normal 1-2 build + 1-2 review lifecycle. The give-up action sets the
+      // issue blocked + posts a diagnostic comment so a human can investigate the root cause
+      // (see PANT-262 / GitHub #94: leading hypothesis is a Playwright MCP initialization hang).
+      const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
+      if (runs.length >= reviewMaxAttempts) {
+        actions.push({
+          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+          agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
+        });
+        continue;
+      }
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',

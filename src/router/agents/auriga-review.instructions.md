@@ -51,6 +51,21 @@ Pick the PR that references this ticket id OR the story's short key (e.g. `m-01`
   gh repo clone <owner/repo> .
   gh pr checkout <PR-NUMBER>        # puts you on the PR branch with its code
 
+== STEP 3B — PRE-FLIGHT: PLAYWRIGHT AVAILABILITY (only for squad plans with playwright) ==
+If the squad plan enables Playwright (squad[full] or squad[standard], or playwright flag is true),
+verify Playwright is actually available BEFORE attempting E2E in STEP 4:
+  npx playwright --version   OR   playwright --version
+  - Available: proceed with E2E in STEP 4's QA pass as planned.
+  - NOT available (command missing, browser binary absent, or install hangs after 30s):
+    Do NOT hang waiting for a browser download — record QA's E2E result as:
+    "Playwright infrastructure unavailable in this runtime environment — E2E skipped (browser not installed)."
+    Treat QA as PASS-with-caveat: build and unit tests ran; E2E was not verifiable here.
+    Continue with all other enabled perspectives.
+NOTE (PANT-262 / GitHub #94): if you are hung at STARTUP before processing this task at all
+(zero output, MCP initialization hang), this document cannot help. A human must inspect the
+MCP server registrations for this agent (`claude mcp list`) for a Playwright/browser MCP server
+that is blocking startup, and either pre-install its browser binary or remove the registration.
+
 == STEP 4 — CONVENE THE SQUAD (run each ENABLED perspective; this is the point) ==
 Run ONLY the perspectives the squad plan enabled, each as its own pass, each producing its own verdict + findings. Spawn a subagent per perspective using the named plugin-hive persona so each perspective is a distinct voice, not one blurred read:
 
