@@ -103,6 +103,81 @@ test('AC2: PROJECT_IDS order in override is preserved (array order load-bearing)
   assert.deepEqual(out.PROJECT_IDS, overrideIds);
 });
 
+// ---- PANT-261 regression: tenant-scoped AGENTS + lane override -------------
+//
+// pantheon-v2's scripts/generate-auriga-configs.ts (buildTenantConfig(), PANT-261)
+// now emits AGENTS/HIVE_LANE/DEFAULT_LANE/REVIEW_LANE for a tenant with a real
+// lane-agent override configured, on top of the PROJECT_IDS this generator
+// already emitted before. This test proves that EXACT combined shape (as
+// pantheon-v2 will actually produce it for firefly-events) resolves via THIS
+// module's already-generic `_ext.<KEY> ?? <default>` mechanism (PANT-70) with
+// no consumer-side code change here -- and, just as important, that none of
+// Pantheon's own hardcoded agent names/ids (minerva-dev, auriga-review, ...)
+// leak into a tenant-scoped instance's resolved AGENTS map once a full
+// override is supplied. This is the real bug diagnosed live: a tenant-scoped
+// Auriga container was dispatching to Pantheon's own agent ids because the
+// generator only ever sent PROJECT_IDS, never AGENTS/lane overrides.
+const FIREFLY_EVENTS_TENANT_CONFIG = {
+  PROJECT_IDS: ['ffe-project-1'],
+  AGENTS: {
+    'flayr-build': {
+      id: '0536e2a3-c01b-4525-850a-95d6a564dcc1',
+      runtime: 'claude',
+      maxInflight: 2,
+      repo: 'firefly-events/flayr',
+    },
+    'flayr-review': {
+      id: '62c4ff7c-2d3c-4743-bcb7-8f394de84807',
+      runtime: 'claude-review',
+      maxInflight: 1,
+      repo: null,
+    },
+  },
+  HIVE_LANE: ['flayr-build'],
+  DEFAULT_LANE: ['flayr-build'],
+  REVIEW_LANE: ['flayr-review'],
+};
+
+const FULL_OVERRIDE_SCRIPT = `
+import * as cfg from ${JSON.stringify(new URL('../lib/config.mjs', import.meta.url).pathname)};
+console.log(JSON.stringify({
+  PROJECT_IDS: cfg.PROJECT_IDS,
+  AGENTS: cfg.AGENTS,
+  HIVE_LANE: cfg.HIVE_LANE,
+  DEFAULT_LANE: cfg.DEFAULT_LANE,
+  REVIEW_LANE: cfg.REVIEW_LANE,
+}));
+`;
+
+test('PANT-261: a full tenant lane-agent override (pantheon-v2\'s real emitted shape) resolves exactly, with no Pantheon-default agent leaking through', () => {
+  const result = spawnWithConfig(FIREFLY_EVENTS_TENANT_CONFIG, FULL_OVERRIDE_SCRIPT);
+  assert.equal(result.status, 0, `child exited ${result.status}: ${result.stderr}`);
+  const out = JSON.parse(result.stdout.trim());
+
+  assert.deepEqual(out.PROJECT_IDS, FIREFLY_EVENTS_TENANT_CONFIG.PROJECT_IDS);
+  assert.deepEqual(out.AGENTS, FIREFLY_EVENTS_TENANT_CONFIG.AGENTS);
+  assert.deepEqual(out.HIVE_LANE, ['flayr-build']);
+  assert.deepEqual(out.DEFAULT_LANE, ['flayr-build']);
+  assert.deepEqual(out.REVIEW_LANE, ['flayr-review']);
+
+  // The real bug: Pantheon's own default agents (and their real Multica ids) must NOT
+  // be present at all once a tenant supplies its own full AGENTS override -- this map
+  // replaces, not merges with, the default (see config-substrate.mjs's `_ext.AGENTS ??`).
+  assert.ok(!('minerva-dev' in out.AGENTS), 'minerva-dev must not leak into a tenant-scoped AGENTS override');
+  assert.ok(!('auriga-review' in out.AGENTS), 'auriga-review must not leak into a tenant-scoped AGENTS override');
+  assert.ok(!('auriga-build' in out.AGENTS), 'auriga-build must not leak into a tenant-scoped AGENTS override');
+
+  // And every lane name resolves to a real entry in the (overridden) AGENTS map --
+  // the same self-consistency guarantee GH #79's regression test already holds Auriga's
+  // own hardcoded default to.
+  for (const lane of [out.HIVE_LANE, out.DEFAULT_LANE, out.REVIEW_LANE]) {
+    for (const name of lane) {
+      assert.ok(out.AGENTS[name], `lane name "${name}" must resolve to a real AGENTS entry`);
+      assert.ok(out.AGENTS[name].id, `AGENTS["${name}"] must carry a real id`);
+    }
+  }
+});
+
 // ---- AC3: fail-closed on bad AURIGA_CONFIG ----------------------------------
 
 function spawnBadConfig(cfgContent) {
