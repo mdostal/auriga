@@ -1,0 +1,90 @@
+id: p1-triage-human-queue
+epic: p1-dispatch-throughput
+title: Move human-todos to human queue
+status: pending
+complexity: low
+methodology: classic
+depends_on: [p1-router-human-filter]
+
+description: |
+  Strip human-assigned tasks from agent dispatch pool and route to human queue.
+
+  Example: PAN-6644 (`waiting_on: Mathew`, Gemini re-export).
+
+  Stops wasting agent cycles on human-only work.
+
+acceptance_criteria:
+  - "Given issues labeled 'human-todo' OR with 'waiting_on: <human>'"
+  - "When the bulk human-todo extraction runs"
+  - "Then each issue is moved to the human queue"
+  - "And issue is excluded from future agent dispatch pools"
+  - "And human operator is notified"
+
+steps:
+  - id: research
+    description: Query human-todos (label + waiting_on field) from current agent dispatch pool
+    agent: researcher
+  - id: implement
+    description: Write bulk extraction script — move to human queue, exclude from agent pool
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test bulk extraction — verify human-todos appear in queue, excluded from dispatch
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review bulk extraction script for completeness
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Run bulk extraction on human-todos, commit script
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: bulk-action-script
+  key_files:
+    - path: scripts/bulk-extract-human-todos.ts
+      purpose: Bulk human-todo extraction script
+
+files_to_modify:
+  - file: scripts/bulk-extract-human-todos.ts
+    change: Create bulk human-todo extraction script
+
+design_decisions:
+  - decision: Human queue as YAML export (not Linear/Jira yet)
+    rationale: Simple export sufficient for P1; external tracker integration deferred
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document human-todo extraction procedure in runbook"
+
+risks:
+  - severity: low
+    description: Human detection could miss variants (typos in waiting_on, label variants)
+    mitigation: Broad query + manual review before run
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      T3: Move Human-Todos to Human Queue
+      Example: PAN-6644 (`waiting_on: Mathew`, Gemini re-export).
+
+metric:
+  applies: true
+  name: triage.human_todos_moved_count
+  direction: up
+  unit: issues
+  baseline: "0"
+  target: "count of human-todos (PAN-6644, etc.)"
+  window: "triage run"
+  source:
+    kind: manual
+    ref: "Bulk extraction script output — count human-todos moved"
+  verify_at: "integrate"
+  owner: developer

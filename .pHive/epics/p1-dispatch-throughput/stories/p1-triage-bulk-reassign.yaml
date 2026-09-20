@@ -1,0 +1,93 @@
+id: p1-triage-bulk-reassign
+epic: p1-dispatch-throughput
+title: Bulk reassign codex-self-blocked stories to claude+hive lanes
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p1-router-capability-routing, p1-state-machine-transitions]
+
+description: |
+  Reassign build stories that self-blocked on codex (blocked_reason: "plugin-hive execute/review/test
+  is unavailable in this Codex runtime") to correct claude+plugin-hive lanes.
+
+  Proof requirement: Pick ONE issue, run through full cycle, verify PR merged + issue reaches `done`.
+  Then bulk reassign remaining.
+
+  Unblocks the 138-issue blocked pileup by routing to capable agents.
+
+acceptance_criteria:
+  - "Given a list of issues blocked with reason 'plugin-hive execute/review/test is unavailable in this Codex runtime'"
+  - "When the bulk reassignment runs"
+  - "Then each issue's lane is updated to a claude+plugin-hive lane"
+  - "And issue state resets to 'todo'"
+  - "And ONE issue is validated end-to-end (PR merged + reaches 'done')"
+
+steps:
+  - id: research
+    description: Query blocked issues with codex self-block reason (PAN-6636, PAN-6640, PAN-6646, etc.)
+    agent: researcher
+  - id: implement
+    description: Write bulk reassignment script — update lane to claude+hive, reset state to todo
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test ONE issue end-to-end — reassign, dispatch, verify PR merged + done state
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review bulk reassignment script for correctness (lane selection, state reset)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Run bulk reassignment on remaining issues after proof, commit script
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: bulk-action-script
+  key_files:
+    - path: scripts/bulk-reassign-codex-blocked.ts
+      purpose: Bulk reassignment script
+
+files_to_modify:
+  - file: scripts/bulk-reassign-codex-blocked.ts
+    change: Create bulk reassignment script
+
+design_decisions:
+  - decision: Proof-then-bulk (not bulk-first)
+    rationale: Validate end-to-end flow with ONE issue before touching 138 — reduces blast radius if routing is still broken
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document bulk reassignment procedure in runbook"
+
+risks:
+  - severity: high
+    description: Bulk reassignment could break working issues if routing is still wrong
+    mitigation: Validation step (ONE issue end-to-end) before bulk; rollback plan (revert state changes via GitHub API)
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      T1: Bulk Reassign Codex-Self-Blocked Stories
+      Affected issues: PAN-6636, PAN-6640, PAN-6646 (examples).
+      Proof requirement: pick ONE, run through full cycle, verify PR merged + issue done.
+
+metric:
+  applies: true
+  name: triage.codex_blocked_reassigned_count
+  direction: up
+  unit: issues
+  baseline: "0"
+  target: "138 (all codex-blocked issues reassigned)"
+  window: "triage run"
+  source:
+    kind: manual
+    ref: "Bulk reassignment script output — count issues updated"
+  verify_at: "integrate"
+  owner: developer

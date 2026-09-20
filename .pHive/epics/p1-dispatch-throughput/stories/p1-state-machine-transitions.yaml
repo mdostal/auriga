@@ -1,0 +1,110 @@
+id: p1-state-machine-transitions
+epic: p1-dispatch-throughput
+title: Implement pure-code state-machine transitions (todo→in_review→done)
+status: pending
+complexity: high
+methodology: classic
+depends_on: []
+
+description: |
+  On run-complete, automatically advance issue state WITHOUT agent intervention (pure-code).
+
+  Transitions:
+  - todo → in_review (when runStatus=success)
+  - in_review → done (when verify_ok=true AND PR merged)
+
+  Problem: `done` flat at 56, `in_review` flat at 47 — completed work never advances.
+
+  Fix: Multica state-machine (native code, NO agent calls).
+
+acceptance_criteria:
+  - "Given an issue in 'todo' AND run completes with runStatus=success"
+  - "Then issue advances to 'in_review' and verifier dispatches (if configured)"
+  - "Given an issue in 'in_review' AND verifier completes with verify_ok=true"
+  - "Then issue advances to 'done'"
+  - "And verify_ok asserts REAL completion (PR merged), not just runStatus=running"
+
+steps:
+  - id: research
+    description: Locate Multica state-machine module, identify run-complete hooks, map state transition logic
+    agent: researcher
+  - id: implement
+    description: Add todo→in_review and in_review→done transitions with verify-ok PR-merge check
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test transitions — mock run-complete triggers todo→in_review, mock verify-ok triggers done
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review state-machine for atomicity, idempotency, false-confidence guards
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push state-machine transition changes
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: multica
+  tech_stack:
+    language: typescript
+    framework: state-machine
+  key_files:
+    - path: src/state-machine/transitions.ts
+      purpose: State transition logic (or similar module)
+    - path: src/state-machine/verify.ts
+      purpose: Verify-OK logic with PR-merge check
+
+files_to_modify:
+  - file: src/state-machine/transitions.ts
+    change: Add on_run_complete and on_verify_complete handlers
+  - file: src/state-machine/verify.ts
+    change: Implement is_really_complete with PR-merged check (not just runStatus)
+
+design_decisions:
+  - decision: Pure-code state-machine (no agent calls)
+    rationale: Agent calls add latency (2-10s), token cost, failure modes — pure-code is instant + deterministic
+  - decision: verify_ok requires PR merged (not just runStatus=running)
+    rationale: Prevents false-confidence — runStatus=running can be stale/incorrect
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document state-machine transition contract in Multica README"
+
+risks:
+  - severity: high
+    description: Race conditions if concurrent runs trigger simultaneous state transitions
+    mitigation: Use atomic transactions/locks; idempotency guards (re-running produces same result)
+  - severity: medium
+    description: verify_ok false confidence (runStatus=running accepted without PR check)
+    mitigation: Explicit PR-merge check via GitHub API — do not trust runStatus alone
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R4.1: Todo → In Review (on runStatus=success)
+      R4.2: In Review → Done (on verify_ok=true AND PR merged)
+      verify_ok must assert real completion/merge, not just runStatus=running.
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      class IssueStateMachine:
+        def on_run_complete(issue, run_result): if success → in_review
+        def on_verify_complete(issue, verify_result): if verify_ok → done
+        def is_really_complete(issue, verify_result): check PR merged
+
+metric:
+  applies: true
+  name: issues.done_count
+  direction: up
+  unit: issues
+  baseline: "56"
+  target: "76+ (20 within first week)"
+  window: "1 week post-deploy"
+  source:
+    kind: manual
+    ref: "GitHub issues state filter — count issues with state=done"
+  verify_at: "2026-08-04T00:00:00Z"
+  owner: developer

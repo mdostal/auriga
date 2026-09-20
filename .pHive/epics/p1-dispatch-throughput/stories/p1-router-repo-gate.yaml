@@ -1,0 +1,91 @@
+id: p1-router-repo-gate
+epic: p1-dispatch-throughput
+title: Add repo-provisioning gate to prevent dispatch failures
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Gate build dispatch on target repo existing with a remote origin. Prevents build failures from
+  missing repos (PAN-6594: mdostal/laptop-cleanup not provisioned).
+
+  Fix: Pre-dispatch validation — check `git -C <repo_path> remote get-url origin` succeeds.
+  Block with `needs-repo` state (distinct from generic `blocked`) if check fails.
+
+acceptance_criteria:
+  - "Given a build story assigned to a repo slug"
+  - "When the router validates pre-dispatch conditions"
+  - "Then if repo exists locally AND has remote origin, dispatch proceeds"
+  - "And if repo does NOT exist OR has no origin, issue blocks with 'needs-repo' state"
+
+steps:
+  - id: research
+    description: Identify pre-dispatch validation hooks in Auriga router
+    agent: researcher
+  - id: implement
+    description: Add repo-provisioning gate — validate repo exists + has origin before dispatch
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test repo gate — missing repo blocks with 'needs-repo', provisioned repo passes
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review repo gate logic for edge cases (symlinks, submodules, missing config)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push repo-provisioning gate changes
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: routing-dispatch
+  key_files:
+    - path: src/router/pre-dispatch-validation.ts
+      purpose: Pre-dispatch checks (or similar module)
+
+files_to_modify:
+  - file: src/router/pre-dispatch-validation.ts
+    change: Add repo-provisioning check before dispatch
+
+design_decisions:
+  - decision: Use `needs-repo` state (not generic `blocked`)
+    rationale: Distinct state surfaces provisioning gaps explicitly; easier to filter and resolve in bulk
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document repo-provisioning gate in Auriga README or dispatch docs"
+
+risks:
+  - severity: low
+    description: Gate could block legitimate stories if repo path resolution fails
+    mitigation: Manual override flag for edge cases
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R5: Repo-Provisioning Gate
+      Gate build dispatch on target repo existing with an origin.
+      Check: git -C <repo_path> remote get-url origin succeeds.
+      Example: PAN-6594 blocked on mdostal/laptop-cleanup not provisioned.
+
+metric:
+  applies: true
+  name: dispatch.repo_provisioning_blocks_count
+  direction: down
+  unit: stories
+  baseline: "1 (PAN-6594)"
+  target: "0 (all repos provisioned before dispatch)"
+  window: "validation run"
+  source:
+    kind: manual
+    ref: "Auriga dispatch logs — filter for 'needs-repo' state transitions"
+  verify_at: "integrate"
+  owner: developer

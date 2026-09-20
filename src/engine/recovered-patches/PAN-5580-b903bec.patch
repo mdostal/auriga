@@ -1,0 +1,412 @@
+From b903becef8f77731906d0a0478f0b39843f3b3f0 Mon Sep 17 00:00:00 2001
+From: mdostal <mdostal@ff.events>
+Date: Mon, 27 Jul 2026 02:09:56 -0500
+Subject: [PATCH] PAN-5580: emit dispatch decisions and metrics
+
+Co-authored-by: multica-agent <github@multica.ai>
+---
+ auriga/consumer/decision-emission.test.ts | 178 ++++++++++++++++++++++
+ auriga/consumer/index.ts                  | 162 +++++++++++++++++++-
+ 2 files changed, 339 insertions(+), 1 deletion(-)
+ create mode 100644 auriga/consumer/decision-emission.test.ts
+
+diff --git a/auriga/consumer/decision-emission.test.ts b/auriga/consumer/decision-emission.test.ts
+new file mode 100644
+index 0000000..67155ce
+--- /dev/null
++++ b/auriga/consumer/decision-emission.test.ts
+@@ -0,0 +1,178 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import type { EventContract } from "../../contracts/event.ts";
++import type { ClaimResult, LockContract } from "../../contracts/lock.ts";
++import type {
++  LockResult,
++  TaskRecord,
++  TaskStatus,
++  TrackerAdapter,
++} from "../../contracts/tracker-adapter.ts";
++import {
++  AurigaConsumer,
++  type DispatchDecisionMetric,
++  type DispatchDecisionRecord,
++  type DispatchDecisionSink,
++} from "./index.ts";
++
++class FakeLock implements LockContract {
++  claimResult: ClaimResult = { ok: true, leaseId: "lease-1" };
++
++  async claim(_taskId: string): Promise<ClaimResult> {
++    return this.claimResult;
++  }
++  async renew(_leaseId: string): Promise<boolean> {
++    return true;
++  }
++  async release(_leaseId: string): Promise<void> {
++    // no-op
++  }
++  async sweep(): Promise<string[]> {
++    return [];
++  }
++}
++
++class FakeTrackerAdapter implements TrackerAdapter {
++  updateStatusCalls: { taskId: string; status: TaskStatus }[] = [];
++
++  async claimTask(_taskId: string): Promise<LockResult> {
++    return { claimed: true, lockId: "fake-lock-id", expiresAt: null };
++  }
++  async updateStatus(taskId: string, status: TaskStatus): Promise<void> {
++    this.updateStatusCalls.push({ taskId, status });
++  }
++  async getTask(taskId: string): Promise<TaskRecord> {
++    return { id: taskId, status: "pending", title: "fake task" };
++  }
++}
++
++class CapturingDispatchDecisionSink implements DispatchDecisionSink {
++  decisions: DispatchDecisionRecord[] = [];
++  metrics: DispatchDecisionMetric[] = [];
++
++  async emitDecision(record: DispatchDecisionRecord): Promise<void> {
++    this.decisions.push(record);
++  }
++  async emitMetric(metric: DispatchDecisionMetric): Promise<void> {
++    this.metrics.push(metric);
++  }
++}
++
++class ThrowingDispatchDecisionSink implements DispatchDecisionSink {
++  async emitDecision(_record: DispatchDecisionRecord): Promise<void> {
++    throw new Error("simulated decision sink failure");
++  }
++  async emitMetric(_metric: DispatchDecisionMetric): Promise<void> {
++    throw new Error("simulated metric sink failure");
++  }
++}
++
++function makeEvent(overrides: Partial<EventContract> = {}): EventContract {
++  return {
++    id: randomUUID(),
++    type: "task.claimable",
++    payload: { taskId: `task-${randomUUID()}` },
++    timestamp: new Date().toISOString(),
++    source: "test-fixture",
++    ...overrides,
++  };
++}
++
++test("dispatch decision emission: successful dispatch records chosen lane, reason, alternatives, and an L1-shaped metric", async () => {
++  const lock = new FakeLock();
++  const trackerAdapter = new FakeTrackerAdapter();
++  const sink = new CapturingDispatchDecisionSink();
++  const consumer = new AurigaConsumer(lock, trackerAdapter, sink);
++  const event = makeEvent({
++    id: "evt-success",
++    payload: { taskId: "task-success" },
++  });
++
++  await consumer.onEvent(event);
++
++  assert.equal(sink.decisions.length, 1);
++  assert.equal(sink.metrics.length, 1);
++  assert.deepEqual(trackerAdapter.updateStatusCalls, [
++    { taskId: "task-success", status: "in_progress" },
++  ]);
++
++  const decision = sink.decisions[0]!;
++  assert.equal(decision.eventId, "evt-success");
++  assert.equal(decision.taskId, "task-success");
++  assert.equal(decision.outcome, "dispatched");
++  assert.equal(decision.chosenLane, "trackerAdapter.updateStatus");
++  assert.equal(decision.reason, "claim_succeeded");
++  assert.deepEqual(decision.alternatives, [
++    {
++      lane: "none",
++      reason: "claim_rejected_already_claimed",
++    },
++  ]);
++  assert.equal(Number.isNaN(Date.parse(decision.timestamp)), false);
++
++  const metric = sink.metrics[0]!;
++  assert.match(metric.event_id, /^evt_dispatch_decision_/);
++  assert.equal(metric.metric_type, "auriga.dispatch.decision");
++  assert.equal(metric.value, 1);
++  assert.equal(metric.unit, "count");
++  assert.equal(metric.source, "auriga.consumer");
++  assert.deepEqual(metric.dimensions, {
++    event_id: "evt-success",
++    task_id: "task-success",
++    outcome: "dispatched",
++    chosen_lane: "trackerAdapter.updateStatus",
++    reason: "claim_succeeded",
++  });
++});
++
++test("dispatch decision emission: already-claimed tasks emit a no-dispatch decision and metric", async () => {
++  const lock = new FakeLock();
++  lock.claimResult = { ok: false, reason: "already_claimed" };
++  const trackerAdapter = new FakeTrackerAdapter();
++  const sink = new CapturingDispatchDecisionSink();
++  const consumer = new AurigaConsumer(lock, trackerAdapter, sink);
++
++  await consumer.onEvent(
++    makeEvent({
++      id: "evt-claimed",
++      payload: { taskId: "task-claimed" },
++    }),
++  );
++
++  assert.equal(trackerAdapter.updateStatusCalls.length, 0);
++  assert.equal(sink.decisions.length, 1);
++  assert.equal(sink.metrics.length, 1);
++  assert.equal(sink.decisions[0]!.outcome, "skipped");
++  assert.equal(sink.decisions[0]!.chosenLane, "none");
++  assert.equal(sink.decisions[0]!.reason, "claim_rejected_already_claimed");
++  assert.deepEqual(sink.decisions[0]!.alternatives, [
++    {
++      lane: "trackerAdapter.updateStatus",
++      reason: "requires_successful_claim",
++    },
++  ]);
++  assert.equal(sink.metrics[0]!.dimensions.outcome, "skipped");
++});
++
++test("dispatch decision emission: a missing sink is safe and a throwing sink does not break dispatch", async () => {
++  const lock = new FakeLock();
++  const trackerAdapter = new FakeTrackerAdapter();
++  const withoutSink = new AurigaConsumer(lock, trackerAdapter);
++
++  await assert.doesNotReject(() =>
++    withoutSink.onEvent(makeEvent({ payload: { taskId: "task-noop" } })),
++  );
++
++  const throwingSink = new ThrowingDispatchDecisionSink();
++  const withThrowingSink = new AurigaConsumer(lock, trackerAdapter, throwingSink);
++
++  await assert.doesNotReject(() =>
++    withThrowingSink.onEvent(makeEvent({ payload: { taskId: "task-throwing-sink" } })),
++  );
++
++  assert.deepEqual(trackerAdapter.updateStatusCalls, [
++    { taskId: "task-noop", status: "in_progress" },
++    { taskId: "task-throwing-sink", status: "in_progress" },
++  ]);
++});
+diff --git a/auriga/consumer/index.ts b/auriga/consumer/index.ts
+index 9ad2c6d..2d510d4 100644
+--- a/auriga/consumer/index.ts
++++ b/auriga/consumer/index.ts
+@@ -43,6 +43,69 @@ export interface ClassifiedFailure {
+   error: unknown;
+ }
+ 
++export type DispatchDecisionOutcome = "dispatched" | "skipped" | "failed";
++
++export type DispatchDecisionReason =
++  | "claim_succeeded"
++  | "claim_rejected_already_claimed"
++  | "lock_claim_failed"
++  | "tracker_dispatch_failed";
++
++export interface DispatchAlternative {
++  lane: string;
++  reason: string;
++}
++
++export interface DispatchDecisionRecord {
++  decisionId: string;
++  timestamp: string;
++  source: "auriga.consumer";
++  eventId: string;
++  taskId: string;
++  outcome: DispatchDecisionOutcome;
++  chosenLane: string;
++  reason: DispatchDecisionReason;
++  alternatives: DispatchAlternative[];
++}
++
++/**
++ * L1-shaped metric event for one dispatch/routing decision. The field
++ * names intentionally mirror the existing `.pHive/metrics/events/*.jsonl`
++ * shape (`event_id`, `metric_type`, `value`, `unit`, `dimensions`,
++ * `source`) so Argus/KPI ingestion can consume the same contract once it
++ * exists. This module only emits; it does not depend on Argus being
++ * present.
++ */
++export interface DispatchDecisionMetric {
++  event_id: string;
++  timestamp: string;
++  metric_type: "auriga.dispatch.decision";
++  value: 1;
++  unit: "count";
++  dimensions: {
++    event_id: string;
++    task_id: string;
++    outcome: DispatchDecisionOutcome;
++    chosen_lane: string;
++    reason: DispatchDecisionReason;
++  };
++  source: "auriga.consumer";
++}
++
++export interface DispatchDecisionSink {
++  emitDecision(record: DispatchDecisionRecord): Promise<void> | void;
++  emitMetric(metric: DispatchDecisionMetric): Promise<void> | void;
++}
++
++const noopDispatchDecisionSink: DispatchDecisionSink = {
++  emitDecision(_record: DispatchDecisionRecord): void {
++    // no-op until an Argus/KPI sink is wired.
++  },
++  emitMetric(_metric: DispatchDecisionMetric): void {
++    // no-op until an Argus/KPI sink is wired.
++  },
++};
++
+ /**
+  * Classifies a thrown value into a short, stable string. See
+  * ClassifiedFailure's `errorType` doc for the exact rule. Deliberately
+@@ -163,11 +226,17 @@ function classifyErrorType(error: unknown): string {
+ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+   readonly #lock: LockContract;
+   readonly #trackerAdapter: TrackerAdapter;
++  readonly #dispatchDecisionSink: DispatchDecisionSink;
+ 
+-  constructor(lock: LockContract, trackerAdapter: TrackerAdapter) {
++  constructor(
++    lock: LockContract,
++    trackerAdapter: TrackerAdapter,
++    dispatchDecisionSink: DispatchDecisionSink = noopDispatchDecisionSink,
++  ) {
+     super();
+     this.#lock = lock;
+     this.#trackerAdapter = trackerAdapter;
++    this.#dispatchDecisionSink = dispatchDecisionSink;
+   }
+ 
+   /**
+@@ -194,12 +263,34 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+       // exception originating deep inside MulticaLock's Multica HTTP
+       // calls. Classified, emitted, NOT re-thrown: onEvent() must survive.
+       this.#emitFailure(error, "lock", taskId);
++      await this.#emitDispatchDecision(event, taskId, {
++        outcome: "failed",
++        chosenLane: "none",
++        reason: "lock_claim_failed",
++        alternatives: [
++          {
++            lane: "trackerAdapter.updateStatus",
++            reason: "requires_successful_claim",
++          },
++        ],
++      });
+       return;
+     }
+ 
+     if (!claimResult.ok) {
+       // {ok: false, reason: "already_claimed"} is a normal, expected
+       // outcome (REQ-03/REQ-09) — not an error. No dispatch, no throw.
++      await this.#emitDispatchDecision(event, taskId, {
++        outcome: "skipped",
++        chosenLane: "none",
++        reason: "claim_rejected_already_claimed",
++        alternatives: [
++          {
++            lane: "trackerAdapter.updateStatus",
++            reason: "requires_successful_claim",
++          },
++        ],
++      });
+       return;
+     }
+ 
+@@ -208,8 +299,31 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+     } catch (error) {
+       // Error boundary #2 — the tracker-adapter dispatch call.
+       this.#emitFailure(error, "trackerAdapter", taskId);
++      await this.#emitDispatchDecision(event, taskId, {
++        outcome: "failed",
++        chosenLane: "trackerAdapter.updateStatus",
++        reason: "tracker_dispatch_failed",
++        alternatives: [
++          {
++            lane: "none",
++            reason: "claim_rejected_already_claimed",
++          },
++        ],
++      });
+       return;
+     }
++
++    await this.#emitDispatchDecision(event, taskId, {
++      outcome: "dispatched",
++      chosenLane: "trackerAdapter.updateStatus",
++      reason: "claim_succeeded",
++      alternatives: [
++        {
++          lane: "none",
++          reason: "claim_rejected_already_claimed",
++        },
++      ],
++    });
+   }
+ 
+   /**
+@@ -232,6 +346,52 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+     this.emit("failure", failure);
+   }
+ 
++  async #emitDispatchDecision(
++    event: EventContract,
++    taskId: string,
++    decision: Pick<
++      DispatchDecisionRecord,
++      "outcome" | "chosenLane" | "reason" | "alternatives"
++    >,
++  ): Promise<void> {
++    const timestamp = new Date().toISOString();
++    const record: DispatchDecisionRecord = {
++      decisionId: `dispatch_decision_${event.id}_${taskId}_${timestamp}`,
++      timestamp,
++      source: "auriga.consumer",
++      eventId: event.id,
++      taskId,
++      ...decision,
++    };
++    const metric: DispatchDecisionMetric = {
++      event_id: `evt_dispatch_decision_${event.id}_${taskId}_${timestamp}`,
++      timestamp,
++      metric_type: "auriga.dispatch.decision",
++      value: 1,
++      unit: "count",
++      dimensions: {
++        event_id: event.id,
++        task_id: taskId,
++        outcome: record.outcome,
++        chosen_lane: record.chosenLane,
++        reason: record.reason,
++      },
++      source: "auriga.consumer",
++    };
++
++    try {
++      await this.#dispatchDecisionSink.emitDecision(record);
++    } catch {
++      // Argus/KPI emission must be no-op safe until that sink exists.
++    }
++
++    try {
++      await this.#dispatchDecisionSink.emitMetric(metric);
++    } catch {
++      // Argus/KPI emission must be no-op safe until that sink exists.
++    }
++  }
++
+   /**
+    * No lifecycle state to tear down yet — mirrors start(). Kept as an
+    * explicit async no-op for the same reason: a real place to add cleanup
+-- 
+2.50.1 (Apple Git-155)
+

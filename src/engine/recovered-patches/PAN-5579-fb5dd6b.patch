@@ -1,0 +1,221 @@
+From fb5dd6bb4047f7eee377b7c84beffa0a595872e8 Mon Sep 17 00:00:00 2001
+From: mdostal <mdostal@ff.events>
+Date: Mon, 27 Jul 2026 02:01:31 -0500
+Subject: [PATCH] PAN-5579: document cross-instance lock boundary
+
+Co-authored-by: multica-agent <github@multica.ai>
+---
+ auriga/README.md                         |   8 +-
+ auriga/lock/cross-instance-claim.test.ts | 149 +++++++++++++++++++++++
+ auriga/lock/index.ts                     |  17 ++-
+ 3 files changed, 168 insertions(+), 6 deletions(-)
+ create mode 100644 auriga/lock/cross-instance-claim.test.ts
+
+diff --git a/auriga/README.md b/auriga/README.md
+index d6be787..85d7a47 100644
+--- a/auriga/README.md
++++ b/auriga/README.md
+@@ -13,5 +13,9 @@ Built by lifting the plugin-hive spine (DAG executor + cycle-reconciler).
+   per-taskId mutex (deterministic for same-instance races, best-effort for
+   cross-instance ones — Multica gives no compare-and-swap), a synthetic
+   client-tracked lease with no server-side TTL, and a poll-based sweep
+-  scoped to leases this instance itself claimed. See the class doc comment
+-  in `auriga/lock/index.ts` for the full rationale.
++  scoped to leases this instance itself claimed. The cross-instance
++  shared-token race can still double-win; the executable boundary is
++  `auriga/lock/cross-instance-claim.test.ts`, which accepts either one
++  winner or the documented detectable path: two distinct synthetic lease
++  ids for the same Multica issue. See the class doc comment in
++  `auriga/lock/index.ts` for the full rationale.
+diff --git a/auriga/lock/cross-instance-claim.test.ts b/auriga/lock/cross-instance-claim.test.ts
+new file mode 100644
+index 0000000..a233755
+--- /dev/null
++++ b/auriga/lock/cross-instance-claim.test.ts
+@@ -0,0 +1,149 @@
++// Behavioral regression for the cross-instance race Multica cannot make
++// atomic for us. This test intentionally uses TWO MulticaLock instances
++// sharing the same Multica token, matching the risky multi-process shape:
++// each instance can serialize its own claim() calls, but they cannot share
++// an in-process mutex with each other.
++//
++// Passing condition matches PAN-5579's acceptance boundary:
++// - preferred: at most one winner; OR
++// - documented fallback: if two winners occur, the path is detectable by
++//   an external observer/test because both successful leaseIds name the
++//   same Multica issue id with distinct synthetic lease tokens.
++//
++// A single process cannot self-detect the shared-token double-win at claim
++// time; each instance re-reads the issue and sees its own caller id. That
++// limitation is documented in index.ts and the findings doc. This test is
++// the executable guard that keeps the boundary honest.
++import { test, after } from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { readFileSync } from "node:fs";
++import { homedir } from "node:os";
++import { join } from "node:path";
++import type { ClaimResult } from "../../contracts/lock.ts";
++import { MulticaLock } from "./index.ts";
++
++interface MulticaConfig {
++  server_url: string;
++  workspace_id: string;
++  token: string;
++}
++
++function loadConfig(): MulticaConfig {
++  const raw = readFileSync(join(homedir(), ".multica", "config.json"), "utf-8");
++  const cfg = JSON.parse(raw) as Partial<MulticaConfig>;
++  if (!cfg.server_url || !cfg.workspace_id || !cfg.token) {
++    throw new Error("~/.multica/config.json missing server_url/workspace_id/token");
++  }
++  return cfg as MulticaConfig;
++}
++
++const cfg = loadConfig();
++const allCreatedIssueIds = new Set<string>();
++const locks: MulticaLock[] = [];
++
++function authHeaders(extra: Record<string, string> = {}) {
++  return { Authorization: `Bearer ${cfg.token}`, ...extra };
++}
++
++async function apiGet(path: string) {
++  const url = `${cfg.server_url}${path}${path.includes("?") ? "&" : "?"}workspace_id=${cfg.workspace_id}`;
++  const res = await fetch(url, { headers: authHeaders() });
++  const text = await res.text();
++  return { status: res.status, body: text ? JSON.parse(text) : null };
++}
++
++async function apiDelete(path: string) {
++  const url = `${cfg.server_url}${path}${path.includes("?") ? "&" : "?"}workspace_id=${cfg.workspace_id}`;
++  const res = await fetch(url, { method: "DELETE", headers: authHeaders() });
++  return { status: res.status };
++}
++
++function issueIdFromLeaseId(leaseId: string): string {
++  const [issueId] = leaseId.split(":");
++  assert.ok(issueId, `expected leaseId to start with issueId:, got ${leaseId}`);
++  return issueId;
++}
++
++function successfulClaims(results: ClaimResult[]): Array<{ ok: true; leaseId: string }> {
++  return results.filter((result): result is { ok: true; leaseId: string } => result.ok);
++}
++
++after(async () => {
++  for (const lock of locks) {
++    for (const id of lock.createdIssueIds) allCreatedIssueIds.add(id);
++  }
++
++  console.log(
++    `[cross-instance-claim.test] cleaning up ${allCreatedIssueIds.size} Multica issue(s) created during this run`,
++  );
++  for (const id of allCreatedIssueIds) {
++    const del = await apiDelete(`/api/issues/${id}`);
++    assert.equal(del.status, 204, `expected 204 deleting issue ${id}, got ${del.status}`);
++  }
++
++  for (const id of allCreatedIssueIds) {
++    const check = await apiGet(`/api/issues/${id}`);
++    assert.equal(check.status, 404, `expected issue ${id} to be gone (404), got ${check.status}`);
++  }
++  console.log(
++    `[cross-instance-claim.test] cleanup verified: all ${allCreatedIssueIds.size} tracked issue(s) confirmed gone`,
++  );
++});
++
++test("two MulticaLock instances racing one task either single-win or expose the documented shared-token double-claim path", async () => {
++  const lockA = new MulticaLock({
++    serverUrl: cfg.server_url,
++    workspaceId: cfg.workspace_id,
++    token: cfg.token,
++  });
++  const lockB = new MulticaLock({
++    serverUrl: cfg.server_url,
++    workspaceId: cfg.workspace_id,
++    token: cfg.token,
++  });
++  locks.push(lockA, lockB);
++
++  const taskId = `lock-behavior-test:cross-instance-claim:${randomUUID()}`;
++  const [resA, resB] = await Promise.all([lockA.claim(taskId), lockB.claim(taskId)]);
++  const results = [resA, resB];
++  const successes = successfulClaims(results);
++  const conflicts = results.filter((result) => !result.ok);
++
++  console.log(
++    `[cross-instance-claim.test] A=${JSON.stringify(resA)} B=${JSON.stringify(resB)} successes=${successes.length}`,
++  );
++
++  try {
++    assert.ok(
++      successes.length === 1 || successes.length === 2,
++      `expected one winner or the documented detectable double-claim path, got ${successes.length} successes`,
++    );
++
++    if (successes.length === 1) {
++      assert.equal(conflicts.length, 1, `expected one already_claimed conflict, got ${JSON.stringify(results)}`);
++      assert.deepEqual(
++        conflicts[0],
++        { ok: false, reason: "already_claimed" },
++        `expected the losing instance to report already_claimed, got ${JSON.stringify(conflicts[0])}`,
++      );
++      return;
++    }
++
++    const issueIds = successes.map((claim) => issueIdFromLeaseId(claim.leaseId));
++    const uniqueIssueIds = new Set(issueIds);
++    assert.equal(
++      uniqueIssueIds.size,
++      1,
++      `double-claim must be detectable as two leases for the same Multica issue; got issue ids ${JSON.stringify(issueIds)}`,
++    );
++    assert.notEqual(
++      successes[0]?.leaseId,
++      successes[1]?.leaseId,
++      `double-claim path should expose distinct synthetic leaseIds, got ${JSON.stringify(successes)}`,
++    );
++  } finally {
++    if (resA.ok) await lockA.release(resA.leaseId);
++    if (resB.ok) await lockB.release(resB.leaseId);
++  }
++});
+diff --git a/auriga/lock/index.ts b/auriga/lock/index.ts
+index 1c7e501..2cf376d 100644
+--- a/auriga/lock/index.ts
++++ b/auriga/lock/index.ts
+@@ -107,16 +107,25 @@ function decodeJwtSubject(token: string): string {
+  *    workspace (`GET /api/agents` returns `[]` — no registered agent
+  *    identities to assign per-process).
+  *
++ *    The double-claim path is externally detectable, but not self-healing:
++ *    two successful results for the same task carry different synthetic
++ *    leaseIds with the same Multica issue-id prefix
++ *    (`<issueId>:<uuid>`). A supervising test/observability layer can flag
++ *    that as a duplicate claim, and `cross-instance-claim.test.ts` keeps
++ *    that boundary executable. The two isolated claimers themselves cannot
++ *    detect it at claim time when they share the same token; each re-read
++ *    observes the same `assignee_id` and therefore believes it won.
++ *
+  *    **Accepted scope decision (operator-confirmed, post-lock-concurrent-
+  *    claim-tests):** P1's spine is a single thin consumer (see
+  *    docs/north-star.md, README.md "Shape") — multi-worker coordination is
+  *    explicitly P4 ("role-tree / squads / workflows"), not P1. This class
+  *    therefore only guarantees claim-safety WITHIN one process (guarantee
+  *    #1 above); running more than one MulticaLock-backed process against
+- *    the same Multica workspace concurrently, before P4 lands its own
+- *    coordination mechanism, WILL silently double-claim. Do not do that.
+- *    Revisit this class (or replace it) when P4 actually introduces
+- *    multiple workers.
++ *    the same Multica workspace concurrently, before P4 lands a real
++ *    coordination mechanism, can double-claim and must be treated as an
++ *    externally detected duplicate-work incident. Revisit this class (or
++ *    replace it) when P4 actually introduces multiple workers.
+  *
+  * ## renew() — no server-side equivalent
+  *
+-- 
+2.50.1 (Apple Git-155)
+

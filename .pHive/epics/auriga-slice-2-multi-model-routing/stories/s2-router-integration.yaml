@@ -1,0 +1,96 @@
+id: s2-router-integration
+epic: auriga-slice-2-multi-model-routing
+title: Integrate model selection into router dispatch flow
+status: pending
+complexity: high
+methodology: classic
+
+description: |
+  Wire the model selection strategy and dispatch adapters into the main router
+  dispatch flow. Replace hardcoded single-backend dispatch with adapter-based
+  dispatch driven by model selection. This is the integration story that brings
+  all pieces together into a working multi-model router.
+
+acceptance_criteria:
+  - "Given router receives todo, when dispatching, then call selectModel() to choose backend"
+  - "Given model selected, when dispatching, then use corresponding adapter (ClaudeAdapter, CodexAdapter, GeminiAdapter)"
+  - "Given adapter dispatch succeeds, when completing, then log model used, latency, tokens"
+  - "Given adapter dispatch fails, when retrying, then try next model in fallback chain"
+  - "Given existing single-backend router, when upgrading, then backward compatible (defaults to Claude)"
+
+steps:
+  - id: research
+    description: Map current dispatch flow in src/router/auriga-router.mjs and lib/core.mjs
+    agent: researcher
+  - id: implement
+    description: Refactor router dispatch to use model selection + adapters
+    agent: developer
+    depends_on: [research, s2-routing-strategy, s2-claude-adapter, s2-codex-adapter, s2-gemini-adapter]
+  - id: test
+    description: Write integration tests covering multi-model dispatch, fallback, backward compat
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review router integration and ensure zero regressions
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: JavaScript (mjs)
+    runtime: Node.js
+  key_files:
+    - path: src/router/auriga-router.mjs
+      purpose: Main router entry point to integrate multi-model dispatch
+    - path: src/router/lib/core.mjs
+      purpose: Core dispatch logic to refactor with adapter pattern
+    - path: src/router/lib/model-selection.mjs
+      purpose: Model selection strategy to call during dispatch
+
+files_to_modify:
+  - file: src/router/auriga-router.mjs
+    change: Initialize adapters, call selectModel() before dispatch
+  - file: src/router/lib/core.mjs
+    change: Replace hardcoded dispatch with adapter.dispatch() calls
+
+code_examples:
+  - title: Integration point in router
+    snippet: |
+      // In auriga-router.mjs dispatch loop
+      import { selectModel } from './lib/model-selection.mjs';
+      import { ClaudeAdapter, CodexAdapter, GeminiAdapter } from './adapters/index.js';
+
+      const adapters = {
+        claude: new ClaudeAdapter(),
+        codex: new CodexAdapter(),
+        gemini: new GeminiAdapter()
+      };
+
+      for (const todo of todos) {
+        const model = selectModel(todo, getLaneOverride(todo), modelRegistry);
+        const adapter = adapters[model];
+        const result = await adapter.dispatch(todo.prompt);
+        // ... handle result
+      }
+
+design_decisions:
+  - decision: Initialize all adapters at router startup
+    rationale: Fail-fast if any credentials missing, avoid lazy-init race conditions
+  - decision: Backward compat defaults to ClaudeAdapter when MODEL_PREFERENCES empty
+    rationale: Existing deployments upgrade smoothly without config changes
+  - decision: Log every model selection decision at INFO level
+    rationale: Observability for routing correctness, cost tracking
+
+risks:
+  - severity: high
+    description: Regression in existing single-backend router behavior
+    mitigation: Extensive integration tests, canary deployment to test project before full rollout
+
+depends_on: [s2-routing-strategy, s2-claude-adapter, s2-codex-adapter, s2-gemini-adapter]
+
+parallel_allowed: false

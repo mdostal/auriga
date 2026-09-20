@@ -1,0 +1,764 @@
+From 085b7ca8691fd7cb7474a8e2431e65d5fe03fc38 Mon Sep 17 00:00:00 2001
+From: mdostal <mdostal@ff.events>
+Date: Mon, 27 Jul 2026 01:54:01 -0500
+Subject: [PATCH] PAN-5577: add role-tree Multica dispatch
+
+Co-authored-by: multica-agent <github@multica.ai>
+---
+ auriga/consumer/index.test.ts     |  25 ++-
+ auriga/consumer/index.ts          |  24 ++-
+ auriga/dispatch/multica.test.ts   | 142 +++++++++++++++++
+ auriga/dispatch/multica.ts        | 244 ++++++++++++++++++++++++++++++
+ auriga/dispatch/role-tree.test.ts |  75 +++++++++
+ auriga/dispatch/role-tree.ts      | 152 +++++++++++++++++++
+ 6 files changed, 658 insertions(+), 4 deletions(-)
+ create mode 100644 auriga/dispatch/multica.test.ts
+ create mode 100644 auriga/dispatch/multica.ts
+ create mode 100644 auriga/dispatch/role-tree.test.ts
+ create mode 100644 auriga/dispatch/role-tree.ts
+
+diff --git a/auriga/consumer/index.test.ts b/auriga/consumer/index.test.ts
+index a995671..9b1e93c 100644
+--- a/auriga/consumer/index.test.ts
++++ b/auriga/consumer/index.test.ts
+@@ -10,7 +10,7 @@ import type {
+   TaskStatus,
+   TrackerAdapter,
+ } from "../../contracts/tracker-adapter.ts";
+-import { AurigaConsumer } from "./index.ts";
++import { AurigaConsumer, type TaskDispatcher } from "./index.ts";
+ 
+ /**
+  * Controllable fake LockContract: claim() always resolves to whatever
+@@ -55,6 +55,14 @@ class FakeTrackerAdapter implements TrackerAdapter {
+   }
+ }
+ 
++class FakeDispatcher implements TaskDispatcher {
++  dispatchCalls: { taskId: string; event: EventContract }[] = [];
++
++  async dispatch(taskId: string, event: EventContract): Promise<void> {
++    this.dispatchCalls.push({ taskId, event });
++  }
++}
++
+ function makeEvent(overrides: Partial<EventContract> = {}): EventContract {
+   return {
+     id: randomUUID(),
+@@ -99,6 +107,21 @@ test("claim-then-dispatch: a successful claim causes the tracker adapter to be c
+   });
+ });
+ 
++test("claim-then-dispatch: a configured dispatcher replaces the default status update", async () => {
++  const lock = new FakeLock();
++  lock.claimResult = { ok: true, leaseId: "lease-1" };
++  const trackerAdapter = new FakeTrackerAdapter();
++  const dispatcher = new FakeDispatcher();
++  const consumer = new AurigaConsumer(lock, trackerAdapter, { dispatcher });
++
++  const event = makeEvent({ payload: { taskId: "task-role-tree" } });
++  await consumer.onEvent(event);
++
++  assert.deepEqual(lock.claimedTaskIds, ["task-role-tree"]);
++  assert.equal(trackerAdapter.updateStatusCalls.length, 0);
++  assert.deepEqual(dispatcher.dispatchCalls, [{ taskId: "task-role-tree", event }]);
++});
++
+ // --- Behavioral: claim-rejected-then-no-dispatch ------------------------
+ 
+ test("claim-rejected-then-no-dispatch: an already_claimed result causes no dispatch and does not throw", async () => {
+diff --git a/auriga/consumer/index.ts b/auriga/consumer/index.ts
+index 9ad2c6d..0b90c67 100644
+--- a/auriga/consumer/index.ts
++++ b/auriga/consumer/index.ts
+@@ -4,6 +4,14 @@ import type { EventContract } from "../../contracts/event.ts";
+ import type { ClaimResult, LockContract } from "../../contracts/lock.ts";
+ import type { TrackerAdapter } from "../../contracts/tracker-adapter.ts";
+ 
++export interface TaskDispatcher {
++  dispatch(taskId: string, event: EventContract): Promise<void>;
++}
++
++export interface AurigaConsumerOptions {
++  dispatcher?: TaskDispatcher;
++}
++
+ /**
+  * ClassifiedFailure — the structured shape emitted on the consumer's
+  * `"failure"` event whenever a wrapped in-process adapter call throws (see
+@@ -163,11 +171,17 @@ function classifyErrorType(error: unknown): string {
+ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+   readonly #lock: LockContract;
+   readonly #trackerAdapter: TrackerAdapter;
++  readonly #dispatcher: TaskDispatcher | undefined;
+ 
+-  constructor(lock: LockContract, trackerAdapter: TrackerAdapter) {
++  constructor(
++    lock: LockContract,
++    trackerAdapter: TrackerAdapter,
++    options: AurigaConsumerOptions = {},
++  ) {
+     super();
+     this.#lock = lock;
+     this.#trackerAdapter = trackerAdapter;
++    this.#dispatcher = options.dispatcher;
+   }
+ 
+   /**
+@@ -204,10 +218,14 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+     }
+ 
+     try {
+-      await this.#trackerAdapter.updateStatus(taskId, "in_progress");
++      if (this.#dispatcher) {
++        await this.#dispatcher.dispatch(taskId, event);
++      } else {
++        await this.#trackerAdapter.updateStatus(taskId, "in_progress");
++      }
+     } catch (error) {
+       // Error boundary #2 — the tracker-adapter dispatch call.
+-      this.#emitFailure(error, "trackerAdapter", taskId);
++      this.#emitFailure(error, this.#dispatcher ? "dispatcher" : "trackerAdapter", taskId);
+       return;
+     }
+   }
+diff --git a/auriga/dispatch/multica.test.ts b/auriga/dispatch/multica.test.ts
+new file mode 100644
+index 0000000..fb8048c
+--- /dev/null
++++ b/auriga/dispatch/multica.test.ts
+@@ -0,0 +1,142 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { MulticaRoleDispatcher } from "./multica.ts";
++import type { EventContract } from "../../contracts/event.ts";
++
++const event: EventContract = {
++  id: "event-1",
++  type: "task.claimable",
++  payload: { taskId: "issue-1" },
++  timestamp: "2026-07-27T00:00:00.000Z",
++  source: "test",
++};
++
++test("MulticaRoleDispatcher assigns through issue PUT and verifies a new task_queue row", async () => {
++  const calls: { method: string; url: string; body: unknown }[] = [];
++  const restore = installFetchStub(calls, [
++    jsonResponse(200, {
++      id: "issue-1",
++      title: "Backend dispatch task",
++      description: null,
++      status: "todo",
++      priority: "high",
++      assignee_type: null,
++      assignee_id: null,
++      labels: [{ name: "backend" }],
++    }),
++    jsonResponse(200, []),
++    jsonResponse(200, {}),
++    jsonResponse(200, [
++      {
++        id: "task-run-1",
++        issue_id: "issue-1",
++        agent_id: "agent-1",
++        status: "queued",
++        created_at: "2026-07-27T00:00:01Z",
++      },
++    ]),
++  ]);
++
++  try {
++    const dispatcher = new MulticaRoleDispatcher(
++      { server_url: "http://multica.test", workspace_id: "workspace-1", token: "token" },
++      {
++        roles: [
++          {
++            role: "backend",
++            match: { labelsAll: ["backend"] },
++            assignee: { type: "agent", id: "agent-1" },
++          },
++        ],
++      },
++    );
++
++    const result = await dispatcher.assignAndEnqueue("issue-1", event);
++
++    assert.equal(result.taskRun.id, "task-run-1");
++    assert.equal(result.usedRerun, false);
++    assert.deepEqual(calls.map((call) => [call.method, pathOf(call.url)]), [
++      ["GET", "/api/issues/issue-1"],
++      ["GET", "/api/issues/issue-1/task-runs"],
++      ["PUT", "/api/issues/issue-1"],
++      ["GET", "/api/issues/issue-1/task-runs"],
++    ]);
++    assert.deepEqual(calls[2]?.body, {
++      assignee_type: "agent",
++      assignee_id: "agent-1",
++    });
++  } finally {
++    restore();
++  }
++});
++
++test("MulticaRoleDispatcher uses rerun when the role already owns the active issue", async () => {
++  const calls: { method: string; url: string; body: unknown }[] = [];
++  const restore = installFetchStub(calls, [
++    jsonResponse(200, {
++      id: "issue-1",
++      title: "Backend dispatch task",
++      description: null,
++      status: "todo",
++      priority: "high",
++      assignee_type: "agent",
++      assignee_id: "agent-1",
++    }),
++    jsonResponse(200, [{ id: "old-task", issue_id: "issue-1", agent_id: "agent-1", status: "done", created_at: "2026-07-26T00:00:00Z" }]),
++    jsonResponse(202, { id: "new-task" }),
++    jsonResponse(200, [
++      { id: "new-task", issue_id: "issue-1", agent_id: "agent-1", status: "queued", created_at: "2026-07-27T00:00:00Z" },
++      { id: "old-task", issue_id: "issue-1", agent_id: "agent-1", status: "done", created_at: "2026-07-26T00:00:00Z" },
++    ]),
++  ]);
++
++  try {
++    const dispatcher = new MulticaRoleDispatcher(
++      { server_url: "http://multica.test", workspace_id: "workspace-1", token: "token" },
++      { roles: [{ role: "backend", assignee: { type: "agent", id: "agent-1" } }] },
++    );
++
++    const result = await dispatcher.assignAndEnqueue("issue-1", event);
++
++    assert.equal(result.usedRerun, true);
++    assert.deepEqual(calls.map((call) => [call.method, pathOf(call.url)]), [
++      ["GET", "/api/issues/issue-1"],
++      ["GET", "/api/issues/issue-1/task-runs"],
++      ["POST", "/api/issues/issue-1/rerun"],
++      ["GET", "/api/issues/issue-1/task-runs"],
++    ]);
++  } finally {
++    restore();
++  }
++});
++
++function installFetchStub(
++  calls: { method: string; url: string; body: unknown }[],
++  responses: Response[],
++): () => void {
++  const original = globalThis.fetch;
++  globalThis.fetch = async (input, init) => {
++    const response = responses.shift();
++    if (!response) throw new Error("unexpected fetch call");
++    calls.push({
++      method: init?.method ?? "GET",
++      url: String(input),
++      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
++    });
++    return response;
++  };
++  return () => {
++    globalThis.fetch = original;
++  };
++}
++
++function jsonResponse(status: number, body: unknown): Response {
++  return new Response(JSON.stringify(body), {
++    status,
++    headers: { "Content-Type": "application/json" },
++  });
++}
++
++function pathOf(rawUrl: string): string {
++  return new URL(rawUrl).pathname;
++}
+diff --git a/auriga/dispatch/multica.ts b/auriga/dispatch/multica.ts
+new file mode 100644
+index 0000000..0597e7c
+--- /dev/null
++++ b/auriga/dispatch/multica.ts
+@@ -0,0 +1,244 @@
++import type { EventContract } from "../../contracts/event.ts";
++import { loadMulticaConfig, type MulticaConfig } from "../adapters/multica/index.ts";
++import { resolveRole, type RoleResolution, type RoleTreeConfig, type RoleTreeTask } from "./role-tree.ts";
++
++interface MulticaIssue {
++  id: string;
++  title: string;
++  description?: string | null;
++  status: string;
++  priority?: string;
++  assignee_type: string | null;
++  assignee_id: string | null;
++  labels?: { name: string }[];
++  metadata?: Record<string, string | number | boolean | null>;
++}
++
++interface MulticaAgent {
++  id: string;
++  name: string;
++  archived_at: string | null;
++  runtime_id: string | null;
++}
++
++interface MulticaSquad {
++  id: string;
++  name: string;
++  archived_at: string | null;
++  leader_id: string;
++}
++
++interface MulticaTaskRun {
++  id: string;
++  issue_id: string;
++  agent_id: string;
++  status: string;
++  created_at: string;
++}
++
++interface MulticaResponse {
++  status: number;
++  json: unknown;
++}
++
++export interface EnqueuedRoleTask {
++  issueId: string;
++  role: RoleResolution;
++  assignee: {
++    type: "agent" | "squad";
++    id: string;
++  };
++  taskRun: MulticaTaskRun;
++  usedRerun: boolean;
++}
++
++export class MulticaRoleDispatcher {
++  readonly #baseUrl: string;
++  readonly #workspaceId: string;
++  readonly #token: string;
++  readonly #roleTree: RoleTreeConfig;
++
++  constructor(config: MulticaConfig, roleTree: RoleTreeConfig) {
++    this.#baseUrl = config.server_url.replace(/\/+$/, "");
++    this.#workspaceId = config.workspace_id;
++    this.#token = config.token;
++    this.#roleTree = roleTree;
++  }
++
++  static fromLocalConfig(roleTree: RoleTreeConfig, configPath?: string): MulticaRoleDispatcher {
++    return new MulticaRoleDispatcher(loadMulticaConfig(configPath), roleTree);
++  }
++
++  async dispatch(taskId: string, event: EventContract): Promise<void> {
++    await this.assignAndEnqueue(taskId, event);
++  }
++
++  async assignAndEnqueue(taskId: string, event: EventContract): Promise<EnqueuedRoleTask> {
++    const issue = await this.#getIssue(taskId);
++    const task = taskForRoleTree(issue, event);
++    const role = resolveRole(this.#roleTree, task);
++    if (!role) {
++      throw new Error(`MulticaRoleDispatcher: no role-tree match for task "${taskId}"`);
++    }
++
++    const assignee = await this.#resolveAssignee(role.assignee);
++    const before = await this.#listTaskRuns(issue.id);
++    const beforeIds = new Set(before.map((run) => run.id));
++    const alreadyAssigned =
++      issue.assignee_type === assignee.type && issue.assignee_id === assignee.id;
++    const needsBacklogPromotion = issue.status === "backlog";
++
++    let usedRerun = false;
++    if (alreadyAssigned && !needsBacklogPromotion) {
++      usedRerun = true;
++      await this.#rerunIssue(issue.id);
++    } else {
++      const body: Record<string, unknown> = {
++        assignee_type: assignee.type,
++        assignee_id: assignee.id,
++      };
++      if (needsBacklogPromotion) {
++        body.status = "todo";
++      }
++      await this.#putIssue(issue.id, body);
++    }
++
++    const taskRun = await this.#waitForNewTaskRun(issue.id, beforeIds);
++    return {
++      issueId: issue.id,
++      role,
++      assignee,
++      taskRun,
++      usedRerun,
++    };
++  }
++
++  async #resolveAssignee(assignee: RoleResolution["assignee"]): Promise<{ type: "agent" | "squad"; id: string }> {
++    if (assignee.id) {
++      return { type: assignee.type, id: assignee.id };
++    }
++    if (!assignee.name) {
++      throw new Error("MulticaRoleDispatcher: role-tree assignee must include id or name");
++    }
++
++    if (assignee.type === "agent") {
++      const agents = await this.#listAgents();
++      const agent = findByName(agents, assignee.name);
++      if (!agent) {
++        throw new Error(`MulticaRoleDispatcher: no Multica agent named "${assignee.name}"`);
++      }
++      if (agent.archived_at || !agent.runtime_id) {
++        throw new Error(`MulticaRoleDispatcher: agent "${assignee.name}" is not ready for dispatch`);
++      }
++      return { type: "agent", id: agent.id };
++    }
++
++    const squads = await this.#listSquads();
++    const squad = findByName(squads, assignee.name);
++    if (!squad) {
++      throw new Error(`MulticaRoleDispatcher: no Multica squad named "${assignee.name}"`);
++    }
++    if (squad.archived_at) {
++      throw new Error(`MulticaRoleDispatcher: squad "${assignee.name}" is archived`);
++    }
++    return { type: "squad", id: squad.id };
++  }
++
++  async #getIssue(issueId: string): Promise<MulticaIssue> {
++    const res = await this.#request("GET", `/api/issues/${issueId}`);
++    if (res.status !== 200) {
++      throw new Error(`MulticaRoleDispatcher: GET /api/issues/${issueId} failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++    return res.json as MulticaIssue;
++  }
++
++  async #putIssue(issueId: string, body: Record<string, unknown>): Promise<void> {
++    const res = await this.#request("PUT", `/api/issues/${issueId}`, body);
++    if (res.status !== 200) {
++      throw new Error(`MulticaRoleDispatcher: PUT /api/issues/${issueId} failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++  }
++
++  async #rerunIssue(issueId: string): Promise<void> {
++    const res = await this.#request("POST", `/api/issues/${issueId}/rerun`, {});
++    if (res.status !== 202) {
++      throw new Error(`MulticaRoleDispatcher: POST /api/issues/${issueId}/rerun failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++  }
++
++  async #listTaskRuns(issueId: string): Promise<MulticaTaskRun[]> {
++    const res = await this.#request("GET", `/api/issues/${issueId}/task-runs`);
++    if (res.status !== 200) {
++      throw new Error(`MulticaRoleDispatcher: GET /api/issues/${issueId}/task-runs failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++    return res.json as MulticaTaskRun[];
++  }
++
++  async #waitForNewTaskRun(issueId: string, beforeIds: Set<string>): Promise<MulticaTaskRun> {
++    for (let attempt = 0; attempt < 5; attempt += 1) {
++      const runs = await this.#listTaskRuns(issueId);
++      const created = runs.find((run) => !beforeIds.has(run.id));
++      if (created) return created;
++      await new Promise((resolve) => setTimeout(resolve, 100));
++    }
++    throw new Error(`MulticaRoleDispatcher: assignment completed but no new task_queue row appeared for issue "${issueId}"`);
++  }
++
++  async #listAgents(): Promise<MulticaAgent[]> {
++    const res = await this.#request("GET", "/api/agents");
++    if (res.status !== 200) {
++      throw new Error(`MulticaRoleDispatcher: GET /api/agents failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++    return res.json as MulticaAgent[];
++  }
++
++  async #listSquads(): Promise<MulticaSquad[]> {
++    const res = await this.#request("GET", "/api/squads");
++    if (res.status !== 200) {
++      throw new Error(`MulticaRoleDispatcher: GET /api/squads failed (${res.status}): ${JSON.stringify(res.json)}`);
++    }
++    return res.json as MulticaSquad[];
++  }
++
++  async #request(
++    method: "GET" | "POST" | "PUT",
++    path: string,
++    body?: unknown,
++  ): Promise<MulticaResponse> {
++    const url = `${this.#baseUrl}${path}?workspace_id=${this.#workspaceId}`;
++    const res = await fetch(url, {
++      method,
++      headers: {
++        "Content-Type": "application/json",
++        Authorization: `Bearer ${this.#token}`,
++      },
++      body: body !== undefined ? JSON.stringify(body) : undefined,
++    });
++    let json: unknown = null;
++    try {
++      json = await res.json();
++    } catch {
++      // Empty responses are represented as null.
++    }
++    return { status: res.status, json };
++  }
++}
++
++function taskForRoleTree(issue: MulticaIssue, event: EventContract): RoleTreeTask {
++  return {
++    id: issue.id,
++    type: event.type,
++    source: event.source,
++    title: issue.title,
++    description: issue.description ?? undefined,
++    status: issue.status,
++    priority: issue.priority,
++    labels: issue.labels?.map((label) => label.name),
++    metadata: issue.metadata,
++  };
++}
++
++function findByName<T extends { name: string }>(items: T[], name: string): T | undefined {
++  const normalized = name.toLowerCase();
++  return items.find((item) => item.name.toLowerCase() === normalized);
++}
+diff --git a/auriga/dispatch/role-tree.test.ts b/auriga/dispatch/role-tree.test.ts
+new file mode 100644
+index 0000000..6efc8a1
+--- /dev/null
++++ b/auriga/dispatch/role-tree.test.ts
+@@ -0,0 +1,75 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { parseRoleTreeConfig, resolveRole } from "./role-tree.ts";
++
++test("role-tree resolves the deepest declarative match", () => {
++  const tree = parseRoleTreeConfig(`
++roles:
++  - role: engineering
++    assignee:
++      type: agent
++      name: auriga-dev
++    children:
++      - role: verification
++        match:
++          labelsAll: [verify]
++          titleIncludes: [live]
++        assignee:
++          type: agent
++          id: verifier-agent-id
++`);
++
++  const resolution = resolveRole(tree, {
++    id: "issue-1",
++    title: "Live dispatch verification",
++    labels: ["verify"],
++  });
++
++  assert.deepEqual(resolution, {
++    rolePath: ["engineering", "verification"],
++    assignee: { type: "agent", id: "verifier-agent-id" },
++  });
++});
++
++test("role-tree falls back to the parent role when no child matches", () => {
++  const tree = parseRoleTreeConfig({
++    roles: [
++      {
++        role: "engineering",
++        assignee: { type: "agent", name: "auriga-dev" },
++        children: [
++          {
++            role: "docs",
++            match: { labelsAll: ["docs"] },
++            assignee: { type: "agent", name: "technical-writer" },
++          },
++        ],
++      },
++    ],
++  });
++
++  const resolution = resolveRole(tree, {
++    id: "issue-1",
++    title: "Implement dispatch",
++    labels: ["backend"],
++  });
++
++  assert.deepEqual(resolution, {
++    rolePath: ["engineering"],
++    assignee: { type: "agent", name: "auriga-dev" },
++  });
++});
++
++test("role-tree returns null when no declarative match exists", () => {
++  const tree = parseRoleTreeConfig({
++    roles: [
++      {
++        role: "docs",
++        match: { labelsAll: ["docs"] },
++        assignee: { type: "agent", name: "technical-writer" },
++      },
++    ],
++  });
++
++  assert.equal(resolveRole(tree, { id: "issue-1", labels: ["backend"] }), null);
++});
+diff --git a/auriga/dispatch/role-tree.ts b/auriga/dispatch/role-tree.ts
+new file mode 100644
+index 0000000..6887f64
+--- /dev/null
++++ b/auriga/dispatch/role-tree.ts
+@@ -0,0 +1,152 @@
++import * as yaml from "js-yaml";
++import { z } from "zod";
++
++export const MulticaAssigneeTypeSchema = z.enum(["agent", "squad"]);
++export type MulticaAssigneeType = z.infer<typeof MulticaAssigneeTypeSchema>;
++
++export const RoleTreeAssigneeSchema = z.object({
++  type: MulticaAssigneeTypeSchema,
++  id: z.string().optional(),
++  name: z.string().optional(),
++}).refine((assignee) => Boolean(assignee.id || assignee.name), {
++  message: "role-tree assignee requires either id or name",
++});
++export type RoleTreeAssignee = z.infer<typeof RoleTreeAssigneeSchema>;
++
++export const RoleTreeMatchSchema = z.object({
++  types: z.array(z.string()).optional(),
++  sources: z.array(z.string()).optional(),
++  statuses: z.array(z.string()).optional(),
++  priorities: z.array(z.string()).optional(),
++  titleIncludes: z.array(z.string()).optional(),
++  descriptionIncludes: z.array(z.string()).optional(),
++  labelsAny: z.array(z.string()).optional(),
++  labelsAll: z.array(z.string()).optional(),
++  metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
++});
++export type RoleTreeMatch = z.infer<typeof RoleTreeMatchSchema>;
++
++export interface RoleTreeTask {
++  id: string;
++  type?: string;
++  source?: string;
++  title?: string;
++  description?: string;
++  status?: string;
++  priority?: string;
++  labels?: string[];
++  metadata?: Record<string, string | number | boolean | null>;
++}
++
++export interface RoleTreeNode {
++  role: string;
++  assignee?: RoleTreeAssignee;
++  match?: RoleTreeMatch;
++  children?: RoleTreeNode[];
++}
++
++export interface RoleTreeConfig {
++  roles: RoleTreeNode[];
++}
++
++export interface RoleResolution {
++  rolePath: string[];
++  assignee: RoleTreeAssignee;
++}
++
++const RoleTreeNodeSchema: z.ZodType<RoleTreeNode> = z.lazy(() =>
++  z.object({
++    role: z.string().min(1),
++    assignee: RoleTreeAssigneeSchema.optional(),
++    match: RoleTreeMatchSchema.optional(),
++    children: z.array(RoleTreeNodeSchema).optional(),
++  }),
++);
++
++export const RoleTreeConfigSchema: z.ZodType<RoleTreeConfig> = z.object({
++  roles: z.array(RoleTreeNodeSchema).min(1),
++});
++
++export function parseRoleTreeConfig(input: string | unknown): RoleTreeConfig {
++  const candidate = typeof input === "string" ? yaml.load(input) : input;
++  return RoleTreeConfigSchema.parse(candidate);
++}
++
++export function resolveRole(tree: RoleTreeConfig, task: RoleTreeTask): RoleResolution | null {
++  for (const node of tree.roles) {
++    const resolution = resolveNode(node, task, []);
++    if (resolution) return resolution;
++  }
++  return null;
++}
++
++function resolveNode(
++  node: RoleTreeNode,
++  task: RoleTreeTask,
++  parentPath: string[],
++): RoleResolution | null {
++  if (node.match && !matches(node.match, task)) {
++    return null;
++  }
++
++  const rolePath = [...parentPath, node.role];
++  for (const child of node.children ?? []) {
++    const childResolution = resolveNode(child, task, rolePath);
++    if (childResolution) return childResolution;
++  }
++
++  if (node.assignee) {
++    return { rolePath, assignee: node.assignee };
++  }
++  return null;
++}
++
++function matches(match: RoleTreeMatch, task: RoleTreeTask): boolean {
++  return (
++    matchList(match.types, task.type) &&
++    matchList(match.sources, task.source) &&
++    matchList(match.statuses, task.status) &&
++    matchList(match.priorities, task.priority) &&
++    includesEvery(match.titleIncludes, task.title) &&
++    includesEvery(match.descriptionIncludes, task.description) &&
++    labelsAny(match.labelsAny, task.labels) &&
++    labelsAll(match.labelsAll, task.labels) &&
++    metadataMatches(match.metadata, task.metadata)
++  );
++}
++
++function matchList(needles: string[] | undefined, value: string | undefined): boolean {
++  if (!needles || needles.length === 0) return true;
++  if (!value) return false;
++  return needles.includes(value);
++}
++
++function includesEvery(needles: string[] | undefined, value: string | undefined): boolean {
++  if (!needles || needles.length === 0) return true;
++  if (!value) return false;
++  const haystack = value.toLowerCase();
++  return needles.every((needle) => haystack.includes(needle.toLowerCase()));
++}
++
++function labelsAny(needles: string[] | undefined, labels: string[] | undefined): boolean {
++  if (!needles || needles.length === 0) return true;
++  if (!labels) return false;
++  const available = new Set(labels);
++  return needles.some((needle) => available.has(needle));
++}
++
++function labelsAll(needles: string[] | undefined, labels: string[] | undefined): boolean {
++  if (!needles || needles.length === 0) return true;
++  if (!labels) return false;
++  const available = new Set(labels);
++  return needles.every((needle) => available.has(needle));
++}
++
++function metadataMatches(
++  expected: Record<string, string | number | boolean | null> | undefined,
++  actual: Record<string, string | number | boolean | null> | undefined,
++): boolean {
++  if (!expected) return true;
++  if (!actual) return false;
++  return Object.entries(expected).every(([key, value]) => actual[key] === value);
++}
+-- 
+2.50.1 (Apple Git-155)
+

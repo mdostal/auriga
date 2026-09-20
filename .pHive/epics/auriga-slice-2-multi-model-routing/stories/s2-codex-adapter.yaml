@@ -1,0 +1,93 @@
+id: s2-codex-adapter
+epic: auriga-slice-2-multi-model-routing
+title: Implement Codex dispatch adapter
+status: pending
+complexity: medium
+methodology: classic
+
+description: |
+  Create the CodexAdapter implementation for OpenAI Codex API. This adapter
+  handles code-generation tasks routed to Codex, translating router requests
+  into OpenAI Completions API calls and normalizing responses.
+
+acceptance_criteria:
+  - "Given a task with model=codex, when dispatching, then call OpenAI Completions API with correct parameters"
+  - "Given Codex API returns completion, when parsing, then extract code, tokens, finish_reason"
+  - "Given Codex API returns 429 rate limit, when dispatching, then retry via base adapter"
+  - "Given invalid OPENAI_API_KEY, when initializing, then throw AuthenticationError"
+  - "Given code-generation task routed to Codex, when dispatch succeeds, then return valid code snippet"
+
+steps:
+  - id: research
+    description: Research OpenAI Codex API endpoint, auth, and request format
+    agent: researcher
+  - id: implement
+    description: Create src/router/adapters/CodexAdapter.ts extending BaseDispatchAdapter
+    agent: developer
+    depends_on: [research, s2-dispatch-adapter-interface]
+  - id: test
+    description: Write tests for success path, rate limit, auth failure, token extraction
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review Codex integration and error handling
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push to feature branch
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: TypeScript
+    runtime: Node.js
+    api: OpenAI Completions API
+  key_files:
+    - path: src/router/adapters/BaseDispatchAdapter.ts
+      purpose: Parent class providing retry/timeout/logging
+    - path: src/auriga/model-registry.ts
+      purpose: Defines Codex capability profile
+
+files_to_modify:
+  - file: src/router/adapters/CodexAdapter.ts
+    change: Create new adapter implementing IDispatchAdapter for Codex API
+  - file: src/router/adapters/index.ts
+    change: Export CodexAdapter
+
+code_examples:
+  - title: Completions API request shape
+    snippet: |
+      // CodexAdapter.dispatch() calls OpenAI like this
+      const response = await fetch('https://api.openai.com/v1/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'code-davinci-002',
+          prompt: prompt,
+          max_tokens: 2048,
+          temperature: 0
+        })
+      });
+
+design_decisions:
+  - decision: Adapter reads OPENAI_API_KEY from env
+    rationale: Standard OpenAI client pattern
+  - decision: Use code-davinci-002 model (Codex)
+    rationale: Optimized for code generation per OpenAI docs
+  - decision: Temperature=0 for deterministic code output
+    rationale: Code generation benefits from determinism over creativity
+
+risks:
+  - severity: medium
+    description: Codex may be deprecated or sunset by OpenAI
+    mitigation: Monitor OpenAI model deprecation announcements, plan migration to GPT-4 code mode
+
+depends_on: [s2-dispatch-adapter-interface]
+
+parallel_allowed: true
+parallel_rationale: variation

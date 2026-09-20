@@ -1,0 +1,108 @@
+id: p1-state-machine-auto-unblock
+epic: p1-dispatch-throughput
+title: Implement auto-unblock when dependencies reach done
+status: pending
+complexity: medium
+methodology: classic
+depends_on: [p1-state-machine-transitions]
+
+description: |
+  When a blocking dependency reaches `done`, auto-unblock dependents (blocked→todo) WITHOUT
+  agent intervention.
+
+  Includes idempotency guard: never re-dispatch issues already in in_review/done.
+
+  Problem: Dependency cascades pile up (PAN-6640 depends on blocked PAN-6637) — when 6637 done,
+  6640 stays blocked.
+
+  Fix: On issue → done, find dependents, remove from blocking set, advance blocked→todo if no
+  remaining blockers.
+
+acceptance_criteria:
+  - "Given issue A blocks issue B (B depends_on: [A]) AND issue A reaches 'done'"
+  - "Then issue A is removed from B's blocking set"
+  - "And if B has no remaining blockers, B advances to 'todo'"
+  - "Given an issue already in 'in_review' OR 'done'"
+  - "Then the issue is excluded from dispatch (idempotency guard)"
+
+steps:
+  - id: research
+    description: Identify dependency tracking (depends_on field), locate post-state-transition hooks
+    agent: researcher
+  - id: implement
+    description: Add auto_unblock_dependents + idempotency guard (exclude in_review/done from dispatch)
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test auto-unblock — done dependency unblocks dependent, idempotency guard prevents re-dispatch
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review auto-unblock logic for correctness (handles partial unblock, multi-dep cascades)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push auto-unblock + idempotency changes
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: multica
+  tech_stack:
+    language: typescript
+    framework: state-machine
+  key_files:
+    - path: src/state-machine/transitions.ts
+      purpose: State-machine module with post-done hooks
+    - path: src/router/dispatch-candidates.ts
+      purpose: Dispatch pool filtering (add idempotency guard)
+
+files_to_modify:
+  - file: src/state-machine/transitions.ts
+    change: Add auto_unblock_dependents called on done transition
+  - file: src/router/dispatch-candidates.ts
+    change: Exclude issues in in_review/done from dispatch pool
+
+design_decisions:
+  - decision: Auto-unblock on done transition (not periodic batch scan)
+    rationale: Real-time unblock minimizes latency; event-driven is cheaper than polling
+  - decision: Idempotency guard at dispatch-pool level (not state-machine)
+    rationale: Router owns dispatch candidates; state-machine owns transitions — separation of concerns
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document auto-unblock behavior in Multica state-machine docs"
+
+risks:
+  - severity: medium
+    description: Partial unblock (multi-dep issue) could advance prematurely if logic is wrong
+    mitigation: Only advance blocked→todo when blocking set is EMPTY (all deps done)
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R4.3: Done Dependency → Auto-Unblock
+      When issue A reaches done, remove A from dependent B's blocking set; if B has no remaining blockers, B → todo.
+      R4.4: Idempotency Guard
+      Never re-dispatch issues already in in_review/done.
+  - path: .pHive/planning/architecture.md
+    relevant_excerpt: |
+      def auto_unblock_dependents(completed_issue):
+        for dep in dependents: dep.blocked_by.remove(completed_issue.id)
+        if len(dep.blocked_by) == 0 and dep.state == 'blocked': transition(dep, 'todo')
+
+metric:
+  applies: true
+  name: issues.blocked_count
+  direction: down
+  unit: issues
+  baseline: "138"
+  target: "<50"
+  window: "1 week post-deploy"
+  source:
+    kind: manual
+    ref: "GitHub issues state filter — count issues with state=blocked"
+  verify_at: "2026-08-04T00:00:00Z"
+  owner: developer

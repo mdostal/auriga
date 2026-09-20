@@ -1,0 +1,98 @@
+id: p1-validation-end-to-end
+epic: p1-dispatch-throughput
+title: Validate end-to-end — one build story produces real merged PR + reaches done
+status: pending
+complexity: high
+methodology: classic
+depends_on: [p1-router-capability-routing, p1-router-seed-planning, p1-router-repo-gate, p1-state-machine-transitions, p1-state-machine-auto-unblock, p1-router-human-filter]
+
+description: |
+  Phase 5 validation: Prove ONE build story dispatched now produces a REAL merged PR and reaches
+  `done` (not blocked with empty PR).
+
+  Success criteria:
+  - `done` climbs off 56
+  - `blocked` drains
+  - `in_review` moves
+  - No seed dispatched to build
+  - No human-todo dispatched to agent
+  - No hive story on codex
+
+  This is the end-to-end proof that P1 fixes convert dispatch → done throughput.
+
+acceptance_criteria:
+  - "Given the router and state-machine fixes are deployed"
+  - "When ONE build story is dispatched"
+  - "Then the story produces a real merged PR"
+  - "And the story reaches 'done' state"
+  - "And metrics show: done +1, in_review moves, no routing violations"
+
+steps:
+  - id: research
+    description: Select ONE build story for end-to-end test (hive-labeled, auriga-build eligible)
+    agent: researcher
+  - id: implement
+    description: Monitor full cycle — dispatch → run → PR → merge → done state
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Validate metrics — done climbed, in_review moved, no routing violations (seeds/human-todos/hive-to-codex)
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review end-to-end proof — confirm PR merged, done state reached, metrics correct
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Document validation results in runbook
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: multi-repo
+  tech_stack:
+    auriga: routing
+    multica: state-machine
+    github: issues
+  key_files:
+    - path: .pHive/validation/p1-end-to-end-proof.md
+      purpose: Validation results document
+
+files_to_modify:
+  - file: .pHive/validation/p1-end-to-end-proof.md
+    change: Write validation results
+
+design_decisions:
+  - decision: ONE story proof before bulk triage
+    rationale: Validates fixes work end-to-end before touching 138 blocked issues — reduces blast radius
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document validation procedure and results in runbook"
+
+risks:
+  - severity: high
+    description: Validation fails (story still blocks or PR doesn't merge)
+    mitigation: Debug root cause before bulk triage; rollback fixes if validation fails repeatedly
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      Phase 5 (Validation): End-to-end proof (one story → done)
+      Success Criteria: One build story produces real merged PR + reaches done.
+
+metric:
+  applies: true
+  name: validation.end_to_end_pass
+  direction: up
+  unit: boolean
+  baseline: "false"
+  target: "true"
+  window: "validation run"
+  source:
+    kind: manual
+    ref: "Validation results document — pass/fail"
+  verify_at: "integrate"
+  owner: developer

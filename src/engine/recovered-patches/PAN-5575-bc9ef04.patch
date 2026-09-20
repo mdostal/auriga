@@ -1,0 +1,730 @@
+From bc9ef0441472960c761968834a4939b86ca852d0 Mon Sep 17 00:00:00 2001
+From: mdostal <mdostal@ff.events>
+Date: Mon, 27 Jul 2026 01:41:07 -0500
+Subject: [PATCH] PAN-5575: add health-aware lane routing
+
+Co-authored-by: multica-agent <github@multica.ai>
+---
+ auriga/consumer/index.test.ts | 100 +++++++++++++++
+ auriga/consumer/index.ts      |  86 ++++++++++++-
+ auriga/routing/index.test.ts  | 156 +++++++++++++++++++++++
+ auriga/routing/index.ts       | 232 ++++++++++++++++++++++++++++++++++
+ auriga/run.ts                 |  20 ++-
+ 5 files changed, 589 insertions(+), 5 deletions(-)
+ create mode 100644 auriga/routing/index.test.ts
+ create mode 100644 auriga/routing/index.ts
+
+diff --git a/auriga/consumer/index.test.ts b/auriga/consumer/index.test.ts
+index a995671..5fde7fc 100644
+--- a/auriga/consumer/index.test.ts
++++ b/auriga/consumer/index.test.ts
+@@ -10,6 +10,12 @@ import type {
+   TaskStatus,
+   TrackerAdapter,
+ } from "../../contracts/tracker-adapter.ts";
++import type {
++  DispatchRoutingRequest,
++  HeimdallLaneStatus,
++  RoutingDecision,
++  RoutingEngine,
++} from "../routing/index.ts";
+ import { AurigaConsumer } from "./index.ts";
+ 
+ /**
+@@ -55,6 +61,17 @@ class FakeTrackerAdapter implements TrackerAdapter {
+   }
+ }
+ 
++class FakeRoutingEngine implements RoutingEngine {
++  readonly requests: DispatchRoutingRequest[] = [];
++
++  constructor(private readonly decision: RoutingDecision) {}
++
++  async selectLane(request: DispatchRoutingRequest): Promise<RoutingDecision> {
++    this.requests.push(request);
++    return this.decision;
++  }
++}
++
+ function makeEvent(overrides: Partial<EventContract> = {}): EventContract {
+   return {
+     id: randomUUID(),
+@@ -99,6 +116,89 @@ test("claim-then-dispatch: a successful claim causes the tracker adapter to be c
+   });
+ });
+ 
++test("claim-then-route-then-dispatch: a successful claim queries the routing engine before dispatch", async () => {
++  const lock = new FakeLock();
++  lock.claimResult = { ok: true, leaseId: "lease-1" };
++  const trackerAdapter = new FakeTrackerAdapter();
++  const selectedLane: HeimdallLaneStatus = {
++    lane_id: "codex-primary",
++    provider: "codex",
++    status: "up",
++    reset_at: null,
++    reason: null,
++    last_updated: "2026-07-27T00:00:00.000Z",
++    signal_source: "active_probe",
++    available_headroom: 5,
++  };
++  const routingEngine = new FakeRoutingEngine({
++    taskId: "task-routed",
++    taskType: "coding",
++    requiredHeadroom: 2,
++    selectedLane,
++    consideredLanes: [],
++    decision: "selected",
++    reason: "selected lane codex-primary",
++    timestamp: "2026-07-27T00:00:00.000Z",
++  });
++  const consumer = new AurigaConsumer(lock, trackerAdapter, { routingEngine });
++
++  const event = makeEvent({
++    payload: {
++      taskId: "task-routed",
++      taskType: "coding",
++      requiredHeadroom: 2,
++    },
++  });
++  await consumer.onEvent(event);
++
++  assert.deepEqual(routingEngine.requests, [
++    {
++      taskId: "task-routed",
++      taskType: "coding",
++      requiredHeadroom: 2,
++      allowedModelTiers: undefined,
++    },
++  ]);
++  assert.deepEqual(trackerAdapter.updateStatusCalls, [
++    { taskId: "task-routed", status: "in_progress" },
++  ]);
++});
++
++test("claim-then-route-blocked: no eligible lane marks the task blocked instead of dispatching", async () => {
++  const lock = new FakeLock();
++  lock.claimResult = { ok: true, leaseId: "lease-1" };
++  const trackerAdapter = new FakeTrackerAdapter();
++  const routingEngine = new FakeRoutingEngine({
++    taskId: "task-blocked",
++    taskType: "coding",
++    requiredHeadroom: 1,
++    selectedLane: null,
++    consideredLanes: [],
++    decision: "blocked",
++    reason: "no eligible lane",
++    timestamp: "2026-07-27T00:00:00.000Z",
++  });
++  const consumer = new AurigaConsumer(lock, trackerAdapter, { routingEngine });
++
++  await consumer.onEvent(
++    makeEvent({
++      payload: { task_id: "task-blocked", task_type: "coding" },
++    }),
++  );
++
++  assert.deepEqual(routingEngine.requests, [
++    {
++      taskId: "task-blocked",
++      taskType: "coding",
++      requiredHeadroom: 1,
++      allowedModelTiers: undefined,
++    },
++  ]);
++  assert.deepEqual(trackerAdapter.updateStatusCalls, [
++    { taskId: "task-blocked", status: "blocked" },
++  ]);
++});
++
+ // --- Behavioral: claim-rejected-then-no-dispatch ------------------------
+ 
+ test("claim-rejected-then-no-dispatch: an already_claimed result causes no dispatch and does not throw", async () => {
+diff --git a/auriga/consumer/index.ts b/auriga/consumer/index.ts
+index 9ad2c6d..0782e85 100644
+--- a/auriga/consumer/index.ts
++++ b/auriga/consumer/index.ts
+@@ -3,6 +3,10 @@ import type { ConsumerContract } from "../../contracts/consumer.ts";
+ import type { EventContract } from "../../contracts/event.ts";
+ import type { ClaimResult, LockContract } from "../../contracts/lock.ts";
+ import type { TrackerAdapter } from "../../contracts/tracker-adapter.ts";
++import type {
++  DispatchRoutingRequest,
++  RoutingEngine,
++} from "../routing/index.ts";
+ 
+ /**
+  * ClassifiedFailure — the structured shape emitted on the consumer's
+@@ -22,8 +26,9 @@ import type { TrackerAdapter } from "../../contracts/tracker-adapter.ts";
+  *   for grouping/counting in escalation/'s sustained-decline logic.
+  * - `sourceAdapter` — which adapter call failed, at the granularity of
+  *   "which dependency this class calls," not "which HTTP verb inside that
+- *   dependency." Current values: `"lock"` (a `lock.claim()` failure) and
+- *   `"trackerAdapter"` (a `trackerAdapter.updateStatus()` failure). See
++ *   dependency." Current values: `"lock"` (a `lock.claim()` failure),
++ *   `"laneRouter"` (a routing decision failure), and `"trackerAdapter"`
++ *   (a `trackerAdapter.updateStatus()` failure). See
+  *   the class doc's "Error boundary" section for why this is the chosen
+  *   granularity.
+  * - `taskId` — optional because a future call site might fail before a
+@@ -43,6 +48,10 @@ export interface ClassifiedFailure {
+   error: unknown;
+ }
+ 
++export interface AurigaConsumerOptions {
++  routingEngine?: RoutingEngine;
++}
++
+ /**
+  * Classifies a thrown value into a short, stable string. See
+  * ClassifiedFailure's `errorType` doc for the exact rule. Deliberately
+@@ -163,11 +172,17 @@ function classifyErrorType(error: unknown): string {
+ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+   readonly #lock: LockContract;
+   readonly #trackerAdapter: TrackerAdapter;
++  readonly #routingEngine: RoutingEngine | undefined;
+ 
+-  constructor(lock: LockContract, trackerAdapter: TrackerAdapter) {
++  constructor(
++    lock: LockContract,
++    trackerAdapter: TrackerAdapter,
++    options: AurigaConsumerOptions = {},
++  ) {
+     super();
+     this.#lock = lock;
+     this.#trackerAdapter = trackerAdapter;
++    this.#routingEngine = options.routingEngine;
+   }
+ 
+   /**
+@@ -203,8 +218,22 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+       return;
+     }
+ 
++    let dispatchStatus: "in_progress" | "blocked" = "in_progress";
++    if (this.#routingEngine) {
++      let routingDecision;
++      try {
++        routingDecision = await this.#routingEngine.selectLane(
++          this.#extractRoutingRequest(event, taskId),
++        );
++      } catch (error) {
++        this.#emitFailure(error, "laneRouter", taskId);
++        return;
++      }
++      dispatchStatus = routingDecision.selectedLane ? "in_progress" : "blocked";
++    }
++
+     try {
+-      await this.#trackerAdapter.updateStatus(taskId, "in_progress");
++      await this.#trackerAdapter.updateStatus(taskId, dispatchStatus);
+     } catch (error) {
+       // Error boundary #2 — the tracker-adapter dispatch call.
+       this.#emitFailure(error, "trackerAdapter", taskId);
+@@ -269,10 +298,59 @@ export class AurigaConsumer extends EventEmitter implements ConsumerContract {
+       if (typeof candidate.taskId === "string") {
+         return candidate.taskId;
+       }
++      if (typeof candidate.task_id === "string") {
++        return candidate.task_id;
++      }
+       if (typeof candidate.id === "string") {
+         return candidate.id;
+       }
+     }
+     return event.id;
+   }
++
++  #extractRoutingRequest(event: EventContract, taskId: string): DispatchRoutingRequest {
++    const payload = event.payload;
++    const candidate =
++      payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
++    return {
++      taskId,
++      taskType: extractString(candidate.taskType, candidate.task_type, candidate.type) ?? event.type,
++      requiredHeadroom: extractNumber(
++        candidate.requiredHeadroom,
++        candidate.required_headroom,
++        candidate.headroom,
++      ) ?? 1,
++      allowedModelTiers: extractStringArray(
++        candidate.allowedModelTiers,
++        candidate.allowed_model_tiers,
++      ),
++    };
++  }
++}
++
++function extractString(...values: unknown[]): string | undefined {
++  for (const value of values) {
++    if (typeof value === "string" && value.length > 0) {
++      return value;
++    }
++  }
++  return undefined;
++}
++
++function extractNumber(...values: unknown[]): number | undefined {
++  for (const value of values) {
++    if (typeof value === "number" && Number.isFinite(value)) {
++      return value;
++    }
++  }
++  return undefined;
++}
++
++function extractStringArray(...values: unknown[]): string[] | undefined {
++  for (const value of values) {
++    if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) {
++      return value;
++    }
++  }
++  return undefined;
+ }
+diff --git a/auriga/routing/index.test.ts b/auriga/routing/index.test.ts
+new file mode 100644
+index 0000000..0f3b1ba
+--- /dev/null
++++ b/auriga/routing/index.test.ts
+@@ -0,0 +1,156 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import {
++  HealthAwareRoutingEngine,
++  HeimdallHttpLaneRouterClient,
++  type DecisionRecorder,
++  type HeimdallLaneStatus,
++  type LaneRouterClient,
++  type RoutingDecisionRecord,
++} from "./index.ts";
++
++class FakeLaneRouterClient implements LaneRouterClient {
++  constructor(private readonly lanes: HeimdallLaneStatus[]) {}
++
++  async listLanes(): Promise<HeimdallLaneStatus[]> {
++    return this.lanes;
++  }
++}
++
++class RecordingDecisionRecorder implements DecisionRecorder {
++  readonly records: RoutingDecisionRecord[] = [];
++
++  async recordRoutingDecision(record: RoutingDecisionRecord): Promise<void> {
++    this.records.push(record);
++  }
++}
++
++function lane(overrides: Partial<HeimdallLaneStatus>): HeimdallLaneStatus {
++  return {
++    lane_id: "codex-primary",
++    provider: "codex",
++    status: "up",
++    reset_at: null,
++    reason: null,
++    last_updated: "2026-07-27T00:00:00.000Z",
++    signal_source: "active_probe",
++    ...overrides,
++  };
++}
++
++test("selectLane chooses an up lane that matches task type and headroom, excluding cheap tiers by default", async () => {
++  const recorder = new RecordingDecisionRecorder();
++  const engine = new HealthAwareRoutingEngine(
++    new FakeLaneRouterClient([
++      lane({
++        lane_id: "codex-cheap",
++        provider: "codex",
++        model_tier: "cheap",
++        task_types: ["coding"],
++        available_headroom: 100,
++      }),
++      lane({
++        lane_id: "claude-wrong-task",
++        provider: "claude",
++        task_types: ["writing"],
++        available_headroom: 12,
++      }),
++      lane({
++        lane_id: "codex-too-full",
++        provider: "codex",
++        task_types: ["coding"],
++        available_headroom: 1,
++      }),
++      lane({
++        lane_id: "codex-primary",
++        provider: "codex",
++        model_tier: "standard",
++        task_types: ["coding"],
++        available_headroom: 6,
++        account_id: "mathew",
++        runtime_id: "hive-runtime-1",
++      }),
++    ]),
++    recorder,
++    { now: () => "2026-07-27T01:00:00.000Z" },
++  );
++
++  const decision = await engine.selectLane({
++    taskId: "task-123",
++    taskType: "coding",
++    requiredHeadroom: 4,
++  });
++
++  assert.equal(decision.selectedLane?.lane_id, "codex-primary");
++  assert.equal(decision.decision, "selected");
++  assert.equal(recorder.records.length, 1);
++  assert.equal(recorder.records[0]?.selectedLane?.runtime_id, "hive-runtime-1");
++  assert.equal(recorder.records[0]?.consideredLanes.length, 4);
++  assert.ok(
++    recorder.records[0]?.consideredLanes.some(
++      (candidate) =>
++        candidate.lane_id === "codex-cheap" &&
++        candidate.eligible === false &&
++        candidate.reasons.includes("model_tier_not_allowed"),
++    ),
++  );
++});
++
++test("selectLane never selects down or out_of_credit lanes and records a blocked decision", async () => {
++  const recorder = new RecordingDecisionRecorder();
++  const engine = new HealthAwareRoutingEngine(
++    new FakeLaneRouterClient([
++      lane({ lane_id: "claude-down", provider: "claude", status: "down" }),
++      lane({ lane_id: "codex-empty", provider: "codex", status: "out_of_credit" }),
++    ]),
++    recorder,
++    { now: () => "2026-07-27T02:00:00.000Z" },
++  );
++
++  const decision = await engine.selectLane({
++    taskId: "task-456",
++    taskType: "coding",
++    requiredHeadroom: 1,
++  });
++
++  assert.equal(decision.selectedLane, null);
++  assert.equal(decision.decision, "blocked");
++  assert.match(decision.reason, /no eligible lane/i);
++  assert.deepEqual(
++    recorder.records[0]?.consideredLanes.map((candidate) => [
++      candidate.lane_id,
++      candidate.eligible,
++      candidate.reasons,
++    ]),
++    [
++      ["claude-down", false, ["lane_not_up"]],
++      ["codex-empty", false, ["lane_not_up"]],
++    ],
++  );
++});
++
++test("HeimdallHttpLaneRouterClient fetches and validates the /lanes contract", async () => {
++  const fetchCalls: string[] = [];
++  const client = new HeimdallHttpLaneRouterClient({
++    baseUrl: "http://heimdall.local/",
++    fetchImpl: (async (url: string) => {
++      fetchCalls.push(url);
++      return {
++        ok: true,
++        status: 200,
++        json: async () => [
++          lane({
++            lane_id: "claude@mathew",
++            provider: "claude",
++            status: "up",
++          }),
++        ],
++      } as Response;
++    }) as typeof fetch,
++  });
++
++  const lanes = await client.listLanes();
++
++  assert.deepEqual(fetchCalls, ["http://heimdall.local/lanes"]);
++  assert.equal(lanes[0]?.lane_id, "claude@mathew");
++});
+diff --git a/auriga/routing/index.ts b/auriga/routing/index.ts
+new file mode 100644
+index 0000000..ac4f871
+--- /dev/null
++++ b/auriga/routing/index.ts
+@@ -0,0 +1,232 @@
++import { z } from "zod";
++
++const LaneStatusValueSchema = z.enum(["up", "down", "out_of_credit", "degraded"]);
++const SignalSourceSchema = z.enum(["passive", "public_status", "active_probe"]);
++
++export type LaneStatusValue = z.infer<typeof LaneStatusValueSchema>;
++export type SignalSource = z.infer<typeof SignalSourceSchema>;
++
++export const HeimdallLaneStatusSchema = z.object({
++  lane_id: z.string(),
++  provider: z.string(),
++  status: LaneStatusValueSchema,
++  reset_at: z.string().nullable(),
++  reason: z.string().nullable(),
++  last_updated: z.string(),
++  signal_source: SignalSourceSchema,
++  account_id: z.string().optional(),
++  runtime_id: z.string().optional(),
++  task_types: z.array(z.string()).optional(),
++  available_headroom: z.number().optional(),
++  model_tier: z.string().optional(),
++});
++export type HeimdallLaneStatus = z.infer<typeof HeimdallLaneStatusSchema>;
++
++const HeimdallLaneStatusesSchema = z.array(HeimdallLaneStatusSchema);
++
++export interface LaneRouterClient {
++  listLanes(): Promise<HeimdallLaneStatus[]>;
++}
++
++export interface HeimdallHttpLaneRouterClientOptions {
++  baseUrl: string;
++  fetchImpl?: typeof fetch;
++}
++
++export class HeimdallHttpLaneRouterClient implements LaneRouterClient {
++  readonly #baseUrl: string;
++  readonly #fetchImpl: typeof fetch;
++
++  constructor(options: HeimdallHttpLaneRouterClientOptions) {
++    this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
++    this.#fetchImpl = options.fetchImpl ?? fetch;
++  }
++
++  async listLanes(): Promise<HeimdallLaneStatus[]> {
++    const res = await this.#fetchImpl(`${this.#baseUrl}/lanes`);
++    if (!res.ok) {
++      throw new Error(`HeimdallHttpLaneRouterClient.listLanes failed (${res.status})`);
++    }
++    return HeimdallLaneStatusesSchema.parse(await res.json());
++  }
++}
++
++export interface DispatchRoutingRequest {
++  taskId: string;
++  taskType: string;
++  requiredHeadroom: number;
++  allowedModelTiers?: string[];
++}
++
++export interface ConsideredLane {
++  lane_id: string;
++  provider: string;
++  status: LaneStatusValue;
++  eligible: boolean;
++  reasons: string[];
++}
++
++export interface RoutingDecisionRecord {
++  taskId: string;
++  taskType: string;
++  requiredHeadroom: number;
++  selectedLane: HeimdallLaneStatus | null;
++  consideredLanes: ConsideredLane[];
++  decision: "selected" | "blocked";
++  reason: string;
++  timestamp: string;
++}
++
++export type RoutingDecision = RoutingDecisionRecord;
++
++export interface DecisionRecorder {
++  recordRoutingDecision(record: RoutingDecisionRecord): Promise<void> | void;
++}
++
++export interface RoutingEngine {
++  selectLane(request: DispatchRoutingRequest): Promise<RoutingDecision>;
++}
++
++export class ConsoleDecisionRecorder implements DecisionRecorder {
++  recordRoutingDecision(record: RoutingDecisionRecord): void {
++    console.log(JSON.stringify({ type: "auriga.routing_decision", ...record }));
++  }
++}
++
++class NoopDecisionRecorder implements DecisionRecorder {
++  recordRoutingDecision(_record: RoutingDecisionRecord): void {
++    // Intentionally empty.
++  }
++}
++
++export interface HealthAwareRoutingEngineOptions {
++  now?: () => string;
++}
++
++interface EligibleLane {
++  lane: HeimdallLaneStatus;
++  considered: ConsideredLane;
++}
++
++const CHEAP_MODEL_TIERS = new Set(["cheap", "economy", "low_cost", "low-cost"]);
++const DEFAULT_ALLOWED_MODEL_TIERS = new Set(["standard", "premium", "high", "pro"]);
++
++export class HealthAwareRoutingEngine implements RoutingEngine {
++  readonly #client: LaneRouterClient;
++  readonly #recorder: DecisionRecorder;
++  readonly #now: () => string;
++
++  constructor(
++    client: LaneRouterClient,
++    recorder: DecisionRecorder = new NoopDecisionRecorder(),
++    options: HealthAwareRoutingEngineOptions = {},
++  ) {
++    this.#client = client;
++    this.#recorder = recorder;
++    this.#now = options.now ?? (() => new Date().toISOString());
++  }
++
++  async selectLane(request: DispatchRoutingRequest): Promise<RoutingDecision> {
++    const lanes = await this.#client.listLanes();
++    const eligible: EligibleLane[] = [];
++    const consideredLanes = lanes.map((lane) => {
++      const considered = this.#considerLane(lane, request);
++      if (considered.eligible) {
++        eligible.push({ lane, considered });
++      }
++      return considered;
++    });
++
++    eligible.sort((a, b) => compareEligibleLanes(a.lane, b.lane));
++
++    const selectedLane = eligible[0]?.lane ?? null;
++    const decision: RoutingDecision = {
++      taskId: request.taskId,
++      taskType: request.taskType,
++      requiredHeadroom: normalizeRequiredHeadroom(request.requiredHeadroom),
++      selectedLane,
++      consideredLanes,
++      decision: selectedLane ? "selected" : "blocked",
++      reason: selectedLane
++        ? `selected lane ${selectedLane.lane_id}`
++        : "no eligible lane available",
++      timestamp: this.#now(),
++    };
++
++    await this.#recorder.recordRoutingDecision(decision);
++    return decision;
++  }
++
++  #considerLane(lane: HeimdallLaneStatus, request: DispatchRoutingRequest): ConsideredLane {
++    const reasons: string[] = [];
++    const requiredHeadroom = normalizeRequiredHeadroom(request.requiredHeadroom);
++
++    if (lane.status !== "up") {
++      reasons.push("lane_not_up");
++    }
++
++    if (
++      lane.task_types &&
++      !lane.task_types.includes("*") &&
++      !lane.task_types.includes(request.taskType)
++    ) {
++      reasons.push("task_type_not_supported");
++    }
++
++    if (
++      typeof lane.available_headroom === "number" &&
++      lane.available_headroom < requiredHeadroom
++    ) {
++      reasons.push("insufficient_headroom");
++    }
++
++    if (!isModelTierAllowed(lane.model_tier, request.allowedModelTiers)) {
++      reasons.push("model_tier_not_allowed");
++    }
++
++    return {
++      lane_id: lane.lane_id,
++      provider: lane.provider,
++      status: lane.status,
++      eligible: reasons.length === 0,
++      reasons,
++    };
++  }
++}
++
++function normalizeRequiredHeadroom(requiredHeadroom: number): number {
++  if (!Number.isFinite(requiredHeadroom) || requiredHeadroom <= 0) {
++    return 1;
++  }
++  return requiredHeadroom;
++}
++
++function isModelTierAllowed(modelTier: string | undefined, allowedModelTiers: string[] | undefined): boolean {
++  if (!modelTier) {
++    return true;
++  }
++
++  const normalizedModelTier = modelTier.toLowerCase();
++  const allowed = allowedModelTiers
++    ? new Set(allowedModelTiers.map((tier) => tier.toLowerCase()))
++    : DEFAULT_ALLOWED_MODEL_TIERS;
++
++  if (allowed.has(normalizedModelTier)) {
++    return true;
++  }
++
++  if (!allowedModelTiers && CHEAP_MODEL_TIERS.has(normalizedModelTier)) {
++    return false;
++  }
++
++  return allowedModelTiers === undefined;
++}
++
++function compareEligibleLanes(a: HeimdallLaneStatus, b: HeimdallLaneStatus): number {
++  const aHeadroom = a.available_headroom ?? Number.POSITIVE_INFINITY;
++  const bHeadroom = b.available_headroom ?? Number.POSITIVE_INFINITY;
++  if (aHeadroom !== bHeadroom) {
++    return bHeadroom - aHeadroom;
++  }
++  return a.lane_id.localeCompare(b.lane_id);
++}
+diff --git a/auriga/run.ts b/auriga/run.ts
+index 9cf2ee4..5193e7d 100644
+--- a/auriga/run.ts
++++ b/auriga/run.ts
+@@ -172,6 +172,12 @@ import { SustainedDeclineDetector, type EscalationRecord } from "./escalation/in
+ import { InstrumentedLock } from "./observability/instrumented-lock.ts";
+ import { deriveCounters, ObservabilityCounterStore } from "./observability/counters.ts";
+ import { HeartbeatWriter, detectPreviousDeath, DeathEventStore } from "./observability/death-detection.ts";
++import {
++  ConsoleDecisionRecorder,
++  HealthAwareRoutingEngine,
++  HeimdallHttpLaneRouterClient,
++  type RoutingEngine,
++} from "./routing/index.ts";
+ import type { EventContract } from "../contracts/event.ts";
+ 
+ /** Reads a positive-integer env var override, falling back to `fallback` if unset/invalid. */
+@@ -199,6 +205,8 @@ const SWEEP_INTERVAL_MS = envIntMs("AURIGA_SWEEP_INTERVAL_MS", 30_000);
+ const COUNTERS_INTERVAL_MS = envIntMs("AURIGA_COUNTERS_INTERVAL_MS", 60_000);
+ const ESCALATION_THRESHOLD_COUNT = envIntOrUndefined("AURIGA_ESCALATION_THRESHOLD");
+ const ESCALATION_WINDOW_MS = envIntOrUndefined("AURIGA_ESCALATION_WINDOW_MS");
++const HEIMDALL_LANE_ROUTER_URL =
++  process.env.AURIGA_HEIMDALL_LANE_ROUTER_URL ?? process.env.HEIMDALL_LANE_ROUTER_URL;
+ 
+ /** Sibling db file to auriga/observability/counters.ts, following that module's own
+  * DEFAULT_DB_PATH/DEFAULT_HEARTBEAT_PATH "alongside this module" convention. */
+@@ -275,7 +283,17 @@ async function main(): Promise<void> {
+   });
+   const trackerAdapter = new MulticaTrackerAdapter(cfg);
+   const instrumentedLock = new InstrumentedLock(realLock);
+-  const consumer = new AurigaConsumer(instrumentedLock, trackerAdapter);
++  let routingEngine: RoutingEngine | undefined;
++  if (HEIMDALL_LANE_ROUTER_URL) {
++    routingEngine = new HealthAwareRoutingEngine(
++      new HeimdallHttpLaneRouterClient({ baseUrl: HEIMDALL_LANE_ROUTER_URL }),
++      new ConsoleDecisionRecorder(),
++    );
++    console.log(`[run] health-aware routing enabled: heimdall=${HEIMDALL_LANE_ROUTER_URL}`);
++  } else {
++    console.log("[run] health-aware routing disabled: set AURIGA_HEIMDALL_LANE_ROUTER_URL to enable");
++  }
++  const consumer = new AurigaConsumer(instrumentedLock, trackerAdapter, { routingEngine });
+   await consumer.start();
+ 
+   consumer.on("failure", (failure: ClassifiedFailure) => {
+-- 
+2.50.1 (Apple Git-155)
+

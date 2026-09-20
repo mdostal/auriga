@@ -1,0 +1,91 @@
+id: p1-router-seed-planning
+epic: p1-dispatch-throughput
+title: Route unplanned seeds to Minerva planning lane
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Unplanned top-level seeds (labeled idea/needs-plan, or unmarked childless top-level) must route
+  to Minerva PLANNING lane, NEVER to a build lane.
+
+  Problem: Seeds dispatched to build lanes (PAN-6646) — build agents cannot plan, they self-block.
+
+  Fix: Add routing rule (priority 2) to detect seeds and route to minerva-planning.
+
+acceptance_criteria:
+  - "Given an issue labeled 'idea' OR 'needs-plan' OR (unmarked AND childless AND top-level)"
+  - "When the Auriga router evaluates dispatch candidates"
+  - "Then the issue routes to Minerva PLANNING lane"
+  - "And NEVER routes to a build lane (auriga-build, codex, etc.)"
+
+steps:
+  - id: research
+    description: Identify seed detection logic (no epic.yaml, no children, top-level parent check)
+    agent: researcher
+  - id: implement
+    description: Add priority-2 routing rule for seeds → minerva-planning
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Validate seed routing — test unmarked childless issue routes to planning, NOT build
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review seed routing rule for edge cases (false positives, priority conflicts)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push seed routing changes
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: routing-config
+  key_files:
+    - path: config/routing.yaml
+      purpose: Routing rules — add seed detection rule at priority 2
+
+files_to_modify:
+  - file: config/routing.yaml
+    change: Add priority-2 rule for seeds → minerva-planning
+
+design_decisions:
+  - decision: Seed detection via (no epic.yaml + no children + top-level)
+    rationale: Unplanned top-level issues need planning before build execution
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document seed detection heuristic in routing.yaml comments"
+
+risks:
+  - severity: low
+    description: False positives (mature issues without epic.yaml) could mis-route
+    mitigation: Explicit seed labels (idea/needs-plan) take precedence over heuristic
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R2: Seed-to-Planning Routing
+      Unplanned top-level seeds must route to planning lane, not build lanes.
+      Detect: no epic.yaml, no child issues, top-level parent.
+
+metric:
+  applies: true
+  name: routing.seeds_to_build_count
+  direction: down
+  unit: seeds
+  baseline: ">0 (PAN-6646 example)"
+  target: "0"
+  window: "validation run"
+  source:
+    kind: manual
+    ref: "Auriga dispatch logs — filter for seed-labeled or childless-top-level issues routed to build lanes"
+  verify_at: "integrate"
+  owner: developer

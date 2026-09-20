@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — Guides</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga guides: quickstart, Pantheon integration, production setup with launchd, adding a new agent, and the human queue workflow." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html">Overview</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="configuration.html">Configuration</a>
+      <a href="api.html">API Reference</a>
+      <a href="guides.html" class="active">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">Guides</span>
+      <ul class="sidebar-nav">
+        <li><a href="#quickstart" class="current">Quickstart</a></li>
+        <li><a href="#operator-dashboard">Operator dashboard</a></li>
+        <li><a href="#pantheon-integration">Pantheon integration</a></li>
+        <li><a href="#production-launchd">Production (launchd)</a></li>
+        <li><a href="#add-agent">Adding a new agent</a></li>
+        <li><a href="#human-queue">Human queue workflow</a></li>
+        <li><a href="#testing">Writing tests</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Other sections</span>
+      <ul class="sidebar-nav">
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="configuration.html">Configuration</a></li>
+        <li><a href="api.html">API Reference</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">Guides</p>
+      <h1>Field guide</h1>
+      <p class="doc-intro">Step-by-step guides for getting Auriga running, integrating it with Pantheon, operating it in production, and extending it with new agents or routing rules.</p>
+    </header>
+
+    <!-- QUICKSTART -->
+    <section class="doc-section" id="quickstart">
+      <h2>Quickstart</h2>
+      <p class="prose">Auriga's router has zero runtime dependencies. Clone the repo, run the tests, and optionally fire one dry-run cycle to see what decisions Auriga would make against your board.</p>
+
+      <h3>Step 1: Clone and verify</h3>
+      <pre class="code-block"><span class="c"># Requires Node 24+</span>
+git clone https://github.com/mdostal/auriga.git
+cd auriga/src/router
+
+npm test  <span class="c"># runs all unit tests — expect 26+ passing</span></pre>
+
+      <h3>Step 2: Configure your board</h3>
+      <p class="prose">Edit <code>src/router/lib/config-substrate.mjs</code> to add your Multica project IDs and agent IDs. Or use the external override mechanism:</p>
+
+      <pre class="code-block"><span class="c"># Create an override file with your project/agent IDs</span>
+cat &gt; /etc/auriga/local.json &lt;&lt;'EOF'
+{
+  "PROJECT_IDS": ["&lt;your-multica-project-id&gt;"],
+  "AGENTS": {
+    "&lt;your-agent-uuid&gt;": {
+      "name": "my-build-agent",
+      "runtime": "claude",
+      "maxInflight": 3
+    }
+  }
+}
+EOF
+
+export AURIGA_CONFIG=/etc/auriga/local.json</pre>
+
+      <h3>Step 3: Dry-run</h3>
+      <pre class="code-block"><span class="c"># One cycle, compute decisions, assign NOTHING</span>
+npm run dry
+<span class="c"># or: node auriga-router.mjs --once --dry-run</span></pre>
+
+      <h3>Step 4: Run for real</h3>
+      <pre class="code-block"><span class="c"># One cycle then exit</span>
+npm run once
+
+<span class="c"># Supervised: keep exactly ONE detached router alive, restart on death</span>
+nohup ./supervisor.sh &gt;&gt; /tmp/auriga-supervisor.log 2&gt;&amp;1 &amp;</pre>
+
+      <div class="callout callout-tip">
+        <p class="callout-title">One-command install with MCP</p>
+        <p>For a faster path — install the <code>auriga</code> CLI and register the MCP server with your agent CLI in one command:</p>
+        <pre style="margin:8px 0 0; background:var(--bg-void); border:1px solid var(--line-hair); border-radius:4px; padding:10px 14px; font-family:var(--font-mono); font-size:13px; color:var(--ink-1);">curl -fsSL https://mdostal.github.io/auriga/install.sh | bash</pre>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- OPERATOR DASHBOARD -->
+    <section class="doc-section" id="operator-dashboard">
+      <h2>Operator dashboard</h2>
+      <p class="prose">The operator dashboard is a local, read-only web view onto Auriga's own planning state (<code>.pHive/</code> epics and stories). It's served by the JSON API in <code>src/server/</code> and the Vite + Tailwind + shadcn/ui UI in <code>src/ui/</code>. Not required for production — purely for local development and visibility.</p>
+
+      <pre class="code-block"><span class="c"># Build and run the UI</span>
+cd src/ui
+npm install
+npm run build
+
+cd ../server
+npm install
+node index.mjs
+<span class="c"># → http://localhost:8787</span></pre>
+
+      <p class="prose" style="margin-top:16px">The dashboard shows epics, stories (with dependency constellations, acceptance criteria, risk cards), and the activity log from <code>.pHive/audits/</code>. The server reads files directly — no database, no external services.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- PANTHEON INTEGRATION -->
+    <section class="doc-section" id="pantheon-integration">
+      <h2>Pantheon integration</h2>
+      <p class="prose">In a Pantheon deployment, Auriga runs as a Docker container service in the <code>pantheon-v2</code> compose stack. The image is built from a git checkout of this repo. <strong>The image is not rebuilt automatically when the repo's <code>main</code> branch gets new commits.</strong></p>
+
+      <h3>Automatic redeploy via git hook (recommended)</h3>
+      <p class="prose">Run this once in the <code>plugins/auriga</code> checkout on the deploy host (not in a standalone dev clone — the hook is a no-op there):</p>
+
+      <pre class="code-block">git config core.hooksPath install/lib/git-hooks</pre>
+
+      <p class="prose" style="margin-top:12px">From then on, every <code>git pull</code> that lands a merge on <code>main</code> fires <code>install/lib/git-hooks/post-merge</code>, which discovers every live <code>auriga*</code> compose service and runs <code>pantheon-v2</code>'s own <code>bin/pantheon-redeploy</code> script.</p>
+
+      <div class="callout callout-note">
+        <p class="callout-title">The hook owns nothing</p>
+        <p>The post-merge hook contains no redeploy logic of its own — it only decides when and for which services to call pantheon-v2's existing redeploy script. All build/health-check logic stays in pantheon-v2.</p>
+      </div>
+
+      <h3>Manual redeploy</h3>
+      <p class="prose">From the pantheon-v2 deployment root, after pulling new Auriga code:</p>
+      <pre class="code-block">cd plugins/auriga && git pull && cd ../..
+bin/pantheon-redeploy $(docker compose config --services | grep -E '^auriga(-|$)')</pre>
+
+      <h3>Multi-tenant service naming</h3>
+      <p class="prose">Pantheon supports multiple tenants, each with their own Auriga service instance. Services are named <code>auriga</code> or <code>auriga-&lt;tenant_id&gt;</code>. The <code>post-merge</code> hook uses <code>docker compose config --services</code> to discover all running <code>auriga*</code> services dynamically — no tenant list to maintain.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- PRODUCTION LAUNCHD -->
+    <section class="doc-section" id="production-launchd">
+      <h2>Production: reboot survival with launchd (macOS)</h2>
+      <p class="prose">The supervisor script alone only survives as long as the shell session that launched it. To keep the router alive across logout and reboot on macOS, install it as a per-user launchd LaunchAgent.</p>
+
+      <pre class="code-block"><span class="c"># Install (from src/router/)</span>
+scripts/launchd/install.sh
+<span class="c"># Fills in NODE/DIR/HOME from the current machine, installs to ~/Library/LaunchAgents/</span>
+<span class="c"># RunAtLoad + KeepAlive: starts immediately, restarts on death</span>
+
+<span class="c"># Check status</span>
+launchctl print gui/$(id -u)/com.mdostal.auriga-supervisor
+
+<span class="c"># Uninstall</span>
+scripts/launchd/uninstall.sh</pre>
+
+      <p class="prose" style="margin-top:16px">The launchd template is at <code>scripts/launchd/com.mdostal.auriga-supervisor.plist.template</code>. Customize <code>NODE</code> (path to node 24+) or <code>DIR</code> (path to <code>src/router/</code>) via env overrides before running <code>install.sh</code>.</p>
+
+      <h3>Log locations (production)</h3>
+      <table class="param-table">
+        <thead><tr><th>File</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td class="name">/tmp/auriga-router.log</td><td>Human-readable router log</td></tr>
+          <tr><td class="name">/tmp/auriga-router.jsonl</td><td>Structured JSONL log (one JSON object per line)</td></tr>
+          <tr><td class="name">/tmp/auriga-router.pid</td><td>Router pidfile (single-instance lock)</td></tr>
+          <tr><td class="name">/tmp/auriga-supervisor.log</td><td>Supervisor stdout/stderr</td></tr>
+          <tr><td class="name">/tmp/auriga-supervisor.pid</td><td>Supervisor pidfile</td></tr>
+          <tr><td class="name">/tmp/auriga-supervisor-launchd.log</td><td>launchd's own stdout/stderr capture for the supervisor</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- ADD AGENT -->
+    <section class="doc-section" id="add-agent">
+      <h2>Adding a new agent lane</h2>
+      <p class="prose">To add a new agent to the dispatch pool:</p>
+
+      <h3>1. Add the agent to AGENTS</h3>
+      <p class="prose">In <code>src/router/lib/config-substrate.mjs</code> (or via an <code>AURIGA_CONFIG</code> override):</p>
+      <pre class="code-block">AGENTS['&lt;new-agent-uuid&gt;'] = {
+  name: 'my-new-agent',
+  runtime: 'claude',    <span class="c">// must match a key in RUNTIME_CAP</span>
+  maxInflight: 2,
+};</pre>
+
+      <h3>2. Wire the agent to a lane</h3>
+      <p class="prose">If the agent handles a specific project's stories, add a <code>PROJECT_LANE</code> entry:</p>
+      <pre class="code-block">PROJECT_LANE['&lt;multica-project-id&gt;'] = 'my-lane-name';</pre>
+
+      <p class="prose" style="margin-top:12px">If the agent handles general hive stories, set <code>HIVE_LANE</code> to include it, or if it handles the default (non-hive) pool, set <code>DEFAULT_LANE</code>. Lane names are Multica-specific and must match what's configured in the Multica workspace.</p>
+
+      <h3>3. Add a runtime cap bucket if needed</h3>
+      <p class="prose">If the new agent needs its own cap independent of existing buckets:</p>
+      <pre class="code-block"><span class="c">// in config.mjs</span>
+RUNTIME_CAP['my-new-runtime'] = 2;</pre>
+
+      <h3>4. Verify</h3>
+      <pre class="code-block">npm run dry  <span class="c"># confirm the new agent appears in routing decisions</span></pre>
+
+      <div class="callout callout-warn">
+        <p class="callout-title">Start with --dry-run</p>
+        <p>Always verify a new agent config with <code>--dry-run</code> before running a live cycle. Routing decisions are logged — confirm the right issues are being routed to the new agent before enabling live dispatch.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- HUMAN QUEUE -->
+    <section class="doc-section" id="human-queue">
+      <h2>Human queue workflow</h2>
+      <p class="prose">Issues flagged for human attention are excluded from agent dispatch. The human queue export collects them into a single YAML file for review.</p>
+
+      <h3>Generating the queue</h3>
+      <pre class="code-block"><span class="c"># From repo root</span>
+node scripts/export-human-queue.mjs
+<span class="c"># Output: .pHive/human-queue.yaml</span></pre>
+
+      <p class="prose" style="margin-top:12px">The export script queries the board for all in-scope issues where <code>waiting_on</code> matches a <code>HUMAN_NAMES</code> entry, or that carry the <code>human-todo</code> label. It writes them to <code>.pHive/human-queue.yaml</code> in a human-readable format.</p>
+
+      <h3>Resolving a queued issue</h3>
+      <ol class="prose" style="padding-left:22px; margin-top:12px">
+        <li style="margin-bottom:8px">Review the issue and take the required human action (provide feedback, approve, add information).</li>
+        <li style="margin-bottom:8px">Remove or clear the <code>waiting_on</code> metadata, or remove the <code>human-todo</code> label.</li>
+        <li>On the next cycle, Auriga will find the issue in the normal candidate pool and route it.</li>
+      </ol>
+
+      <div class="callout callout-note">
+        <p class="callout-title">Dependency waiting_on</p>
+        <p>If an issue has <code>waiting_on: PANT-1234</code> (an issue identifier, not a human name), it is NOT in the human queue — it just waits for that dependency. Once the referenced issue is done, the waiting issue becomes a normal candidate.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- TESTING -->
+    <section class="doc-section" id="testing">
+      <h2>Writing tests</h2>
+      <p class="prose">Auriga's test suite uses Node's built-in <code>node:test</code> runner (no external framework) and in-memory stub adapters to drive <code>cycle()</code> without any real Multica CLI calls.</p>
+
+      <h3>Running the tests</h3>
+      <pre class="code-block"><span class="c"># From src/router/</span>
+npm test                    <span class="c"># node --test test/*.test.mjs</span>
+
+<span class="c"># From the repo root</span>
+npm test                    <span class="c"># delegates to all subpackages</span></pre>
+
+      <h3>Test anatomy</h3>
+      <p class="prose">Every test that exercises routing logic uses the stubs:</p>
+      <pre class="code-block">import { createStubBacklogAdapter } from '../lib/adapters/stub/backlog.mjs';
+import { createStubSpawnAdapter }   from '../lib/adapters/stub/spawn.mjs';
+
+<span class="c">// Seed the board with a fixture issue</span>
+const backlog = createStubBacklogAdapter({
+  issues: [{ id: 'PANT-1', status: 'todo', assignee_id: null, ... }],
+  runs: [],
+  prs: [],
+});
+const spawn = createStubSpawnAdapter();
+
+await cycle({ backlog, spawn, sleep: async () => {}, now: Date.now() });
+
+<span class="c">// Assert on what was dispatched</span>
+assert.equal(spawn.calls.length, 1);
+assert.equal(spawn.calls[0].op, 'assignAndRun');
+assert.equal(spawn.calls[0].issueId, 'PANT-1');</pre>
+
+      <h3>Key test files</h3>
+      <table class="param-table">
+        <thead><tr><th>File</th><th>What it tests</th></tr></thead>
+        <tbody>
+          <tr><td class="name">test/core.test.mjs</td><td>Pure decision logic: filtering, state machine, squad plan, capacity checks.</td></tr>
+          <tr><td class="name">test/router-cycle.e2e.test.mjs</td><td>Full cycle() end-to-end against stub adapters. The canonical integration test.</td></tr>
+          <tr><td class="name">test/standalone-smoke.test.mjs</td><td>Proves zero external process calls (<code>execFileSync</code>) when running on stubs.</td></tr>
+          <tr><td class="name">test/squad.test.mjs</td><td>Review squad tier classification against keyword fixtures.</td></tr>
+          <tr><td class="name">test/cutover-e2e.test.mjs</td><td>End-to-end cutover test for the adapter boundary.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+</div>
+
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>

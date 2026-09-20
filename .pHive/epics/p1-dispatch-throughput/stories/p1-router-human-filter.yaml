@@ -1,0 +1,98 @@
+id: p1-router-human-filter
+epic: p1-dispatch-throughput
+title: Exclude human-todos from agent dispatch pool
+status: pending
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  Issues labeled `human-todo` OR with `waiting_on: <human>` must be excluded from the router's
+  dispatch candidate pool. Route to separate human queue instead.
+
+  Problem: Human-todos dispatched to agents (PAN-6644: `waiting_on: Mathew`, Gemini re-export) —
+  wastes agent cycles on work only humans can complete.
+
+  Fix: Priority-1 routing rule excludes human-todos; separate human queue export.
+
+acceptance_criteria:
+  - "Given an issue labeled 'human-todo' OR with 'waiting_on: <human_name>'"
+  - "When the router builds dispatch candidate pool"
+  - "Then the issue is excluded from the pool"
+  - "And the issue appears in the human queue (separate export)"
+
+steps:
+  - id: research
+    description: Identify dispatch candidate filtering logic in Auriga router
+    agent: researcher
+  - id: implement
+    description: Add human-todo filter (priority-1 rule) + human queue export script
+    agent: developer
+    depends_on: [research]
+  - id: test
+    description: Test human filter — human-todo excluded from agent dispatch, appears in human queue
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review human detection logic (known human names, label variants)
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit and push human-todo filter + queue export
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: auriga
+  tech_stack:
+    language: typescript
+    framework: routing-dispatch
+  key_files:
+    - path: config/routing.yaml
+      purpose: Priority-1 routing rule for human-todos
+    - path: scripts/export-human-queue.ts
+      purpose: Human queue export script (or similar)
+
+files_to_modify:
+  - file: config/routing.yaml
+    change: Add priority-1 rule for human-todos → HUMAN_QUEUE
+  - file: scripts/export-human-queue.ts
+    change: Export human-todos to .pHive/human-queue.yaml
+
+design_decisions:
+  - decision: Priority-1 (highest) for human-todo filter
+    rationale: Human-todos must never reach agent lanes; highest priority ensures they're caught first
+  - decision: Separate human queue export (not Linear/Jira integration yet)
+    rationale: Simple YAML export is sufficient for P1; can integrate external tracker later
+
+code_examples: []
+
+cross_cutting:
+  - concern: documentation
+    action: "Document human-todo detection + queue export in Auriga README"
+
+risks:
+  - severity: low
+    description: Known human names hardcoded (Mathew, etc.) — new humans not detected
+    mitigation: Config-driven human names list; clear docs on how to add
+
+references:
+  - path: .pHive/planning/prd.md
+    relevant_excerpt: |
+      R3: Human-Todo Exclusion
+      Issues labeled 'human-todo' OR with 'waiting_on: <human>' excluded from dispatch pool.
+      Example: PAN-6644 (`waiting_on: Mathew`, Gemini re-export).
+
+metric:
+  applies: true
+  name: routing.human_todos_to_agents_count
+  direction: down
+  unit: issues
+  baseline: "1+ (PAN-6644)"
+  target: "0"
+  window: "validation run"
+  source:
+    kind: manual
+    ref: "Auriga dispatch logs — filter for human-todo-labeled or waiting_on-human issues routed to agent lanes"
+  verify_at: "integrate"
+  owner: developer

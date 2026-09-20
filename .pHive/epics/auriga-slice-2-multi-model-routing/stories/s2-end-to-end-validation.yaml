@@ -1,0 +1,91 @@
+id: s2-end-to-end-validation
+epic: auriga-slice-2-multi-model-routing
+title: End-to-end validation — multi-model dispatch produces working results
+status: pending
+complexity: high
+methodology: classic
+
+description: |
+  Validate the complete multi-model routing flow end-to-end. Run router against
+  live Multica board with tasks routed to Claude, Codex, and Gemini. Verify each
+  model produces correct output, fallback chains work, cost tracking is accurate,
+  and zero regressions vs single-backend router.
+
+acceptance_criteria:
+  - "Given router running with multi-model config, when code-gen task dispatched, then Codex produces valid code"
+  - "Given router running, when reasoning task dispatched, then Claude Opus produces correct analysis"
+  - "Given Claude primary unavailable, when fallback triggered, then Gemini completes task successfully"
+  - "Given 100 tasks dispatched across 3 models, when checking metrics, then total cost within 10% of expected"
+  - "Given comparison run single-backend vs multi-model, when measuring throughput, then ≤5% latency increase"
+
+steps:
+  - id: research
+    description: Identify test tasks for each model type (code-gen, reasoning, mixed)
+    agent: researcher
+  - id: implement
+    description: Create integration test suite running router against live/staging board
+    agent: developer
+    depends_on: [research, s2-cost-tracking]
+  - id: test
+    description: Execute end-to-end tests, validate outputs, check cost metrics, compare vs baseline
+    agent: tester
+    depends_on: [implement]
+  - id: review
+    description: Review test results, approve production rollout or flag issues
+    agent: reviewer
+    depends_on: [test]
+  - id: integrate
+    description: Commit validation suite, merge feature branch to dev
+    agent: developer
+    depends_on: [review]
+
+context:
+  codebase: /Users/dostal/.minerva/runs/192625f4-c271-432e-aede-f68ee99f5a20/workspace
+  tech_stack:
+    language: JavaScript (mjs)
+    runtime: Node.js
+  key_files:
+    - path: src/router/auriga-router.mjs
+      purpose: Main router to run in validation
+    - path: scripts/bulk-reassign-codex-blocked.mjs
+      purpose: Existing bulk operation pattern for validation script structure
+
+files_to_modify:
+  - file: tests/integration/multi-model-validation.test.mjs
+    change: Create new end-to-end test suite
+  - file: scripts/validate-multi-model.mjs
+    change: Create validation script for manual/CI runs
+
+code_examples:
+  - title: Validation test structure
+    snippet: |
+      // tests/integration/multi-model-validation.test.mjs
+      import { test } from 'node:test';
+      import assert from 'node:assert';
+
+      test('code-gen task routes to Codex and produces valid code', async () => {
+        const router = initRouter({ modelPrefs: { 'code-generation': 'codex' } });
+        const task = { type: 'code-generation', prompt: 'write quicksort in Python' };
+        const result = await router.dispatch(task);
+
+        assert.strictEqual(result.model, 'codex');
+        assert.match(result.output, /def quicksort/);
+        assert.ok(result.cost > 0);
+      });
+
+design_decisions:
+  - decision: Validation runs against staging Multica board, not production
+    rationale: Prevent test tasks polluting production board
+  - decision: Manual approval gate before production rollout
+    rationale: High-risk change (routing all tasks), human verification required
+  - decision: Keep validation suite as permanent regression test
+    rationale: Future changes can run this suite to verify multi-model still works
+
+risks:
+  - severity: high
+    description: Production rollout may have unforeseen model compatibility issues
+    mitigation: Canary deployment (10% traffic), rollback plan ready, extensive staging validation
+
+depends_on: [s2-cost-tracking]
+
+parallel_allowed: false
