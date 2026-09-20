@@ -306,6 +306,9 @@ export async function cycle(opts = {}) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {
       try { backlog.setIssueStatus(v.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
+      if (typeof spawn.reportRouteOutcome === 'function') {
+        try { spawn.reportRouteOutcome(v.identifier, 'success'); } catch (e) { logImpl('route_outcome_error', { identifier: v.identifier, error: e.message }); }
+      }
     }
   }
 
@@ -389,6 +392,9 @@ export async function cycle(opts = {}) {
         // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
+          if (typeof spawn.selectRoute === 'function') {
+            try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
+          }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
@@ -513,6 +519,9 @@ export async function cycle(opts = {}) {
         // branch, which never assigns at all) rather than verifying a run started
         // first — a different contract than dispatch()'s verify-then-conditionally-
         // rerun, not a stale duplicate of it.
+        if (typeof spawn.selectRoute === 'function') {
+          try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
+        }
         spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
@@ -561,6 +570,9 @@ export async function cycle(opts = {}) {
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
           try {
+            if (typeof spawn.selectRoute === 'function') {
+              try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
+            }
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
@@ -584,6 +596,9 @@ export async function cycle(opts = {}) {
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
     try {
+      if (typeof spawn.selectRoute === 'function') {
+        try { spawn.selectRoute(p.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: p.identifier, error: e.message }); }
+      }
       spawn.assignIssue(p.identifier, p.agent);
       assigned++;
     } catch (e) {
