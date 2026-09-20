@@ -112,7 +112,9 @@ function toRawIssue(issue) {
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
+  const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
+  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
+    TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
 
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
@@ -273,7 +275,9 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
  */
 export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
+  const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
+  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
+    TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
   const VERIFY_DELAY_MS = cfg.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS;
   const sleep = cfg.sleep || sleepSync;
 

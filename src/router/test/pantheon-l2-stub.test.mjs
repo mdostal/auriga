@@ -457,3 +457,49 @@ test('createPantheonV2L2SpawnAdapter(): has no provision/createEnvironment/boots
   assert.equal(spawn.createEnvironment, undefined);
   assert.equal(spawn.bootstrap, undefined);
 });
+
+// ---- tenant_id pass-through (PANT-260) ----
+// Verifies that both adapters append ?tenant_id=<AURIGA_TENANT_ID> to every request URL
+// when the env var is set, routing board calls to the right per-tenant workspace in core-api.
+
+test('BacklogAdapter with cfg.tenantId appends ?tenant_id= to every request URL', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { issues: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events' });
+
+  backlog.listAllIssues([]);
+
+  assert.ok(calls.length > 0, 'expected at least one request');
+  for (const { url } of calls) {
+    assert.ok(url.includes('tenant_id=firefly-events'), `expected ?tenant_id= in URL, got ${url}`);
+  }
+});
+
+test('SpawnAdapter with cfg.tenantId appends ?tenant_id= to agent-resolve and assign URLs', async (t) => {
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.includes('/api/backlog/agents/')) return { status: 200, body: { id: 'agent-uuid-1' } };
+    return { status: 204 };
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events', sleep: () => {} });
+
+  spawn.assignIssue('PAN-1', 'auriga-dev');
+
+  assert.ok(calls.length > 0, 'expected at least one request');
+  for (const { url } of calls) {
+    assert.ok(url.includes('tenant_id=firefly-events'), `expected ?tenant_id= in URL, got ${url}`);
+  }
+});
+
+test('BacklogAdapter without tenantId (no AURIGA_TENANT_ID) sends plain URLs with no ?tenant_id=', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { issues: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  backlog.listAllIssues([]);
+
+  assert.ok(calls.length > 0, 'expected at least one request');
+  for (const { url } of calls) {
+    assert.ok(!url.includes('tenant_id='), `expected NO ?tenant_id= in URL without cfg.tenantId, got ${url}`);
+  }
+});
