@@ -1,0 +1,37 @@
+concerns:
+  - id: documentation
+    name: Documentation Updates
+    description: >
+      When a story changes user-facing behavior, workflow steps, or configuration,
+      corresponding documentation must be updated.
+    applies_when: >
+      Story modifies workflows, schemas, directory structure, configuration files,
+      or adds/removes/renames reference documents
+    planning_prompt: >
+      Which documentation files reference the behavior this story changes?
+      List each doc and what section needs updating.
+    implementation_checklist:
+      - "All docs referencing changed behavior identified"
+      - "Affected sections updated to reflect new behavior"
+      - "No stale references to old behavior remain"
+
+  - id: adapter-boundary-integrity
+    name: Adapter Boundary Integrity
+    description: >
+      Auriga's core must never import or call a specific external system
+      (Multica, Minerva, Consus, Pantheon, Linear, etc.) directly. All such
+      access goes through a defined adapter interface, and Auriga must remain
+      runnable standalone with only a stub/mock adapter.
+    applies_when: >
+      Story touches src/router/lib/multica.mjs, src/router/lib/config.mjs,
+      any new adapter module, or anything that talks to a backlog source,
+      persona/spawn provider, or the pantheon-v2 L2 surface.
+    planning_prompt: >
+      Does this story introduce or touch a call to an external system? If so,
+      is it going through the adapter interface (not a direct import), and
+      does the standalone/stub path still work without that external system
+      present?
+    implementation_checklist:
+      - "No direct import of a vendor-specific module (multica.mjs, a Linear SDK, etc.) outside its own adapter implementation"
+      - "A stub/mock adapter exists and is exercised by tests so the feature works with zero live external systems"
+      - "New hardcoded IDs, workspace-specific values, or lane maps are NOT added to core logic — they live in adapter config"

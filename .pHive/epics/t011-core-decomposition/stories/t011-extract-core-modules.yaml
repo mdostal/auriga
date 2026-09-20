@@ -1,0 +1,84 @@
+id: t011-extract-core-modules
+epic: t011-core-decomposition
+title: Extract run-classification/story-identity/pr-matching/capacity/review-squad from core.mjs
+status: shipped
+complexity: high
+methodology: classic
+depends_on: []
+
+description: |
+  Fourth of four originally-agreed workstreams from the 2026-09-05
+  codebase-wide cleanup discussion, deferred at the time ("core.mjs
+  decomposition last (biggest diff, most judgment calls, worth its own
+  dedicated discussion)") and picked back up per the operator's later
+  "keep going ... full deep dive across the codebase" direction.
+
+  core.mjs was 1189 lines covering ~7 unrelated concerns. Mapped the real
+  dependency graph among its ~48 exported functions before touching
+  anything, to distinguish genuinely self-contained leaf groups (safe to
+  extract) from the tightly interdependent dispatch/state-machine core
+  (correctly kept together -- splitting mutually-recursive decision logic
+  across files for a line-count target would reduce readability, not
+  improve it).
+
+acceptance_criteria:
+  - "5 new modules exist: run-classification.mjs, story-identity.mjs, pr-matching.mjs, capacity.mjs, review-squad.mjs, each with a strictly one-directional dependency chain (no import cycles)."
+  - "core.mjs imports every extracted function/const back and re-exports it under its exact original name -- a stable facade."
+  - "auriga-router.mjs's ~25 coreImpl.X call sites require zero changes."
+  - "Every existing test file's import from '../lib/core.mjs' (named or namespace) requires zero changes and continues to pass unmodified."
+  - "Each new module has its own dedicated test file exercising its public API directly, independent of core.mjs's re-export."
+  - "core.mjs is reduced from 1189 to under 800 lines."
+  - "Full npm run test:all is green throughout, verified after EACH individual module extraction, not just once at the end."
+
+steps:
+  - id: implement
+    description: >
+      Extract run-classification.mjs, story-identity.mjs, pr-matching.mjs,
+      capacity.mjs, review-squad.mjs one at a time from core.mjs, in that
+      dependency order (each may only depend on already-extracted leaf
+      modules). After each extraction, update core.mjs's import/re-export
+      block and remove the moved function bodies, replacing them with a
+      one-line pointer comment.
+    agent: developer
+  - id: test
+    description: >
+      Run npm test after EACH individual module extraction (not just once
+      at the end) to catch any mistake at the cheapest possible point. Add
+      a dedicated test file per new module. Run the full npm run test:all
+      and npm run lint at the end and confirm everything is green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t011-core-decomposition.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: reduced from 1189 to 763 lines; now a facade re-exporting the 5 new modules plus the genuinely interdependent dispatch/state-machine core it keeps.
+    - path: src/router/lib/run-classification.mjs
+      purpose: classifyRun/hasActiveRun/latestRun, zero cross-deps.
+    - path: src/router/lib/story-identity.mjs
+      purpose: storyKey/slugKey/descStoryDeps/descStoryId, zero cross-deps.
+    - path: src/router/lib/pr-matching.mjs
+      purpose: PR<->story matching + target-repo parsing, depends on story-identity.mjs + github-pr-state.mjs.
+    - path: src/router/lib/capacity.mjs
+      purpose: agent/runtime/review capacity + inflight accounting, depends only on issue-status.mjs.
+    - path: src/router/lib/review-squad.mjs
+      purpose: review-squad sizing, depends on pr-matching.mjs's targetRepoValue.
+
+design_decisions:
+  - decision: core.mjs re-exports everything under its original name, rather than requiring call sites to update their imports.
+    rationale: The whole point of this refactor is organizational clarity with ZERO behavior/call-site risk -- a facade re-export achieves both. Any future story that wants call sites to import directly from the new modules can do that separately, once, deliberately -- not forced by this refactor.
+  - decision: Left the genuinely interdependent dispatch/state-machine functions (selectAssignments, detectZombies, detectUnblocks, etc.) in core.mjs rather than further splitting them.
+    rationale: These functions cross-reference each other extensively (e.g. detectCascadeDispatch calls dependsOnAny/allDepsSatisfied/hasDeclaredDeps, all defined nearby) -- this IS the router's real "pure decision logic" core, and splitting mutually-recursive logic across files for a line-count target would hurt readability, not help it. Extracting only genuinely self-contained leaf/near-leaf groups is the correct scope for this pass.
+  - decision: Extracted and verified one module at a time, not all five at once.
+    rationale: Each extraction is independently behavior-preserving; running the full suite after each one catches a mistake at the cheapest possible point rather than debugging five simultaneous changes at once.
+
+risks:
+  - severity: low
+    description: A future edit to one of core.mjs's remaining dispatch functions might accidentally re-duplicate logic that now lives in one of the 5 new modules, recreating the exact drift risk this session already fixed twice (github-pr-state.mjs, github-cli.mjs).
+    mitigation: Each new module is small, clearly named, and has its own dedicated test file -- a future editor has an obvious, low-friction place to import from instead of re-implementing.

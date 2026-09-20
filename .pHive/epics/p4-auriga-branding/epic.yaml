@@ -1,0 +1,42 @@
+name: p4-auriga-branding
+title: "P4: Auriga branding — GitHub Pages showcase + Star Atlas dashboard restyle"
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+notes: |
+  Lightweight epic — design ceremony intentionally skipped. Three independent design
+  concepts (Mission Control / Star Atlas / Editorial) were explored in parallel via
+  blind agent dispatch, verified for real bugs (not just self-report), published as
+  Artifacts, and reviewed live by the operator. The operator's synthesis IS the design
+  discussion for this epic: two separate surfaces, not a single pick.
+
+  1. Public GitHub Pages showcase — Concept B (Star Atlas) almost as-is (its long
+     single-page scroll format, hero + Plates), PLUS real marketing content: what
+     Auriga is, why it's used for orchestration, docs link, GitHub repo link, install
+     instructions/button.
+  2. The real operator dashboard (src/ui/) — restyled into Concept B's Star Atlas
+     visual language (palette, typography, card treatment, the constellation
+     dependency diagram, the Charioteer's Pentagon icon as the real favicon) while
+     KEEPING Concept A's tab-based navigation (Epics / Story / Activity), not B's
+     long-scroll — the operator wants a fast-browsing dashboard, not a scroll.
+
+  Reference artifacts (design source of truth, not to be reinterpreted):
+  - Concept A (tabs, kept for navigation model): /private/tmp/claude-501/-Users-mdostal-Documents-work-pantheon-auriga/bd037f63-4e19-4e9b-badf-ba861fe9ccb8/scratchpad/design-concept-a-mission-control.html
+  - Concept B (Star Atlas, kept for visual style + showcase structure + icon): /private/tmp/claude-501/-Users-mdostal-Documents-work-pantheon-auriga/bd037f63-4e19-4e9b-badf-ba861fe9ccb8/scratchpad/design-concept-b-celestial.html
+
+stories:
+  - id: p4-github-pages-showcase
+    title: Public GitHub Pages showcase page (Star Atlas, near-as-is + real marketing content)
+    complexity: medium
+    depends_on: []
+
+  - id: p4-dashboard-restyle
+    title: Restyle src/ui/ dashboard to Star Atlas visual language, keep tab navigation
+    complexity: medium
+    depends_on: []

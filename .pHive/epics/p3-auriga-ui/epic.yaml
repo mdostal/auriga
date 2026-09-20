@@ -1,0 +1,42 @@
+name: p3-auriga-ui
+title: "P3: Auriga UI — a clean, read-only operator dashboard"
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [architecture, ui]
+  roster: [researcher, technical-writer, tpm, architect, ui-designer]
+  per_tag_reasoning:
+    architecture: "New server + frontend subsystems, first build-tooling adoption in the repo"
+    ui: "New dashboard UI (epics list, story detail, activity view); has_ui:true so ui-designer is included"
+  confidence: matched
+  gate_decisions:
+    architecture: included
+    ui: included
+
+stories:
+  - id: p3-read-layer-and-api
+    title: Read layer + minimal JSON API over .pHive/ state
+    complexity: low
+    depends_on: []
+
+  - id: p3-frontend-scaffold-epics-list
+    title: Frontend scaffold (Vite+Tailwind+shadcn) + epics list view wired to the real API
+    complexity: medium
+    depends_on: [p3-read-layer-and-api]
+
+  - id: p3-story-detail-and-activity-views
+    title: Story detail + activity views — v1 feature-complete
+    complexity: medium
+    depends_on: [p3-frontend-scaffold-epics-list]
+
+  - id: p3-dashboard-hardening
+    title: Hardening — malformed/missing data, empty states
+    complexity: low
+    depends_on: [p3-story-detail-and-activity-views]

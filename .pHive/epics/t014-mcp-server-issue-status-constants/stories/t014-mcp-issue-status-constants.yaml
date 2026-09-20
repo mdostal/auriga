@@ -1,0 +1,50 @@
+id: t014-mcp-issue-status-constants
+epic: t014-mcp-server-issue-status-constants
+title: Swap listBlockedAndInflight's raw status literals for ISSUE_STATUS
+status: shipped
+complexity: trivial
+methodology: classic
+depends_on: []
+
+description: |
+  lib/mcp/server.mjs's listBlockedAndInflight() compared issue.status against
+  raw string literals 'blocked', 'in_progress', 'in_review' instead of
+  issue-status.mjs's ISSUE_STATUS constants (t009 already extracted these
+  for core.mjs/auriga-router.mjs, but never touched this file -- a real
+  scope gap, found by the post-t013 deep-dive scan, 2026-09-06).
+
+acceptance_criteria:
+  - "lib/mcp/server.mjs imports ISSUE_STATUS from ../issue-status.mjs."
+  - "listBlockedAndInflight() uses ISSUE_STATUS.BLOCKED/IN_PROGRESS/IN_REVIEW instead of raw string literals."
+  - "No behavior change -- ISSUE_STATUS's values are byte-identical to the literals they replace ('blocked', 'in_progress', 'in_review')."
+  - "Existing mcp-server.test.mjs coverage (listBlockedAndInflight: separates blocked from in-flight) continues to pass unmodified -- no new test needed for a same-value constant swap."
+
+steps:
+  - id: implement
+    description: >
+      Import ISSUE_STATUS in lib/mcp/server.mjs and replace the three raw
+      status-literal comparisons in listBlockedAndInflight().
+    agent: developer
+  - id: integrate
+    description: >
+      Run npm run test:all, confirm full green, commit on branch
+      feat/t014-mcp-server-issue-status-constants.
+    agent: developer
+    depends_on: [implement]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/mcp/server.mjs
+      purpose: the file with the missed literals.
+    - path: src/router/lib/issue-status.mjs
+      purpose: the existing constants module (t009) this story wires in.
+
+design_decisions:
+  - decision: No new module, no new tests -- straight literal-to-constant swap.
+    rationale: ISSUE_STATUS already exists with identical values; existing tests already exercise this exact code path with the exact status strings involved, so behavior-preservation is already proven by the pre-existing green suite.
+
+risks:
+  - severity: low
+    description: None identified -- values are byte-identical, only the identifier changed.
+    mitigation: Full test:all run confirmed green before and after.

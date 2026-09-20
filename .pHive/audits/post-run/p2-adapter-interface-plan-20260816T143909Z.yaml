@@ -1,0 +1,9 @@
+run_id: p2-adapter-interface-plan-20260816T143909Z
+skill: plan
+timestamp: "2026-08-16T14:39:09Z"
+gate_lift_fired: false
+methodology: classic
+methodology_source: hive-config
+story_specs_produced: 5
+nonsensical_defaults: []
+warnings_emitted: 0

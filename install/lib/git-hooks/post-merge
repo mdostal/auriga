@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ============================================================================
+# post-merge — redeploys every live `auriga*` Pantheon compose service when
+# (and only when) a merge lands on this checkout's `main`, AND this checkout
+# is actually the one a pantheon-v2 deployment builds its container images
+# from (not a standalone dev clone like most Auriga checkouts, including
+# this session's own working copy).
+#
+# GitHub issue #78: a real production incident (issue #76's fix) merged to
+# `main` but the live `dostal-tech` dispatch container kept running the
+# pre-fix image for a long time, because nothing rebuilt it after the merge
+# -- this checkout had no redeploy trigger of any kind. This hook is that
+# trigger, for whichever pantheon-v2 deployment this checkout happens to
+# feed.
+#
+# CONTEXT: pantheon-v2's own docker-compose.yml / scripts/generate-auriga-
+# compose.ts build every `auriga`/`auriga-<tenant_id>` service's image FROM a
+# git checkout at `${AURIGA_LOCAL_PATH:-./plugins/auriga}` (see this repo's
+# .pHive/epics/t002-false-done-thrash-fix and the pantheon-v2-l2 adapter
+# README for the fuller integration story). That checkout is just a normal
+# clone of THIS repo -- so a `git pull` inside it (updating it to the latest
+# `main`) is the exact moment a redeploy needs to fire. This hook is that
+# pull's post-merge trigger, following pantheon-v2's own proven convention
+# (see mdostal/pantheon-v2's install/lib/git-hooks/post-merge +
+# bin/pantheon-redeploy) rather than inventing a new pattern.
+#
+# WHY THIS LIVES IN AURIGA'S OWN REPO, NOT PANTHEON-V2'S:
+#   The trigger event (a merge landing on Auriga's own main) only exists in
+#   THIS checkout's git history -- pantheon-v2's own post-merge hook only
+#   fires on ITS OWN repo's merges, and has no visibility into when its
+#   nested plugins/auriga checkout gets updated. Shipping this hook with
+#   Auriga means every real deployment (this one or a future one) gets the
+#   trigger automatically, without pantheon-v2 needing per-plugin logic for
+#   every god it hosts.
+#
+# STANDALONE-SAFE BY DESIGN: this repo is meant to run standalone (see this
+# repo's own README/VISION.md) and is cloned far more often as an ordinary
+# dev checkout (no parent pantheon-v2 directory at all) than as a nested
+# deployment checkout. This hook detects which situation it's in and is a
+# silent, documented no-op in the standalone case -- it never assumes a
+# pantheon-v2 parent exists, never fails a normal `git pull` because one
+# doesn't, and carries zero pantheon-v2-specific state of its own (no
+# hardcoded tenant list -- see the `docker compose config --services`
+# discovery below).
+#
+# WIRING (same convention as pantheon-v2's own hook, for the same reasons —
+# .git/hooks/ is untracked and can't be code-reviewed; core.hooksPath is a
+# real git feature that keeps this file in-tree):
+#   One-time setup, run once per checkout that actually feeds a live
+#   pantheon-v2 deployment (a human runs this; nothing installs it
+#   automatically):
+#     git config core.hooksPath install/lib/git-hooks
+#
+# This hook contains NO redeploy logic of its own -- it only decides
+# whether pantheon-v2's own bin/pantheon-redeploy should run, and for which
+# services. All actual build/recreate/health-check logic stays owned by
+# that script, exactly as pantheon-v2's own post-merge hook already does.
+# ============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
+
+current_branch="$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null || true)"
+if [ "$current_branch" != "main" ]; then
+  # Not on main -- e.g. merging into a feature branch. No-op by design,
+  # matching pantheon-v2's own post-merge hook exactly.
+  exit 0
+fi
+
+# Detect whether this checkout is nested at <pantheon-v2 root>/plugins/<name>
+# (the shape pantheon-v2's docker-compose.yml / generate-auriga-compose.ts
+# actually build from) by checking two directories up for a real pantheon-v2
+# deployment tree: a docker-compose.yml that references AURIGA_LOCAL_PATH,
+# and a working bin/pantheon-redeploy to hand off to. Absence of either means
+# this is an ordinary standalone Auriga clone (the common case) -- silent,
+# documented no-op, never an error.
+PANTHEON_ROOT="$(cd "$REPO_ROOT/../.." 2>/dev/null && pwd || true)"
+if [ -z "$PANTHEON_ROOT" ] \
+  || [ ! -f "$PANTHEON_ROOT/docker-compose.yml" ] \
+  || [ ! -x "$PANTHEON_ROOT/bin/pantheon-redeploy" ]; then
+  exit 0
+fi
+if ! grep -q "AURIGA_LOCAL_PATH" "$PANTHEON_ROOT/docker-compose.yml" 2>/dev/null; then
+  exit 0
+fi
+
+# Every compose service this pantheon-v2 deployment currently defines whose
+# name starts with "auriga" -- the top-level `auriga` service plus every
+# generated per-tenant `auriga-<tenant_id>` service (see pantheon-v2's
+# docker-compose.override.yml / scripts/generate-auriga-compose.ts).
+# Discovered LIVE via `docker compose config`, never hardcoded -- this hook
+# has no knowledge of pantheon-v2's tenant registry and must keep working
+# unmodified as tenants are added or removed.
+#
+# Built with a plain while-read loop (not `mapfile`/`readarray`) -- those are
+# bash-4+ builtins and this hook's shebang only guarantees "whatever bash is
+# first on PATH", which is bash 3.2 on a stock macOS dev machine. The deploy
+# host is Linux and likely has bash 4+, but there is no reason to depend on
+# that when a portable form costs nothing.
+AURIGA_SERVICES=()
+while IFS= read -r svc; do
+  [ -n "$svc" ] && AURIGA_SERVICES+=("$svc")
+done < <(cd "$PANTHEON_ROOT" && docker compose config --services 2>/dev/null | grep -E '^auriga(-|$)' || true)
+
+if [ "${#AURIGA_SERVICES[@]}" -eq 0 ]; then
+  echo "post-merge (auriga): no auriga* compose services found in $PANTHEON_ROOT -- skipping redeploy" >&2
+  exit 0
+fi
+
+echo "post-merge (auriga): redeploying ${AURIGA_SERVICES[*]} via $PANTHEON_ROOT/bin/pantheon-redeploy" >&2
+exec "$PANTHEON_ROOT/bin/pantheon-redeploy" "${AURIGA_SERVICES[@]}"

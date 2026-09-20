@@ -1,0 +1,47 @@
+name: p2-adapter-interface
+title: "P2: Adapter-Interface Extraction — backlogAdapter + spawnAdapter + pantheon-v2-l2 stub"
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+planning_team:
+  matched_tags: [architecture, data]
+  roster: [researcher, technical-writer, tpm, architect]
+  per_tag_reasoning:
+    architecture: "New adapter interface boundary, cross-system integration seam, significant structural change to the router's I/O layer"
+    data: "Defines canonical Issue/Run/PR shape contracts (backlogAdapter/spawnAdapter typedefs) consumed across every future story touching dispatch or backlog"
+  confidence: matched
+  gate_decisions:
+    architecture: included
+    data: included
+
+stories:
+  - id: p2-adapter-interfaces-and-stubs
+    title: Define backlogAdapter/spawnAdapter shapes and ship stub implementations
+    complexity: medium
+    depends_on: []
+
+  - id: p2-multica-backlog-adapter
+    title: Port lib/multica.mjs's issue CRUD + gh PR-discovery into createMulticaBacklogAdapter
+    complexity: medium
+    depends_on: [p2-adapter-interfaces-and-stubs]
+
+  - id: p2-multica-spawn-adapter
+    title: Port dispatch/assign/rerun + lane maps into createMulticaSpawnAdapter
+    complexity: medium
+    depends_on: [p2-adapter-interfaces-and-stubs]
+
+  - id: p2-router-cutover
+    title: Rewire cycle() and all mcaImpl.* call sites to the backlog/spawn adapter boundary
+    complexity: high
+    depends_on: [p2-multica-backlog-adapter, p2-multica-spawn-adapter]
+
+  - id: p2-pantheon-l2-stub-and-docs
+    title: Add the documented pantheon-v2-l2 stub adapter and close out doc updates
+    complexity: low
+    depends_on: [p2-adapter-interfaces-and-stubs]

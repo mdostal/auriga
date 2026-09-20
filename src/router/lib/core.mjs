@@ -1,18 +1,36 @@
 // Auriga auto-router — PURE decision logic (no live calls).
 // Everything here is deterministic and unit-tested with mocked inputs.
 
-import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
+import { isPrMerged } from './github-pr-state.mjs';
+import { ISSUE_STATUS, isTerminalIssueStatus } from './issue-status.mjs';
 import {
   assignmentFingerprint,
   assignmentFingerprintMatches,
   isRouterManagedAssignment,
 } from './fingerprint.mjs';
-
-const ACTIVE_RUN_STATUSES = new Set([
-  'running', 'in_progress', 'in progress', 'queued', 'pending', 'dispatched', 'started', 'assigned',
-]);
-const FAILED_RUN_STATUSES = new Set(['failed', 'error', 'errored', 'cancelled', 'canceled', 'timeout']);
-const ACTIVE_ISSUE_STATUSES = new Set(['in_progress', 'in progress', 'running']);
+import { classifyRun, hasActiveRun, latestRun } from './run-classification.mjs';
+import { storyKey, slugKey, descStoryDeps, descStoryId } from './story-identity.mjs';
+import {
+  hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
+  repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
+} from './pr-matching.mjs';
+import {
+  computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
+  computeReviewInflight, chooseReviewAgent,
+} from './capacity.mjs';
+import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+export { isPrMerged };
+export { classifyRun, hasActiveRun, latestRun };
+export { storyKey, slugKey, descStoryDeps, descStoryId };
+export {
+  hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
+  repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
+};
+export {
+  computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
+  computeReviewInflight, chooseReviewAgent,
+};
+export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
 
 // Ignore smoke/scratch/verification tickets by title.
 export function isSmokeScratch(title = '') {
@@ -59,210 +77,15 @@ export function isHiveStory(issue = {}) {
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
 
-// ---------------------------------------------------------------------------
-// Story-key + slug matching (2026-07-31, loop-integrity fixes).
-// Minerva-planned stories carry a short epic-scoped key in their Multica title,
-// e.g. "[m-02-file-layer-implementation] ..." and their build agents name PR
-// branches after the SAME key ("feat/m-01-service", "feat/PAN-6952", etc.) —
-// NOT always after the PAN-#### ticket id. cron-maker worked because its branches
-// happened to embed the pan-#### id; mnemosyne#1 (feat/m-01-service) does not, so
-// its PR never matched its ticket and sat forever. storyKey() extracts that short
-// key so a PR can be matched to its ticket even when the branch has no PAN id.
+// storyKey/slugKey/descStoryDeps/descStoryId now live in
+// ./story-identity.mjs — imported + re-exported above (t011 decomposition).
 
-// Unified story-key extractor. A story key
-// identifies a story within its epic and appears at the START of the story's title
-// bracket ("[<key>-<words>]") and at the start of a dependency SLUG ("<key>-<words>").
-// The short-key convention is strictly <letters>-<digits>, e.g. m-02, cm-07,
-// htq-01, flayr-01, jfpm-01, mit-04, v-04, lct-03. Epic-tag slugs such as
-// "p1-router-capability-routing" are exact story ids, not short keys: treating
-// every p1-* sibling as key "p1" collapses unrelated stories onto one key and
-// can false-unblock dependents.
-// The trailing (?![0-9]) forces the FULL number to be captured, so a longer-numbered key
-// can never be read as a shorter one — ct-010 never collapses to ct-01.
-// Downstream comparison is EXACT string equality (storyKey === slugKey), so correct
-// full-key extraction is exactly what rejects false-prefix cross-matches.
-function extractStoryKey(str = '') {
-  const m = String(str).match(/^\s*\[?\s*([a-z]{1,8}-\d{1,3})(?![0-9])/i);
-  return m ? m[1].toLowerCase() : null;
-}
+// classifyRun/hasActiveRun/latestRun now live in ./run-classification.mjs —
+// imported + re-exported above (t011 decomposition).
 
-// Short epic-scoped key from a story TITLE's leading "[key-...]" bracket (e.g. "m-02",
-// "cm-07", "hf-01"). null when the title has no parseable leading key.
-export function storyKey(issue = {}) {
-  return extractStoryKey(issue.title || '');
-}
-
-// Short key from a dependency SLUG (e.g. "m-01-core-recall-interface" -> "m-01",
-// "cm-07-e2e-integration" -> "cm-07"). null when unparseable.
-export function slugKey(slug = '') {
-  return extractStoryKey(slug);
-}
-
-// Known plugin-hive PHASE tokens that appear inside a story's `steps:` block as
-// `depends_on: [research]` etc. These are workflow phases, NOT story dependencies,
-// and must be excluded when parsing a story's real cross-story dependency list.
-const HIVE_PHASE_TOKENS = new Set([
-  'research', 'implement', 'implementation', 'test', 'test-spec', 'tests',
-  'review', 'plan', 'design', 'integrate', 'integration', 'spec', 'build',
-]);
-
-// Story-level dependency slugs declared in the DESCRIPTION (not metadata).
-// Minerva emits the story's own dependencies as the FIRST `depends_on: [...]`
-// line in the YAML front-matter (before the `steps:` block). Older stories carry
-// this ONLY in the description, never mirrored into metadata.depends_on — so
-// detectUnblocks/depsSatisfied (which read metadata only) never saw them and the
-// child never unblocked (the m-02-depends-on-m-01 case). We read the FIRST
-// depends_on line and drop any hive PHASE tokens defensively.
-// Minerva emits a story's own dependency slugs in the description in TWO shapes, and
-// BOTH must parse — else a real dependency is silently dropped and the story
-// false-unblocks (the rsh-03/PAN-5830 case: a block-list dep on rsh-01 was missed, so
-// the story looked dependency-free and was eligible to unblock while rsh-01 was still
-// stuck). Forms:
-//   1. inline array   ->  depends_on: [a-01-foo, b-02-bar]
-//   2. YAML block list ->  depends_on:\n  - a-01-foo\n  - b-02-bar
-// We drop any plugin-hive PHASE tokens (research/implement/test/...) defensively.
-export function descStoryDeps(issue = {}) {
-  const desc = issue.description || '';
-  // Match the FIRST `depends_on:` in the description and capture EITHER an inline
-  // [array] OR a block list — in one regex so the earliest occurrence wins. This
-  // matters because a Minerva story's `steps:` block further down carries per-phase
-  // `depends_on: [research]` lines; parsing inline-anywhere-first would grab a phase
-  // dep and shadow the real story dep declared at the top (the rsh-03/PAN-5830 bug).
-  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|\r?\n(?:[ \t]*-[ \t]*[^\n]+\r?\n?)+)/i);
-  let raw = [];
-  if (m) {
-    const body = m[2];
-    if (body.trimStart().startsWith('[')) {
-      raw = body.trim().replace(/^\[|\]$/g, '').split(',');
-    } else {
-      raw = body.split(/\r?\n/).map((l) => l.replace(/^[ \t]*-[ \t]*/, ''));
-    }
-  }
-  return raw
-    .map((s) => s.trim().replace(/^["']|["']$/g, ''))
-    .filter(Boolean)
-    .filter((s) => !HIVE_PHASE_TOKENS.has(s.toLowerCase()));
-}
-
-// A story's own declared id, from the Minerva YAML front-matter `id: <slug>` line
-// (e.g. "id: p1-router-capability-routing"). Some epics (the "p1-..." convention)
-// use this full descriptive slug as BOTH the story's identity and the value every
-// sibling's depends_on: [...] names — there is no separate short "prefix-NN" key
-// to extract (storyKey/slugKey return null for "p1-router-capability-routing",
-// since the epic tag "p1" mixes a letter and a digit before the first hyphen,
-// which the [a-z]{1,8}-\d{1,3} pattern below doesn't match). Falling through
-// descDepsSatisfied's short-key lookup for this convention silently treated
-// EVERY dep as unresolved -> vacuously satisfied, so a story never actually
-// waited on its declared deps (PAN-6664 loop-integrity bug, 2026-07-31).
-export function descStoryId(issue = {}) {
-  const desc = issue.description || '';
-  const m = desc.match(/(^|\n)\s*id:\s*([a-z0-9][a-z0-9_-]*)/i);
-  if (m) return m[2].trim().toLowerCase();
-  const title = issue.title || '';
-  const titleMatch = title.match(/^\s*\[\s*([a-z0-9][a-z0-9_-]*)\s*\]/i);
-  return titleMatch ? titleMatch[1].trim().toLowerCase() : null;
-}
-
-// Classify a single run object.
-export function classifyRun(run, now = Date.now()) {
-  const status = (run.status || '').toLowerCase();
-  const failed = FAILED_RUN_STATUSES.has(status) || (run.error != null && run.error !== '');
-  const hasCompleted = !!run.completed_at || status === 'completed' || status === 'done' || status === 'succeeded';
-  const active = !failed && !hasCompleted && (ACTIVE_RUN_STATUSES.has(status) || (!run.completed_at && status === ''));
-  const ts = run.completed_at || run.started_at || run.dispatched_at || run.created_at;
-  const ageMs = ts ? now - new Date(ts).getTime() : Infinity;
-  return { active, failed, done: hasCompleted && !failed, ageMs, status };
-}
-
-// Given an issue's runs (array), is any run currently active AND fresh?
-// A run stuck in "running" longer than staleMs is treated as a silent hang
-// (not active) so it can be recovered.
-export function hasActiveRun(runs = [], now = Date.now(), staleMs = Infinity) {
-  return runs.some((r) => {
-    const c = classifyRun(r, now);
-    return c.active && c.ageMs < staleMs;
-  });
-}
-
-// Latest run by created_at/dispatched_at.
-export function latestRun(runs = []) {
-  if (!runs.length) return null;
-  return [...runs].sort((a, b) => {
-    const ta = new Date(a.created_at || a.dispatched_at || 0).getTime();
-    const tb = new Date(b.created_at || b.dispatched_at || 0).getTime();
-    return tb - ta;
-  })[0];
-}
-
-// In-flight count per agent id. An issue is "in flight" for an agent ONLY when it
-// is assigned to that agent AND actively running (in_progress / running).
-//
-// FIX 2026-07-28 (audit P0 "master switch"): previously this also counted assigned
-// `todo`s as in-flight ("|| st === 'todo'"). That deadlocked the whole router:
-// because assignee-mutation does not reliably enqueue a run (the dispatch dead-zone),
-// assigned-todos accumulate on the board forever and never transition to running.
-// Their phantom count then exceeds every RUNTIME_CAP (e.g. codex 12 > 4, claude 5 > 4)
-// while real in_progress is 0 — so selectAssignments finds no agent with capacity and
-// the router dispatches NOTHING, for hours, silently. Counting only truly-running
-// issues makes real inflight ~0, freeing every lane. The per-cycle batch caps
-// (CAPS.perCycleTotal / perCyclePerAgent) prevent over-assignment during the brief
-// assign->run gap, and each assign is immediately re-run (enqueued) by the cycle loop.
-export function computeInflight(issues, agents) {
-  const idToName = {};
-  for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
-  const counts = {};
-  for (const name of Object.keys(agents)) counts[name] = 0;
-  for (const i of issues) {
-    if (!i.assignee_id) continue;
-    const name = idToName[i.assignee_id];
-    if (!name) continue;
-    const st = (i.status || '').toLowerCase();
-    if (ACTIVE_ISSUE_STATUSES.has(st)) counts[name] += 1;
-  }
-  return counts;
-}
-
-// Count assigned-but-not-running issues per agent (the old "inflight" definition).
-// Not used for capacity — kept for observability so the divergence between real
-// in-flight and the assigned-todo backlog stays visible in the scan log.
-export function computeAssignedQueued(issues, agents) {
-  const idToName = {};
-  for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
-  const counts = {};
-  for (const name of Object.keys(agents)) counts[name] = 0;
-  for (const i of issues) {
-    if (!i.assignee_id) continue;
-    const name = idToName[i.assignee_id];
-    if (!name) continue;
-    const st = (i.status || '').toLowerCase();
-    if (st === 'todo') counts[name] += 1;
-  }
-  return counts;
-}
-
-// Runtime in-flight totals derived from per-agent counts.
-export function computeRuntimeInflight(inflight, agents) {
-  const rt = {};
-  for (const [name, count] of Object.entries(inflight)) {
-    const r = agents[name]?.runtime;
-    if (!r) continue;
-    rt[r] = (rt[r] || 0) + count;
-  }
-  return rt;
-}
-
-// Can this agent accept one more, given per-agent and per-runtime caps and
-// already-projected assignments this cycle?
-export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
-  const a = agents[name];
-  if (!a) return false;
-  if (a.available === false) return false;
-  const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
-  if (agentNow >= a.maxInflight) return false;
-  const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
-  if (rtNow >= (runtimeCap[a.runtime] ?? Infinity)) return false;
-  return true;
-}
+// computeInflight/computeAssignedQueued/computeRuntimeInflight/
+// agentHasCapacity now live in ./capacity.mjs — imported + re-exported
+// above (t011 decomposition).
 
 // Is this issue an un-planned "seed" that must route to the Minerva planning
 // lane instead of a build lane (PAN-6646: build agents can't plan and just
@@ -282,16 +105,52 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
 // remaining two legs (childless + top-level) match this story's verbatim
 // acceptance criteria, which only asks for "unmarked AND childless AND
 // top-level" and never mentions epic.yaml.
+//
+// LOOP FIX (found live 2026-09-01, PANT-79): the childless+top-level fallback
+// misclassifies any standalone, already-scoped bug/fix ticket as a seed --
+// there is no such thing in this heuristic as "top-level but not actually an
+// idea." Minerva correctly declines these (see its own instructions' non-seed
+// check) and unassigns, but isSeed() re-evaluates true on the very next
+// cycle since the issue is still top-level and still childless, producing an
+// infinite minerva-dev<->unassign dispatch loop (confirmed live: PANT-79
+// cycled 4 times before Minerva self-mitigated by setting status to
+// `blocked`, which only sidesteps the candidate-pool filter rather than
+// fixing the misclassification). The `not-a-seed` label is the durable
+// escape hatch: Minerva applies it when declining an issue for this reason
+// (see minerva-dev's own live agent instructions), and it's checked FIRST,
+// before the explicit-mark and heuristic legs, so it always wins even if a
+// human later adds 'idea'/'needs-plan' back by mistake.
 export function isSeed(issue, allIssues = []) {
   // `multica issue list`/`get` return labels as an array of label OBJECTS
   // ({ id, name, color, ... }), not plain strings — normalize to names so
   // this matches real API data, not just string-array test fixtures.
   const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
   const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
   if (explicitlyMarked) return true;
   const isTopLevel = !issue.parent_issue_id;
   const isChildless = !allIssues.some((i) => i.parent_issue_id === issue.id);
   return isTopLevel && isChildless;
+}
+
+// Is this issue explicitly marked for hand-up to this instance's registered
+// parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
+// shape exactly: a `hand-up` label is the durable, human/Minerva-applied
+// signal that "this doesn't fit anything I have access to" — a judgment
+// call the router never makes on its own (see this epic's design-discussion.md,
+// Open Question 1). Same label-object-vs-string normalization isSeed() needs
+// (`multica issue list`/`get` return labels as [{id, name, ...}], not plain
+// strings).
+//
+// This predicate alone does NOT decide whether a hand-up actually happens —
+// selectAssignments only acts on it when NO normal local route exists (the
+// label means "if nothing else fits", never an unconditional override of a
+// working local dispatch) AND a real parent board is configured
+// (opts.parentBoardConfig, from orchestrator-topology.mjs's
+// resolveParentBoardConfig()) — see selectAssignments below.
+export function isHandUp(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  return labelNames.includes('hand-up');
 }
 
 // Dependency gate: is this issue's declared depends_on satisfied enough to dispatch?
@@ -311,14 +170,17 @@ export function depsSatisfied(issue, statusById) {
   for (const id of ids) {
     const st = statusById.get(id);
     if (st === undefined) continue; // unseen dep -> don't block (avoid deadlock)
-    if (st !== 'done' && st !== 'cancelled' && st !== 'canceled') return false;
+    if (!isTerminalIssueStatus(st)) return false;
   }
   return true;
 }
 
-// Choose the best agent from a lane, picking the candidate with the lowest
-// current+projected load that still has capacity.
-export function chooseAgentFromLane(lane, cfg, inflight, runtimeInflight, projected) {
+// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
+// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
+// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
+// load that still has capacity.
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false) {
+  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
   );
@@ -333,53 +195,29 @@ export function chooseAgentFromLane(lane, cfg, inflight, runtimeInflight, projec
   return eligible[0];
 }
 
-// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
-// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
-// order, else DEFAULT_LANE.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false) {
-  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
-  return chooseAgentFromLane(lane, cfg, inflight, runtimeInflight, projected);
-}
-
-export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected) {
-  const treeLane = getEligibleAgentsByTreePath(issue, cfg);
-  const treeAgent = treeLane.length
-    ? chooseAgentFromLane(treeLane, cfg, inflight, runtimeInflight, projected)
-    : null;
-  return treeAgent || chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
-}
-
+// Select this cycle's assignments from the board.
+// Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
+// Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
+// blockedRuntimes: Set of runtime names to skip this cycle (rate-limited lanes).
 function agentNameForAssignee(assigneeId, agents) {
   if (!assigneeId) return null;
   const found = Object.entries(agents).find(([, agent]) => agent.id === assigneeId);
   return found ? found[0] : null;
 }
 
+// Idempotent dispatch decision for a single issue + target agent (PAN-8245).
+// Returns { action: 'assign'|'noop', reason, currentAgent }.
 export function assignmentDecision(issue, targetAgent, cfg, opts = {}) {
-  if (!issue.assignee_id) {
-    return { action: 'assign', reason: 'unassigned' };
-  }
-
+  if (!issue.assignee_id) return { action: 'assign', reason: 'unassigned' };
   const currentAgent = agentNameForAssignee(issue.assignee_id, cfg.AGENTS);
-  if (currentAgent === targetAgent) {
-    return { action: 'noop', reason: 'already-assigned-target', currentAgent };
-  }
-
-  if (!isRouterManagedAssignment(issue)) {
-    return { action: 'noop', reason: 'manual-assignment', currentAgent };
-  }
-
+  if (currentAgent === targetAgent) return { action: 'noop', reason: 'already-assigned-target', currentAgent };
+  if (!isRouterManagedAssignment(issue)) return { action: 'noop', reason: 'manual-assignment', currentAgent };
   if (currentAgent && assignmentFingerprintMatches(issue, currentAgent, cfg, opts)) {
     return { action: 'noop', reason: 'unchanged-router-assignment', currentAgent };
   }
-
   return { action: 'assign', reason: 'changed-router-assignment', currentAgent };
 }
 
-// Select this cycle's assignments from the board.
-// Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
-// Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
-// blockedRuntimes: Set of runtime names to skip this cycle (rate-limited lanes).
 export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const blockedRuntimes = opts.blockedRuntimes || new Set();
   const maxTotal = opts.maxTotal ?? cfg.CAPS.perCycleTotal;
@@ -396,12 +234,13 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
 
   // Candidate pool: unassigned or router-managed assigned, status todo, not smoke/scratch,
-  // project in scan set, not already handled by cascade this cycle, NOT a human-todo
-  // (priority-1 rule — see isHumanTodo; routed to the human queue instead via
-  // scripts/export-human-queue.mjs), and with its depends_on graph satisfied (never
-  // dispatch a decomposed story whose dependency stories aren't done yet — see depsSatisfied).
+  // project in scan set, NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the
+  // human queue instead via scripts/export-human-queue.mjs), and with its depends_on graph
+  // satisfied (never dispatch a decomposed story whose dependency stories aren't done yet).
+  // Router-managed assigned todos are included so idempotent dispatch can re-evaluate them
+  // (PAN-8245: content changes trigger reassignment; unchanged router assignments noop).
   const candidates = issues
-    .filter((i) => (i.status || '').toLowerCase() === 'todo')
+    .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
@@ -419,6 +258,16 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   });
 
   const PLANNING_AGENT = 'minerva-dev';
+
+  // t015 — orchestrator hand-up: decisions are returned as DATA (never
+  // acted on here — core.mjs stays pure/no-I/O, same invariant t011's
+  // decomposition preserved everywhere else). auriga-router.mjs's cycle()
+  // performs the actual cross-board createIssue + local comment/unassign/
+  // status-change for each entry. Attached to the returned `chosen` array
+  // as a non-array-breaking extra property (see the `return` below) so
+  // every existing caller that treats this return value as a plain array
+  // (`.length`, `for...of`, etc.) is unaffected.
+  const handUps = [];
 
   const chosen = [];
   for (const issue of candidates) {
@@ -449,8 +298,19 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected);
-    if (!agent) continue;
+    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
+    if (!agent) {
+      // Hand-up fallback: ONLY when no normal local route exists (the
+      // hand-up label means "if nothing else fits", never an unconditional
+      // override of a working local dispatch) AND a real parent board is
+      // configured. No configured parent -> falls through unchanged to the
+      // existing isHumanTodo/human-queue-export path, exactly like any
+      // other unroutable ticket.
+      if (isHandUp(issue) && opts.parentBoardConfig) {
+        handUps.push({ identifier: issue.identifier, issueId: issue.id, reason: 'no-local-route' });
+      }
+      continue;
+    }
     const runtime = cfg.AGENTS[agent].runtime;
     if (blockedRuntimes.has(runtime)) continue;
     const decision = assignmentDecision(issue, agent, cfg, opts);
@@ -473,6 +333,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       assignmentReason: decision.reason,
     });
   }
+  chosen.handUps = handUps;
   return chosen;
 }
 
@@ -495,16 +356,20 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 }
 
 // Pure-code state-machine: advance in_review issues to done once verify_ok is
-// real — a linked PR has actually merged (state 'merged' or a non-null
-// merged_at), not merely runStatus reporting success. This is the
+// real — a linked PR has actually merged (see isPrMerged in
+// github-pr-state.mjs), not merely runStatus reporting success. This is the
 // false-confidence guard: runStatus is never treated as "done" on its own.
-// prsByIssue: { [identifier]: pullRequest[] } from `multica issue pull-requests`.
+// prsByIssue: { [identifier]: pullRequest[] } — real gh-CLI-shaped PR objects
+// (see lib/adapters/pantheon-v2-l2/index.mjs's ghPrs()) as of the
+// pantheon-owns-multica-board-bridge cutover; GH #81 found this function
+// still checking the OLD Multica-native shape's casing (lowercase
+// 'merged'/snake_case merged_at) and never firing on a real one.
 export function detectVerifiedDone(inReviewIssues, prsByIssue) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
     const prs = prsByIssue[i.identifier] || [];
-    const merged = prs.some((pr) => pr.state === 'merged' || pr.merged_at != null);
+    const merged = prs.some(isPrMerged);
     if (merged) {
       actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-done' });
     }
@@ -542,13 +407,42 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // fires the self-block ("plugin-hive execute is unavailable in this Codex
     // runtime"). Force a REASSIGN to a hive lane instead of a same-assignee rerun.
     const misLaned = isHive && !!i.assignee_id && !isHiveCapableAssignee(i.assignee_id, cfg);
+    // GH #75 / t001-zombie-give-up: bound zombie-recovery retries instead of
+    // re-firing assign/rerun forever. runsByIssue already gives us the
+    // issue's own run history for free, so its length is a natural, stateless
+    // attempt counter — no new persistent state needed.
+    //
+    // Hellsing boundary: this is a deliberate, BOUNDED stopgap, not the real
+    // fix. pantheon-v2's plugins/hellsing/README.md reserves "the dangerous
+    // actuation of terminating stuck processes" for a separate god (Hellsing),
+    // keeping Auriga "a thin, event-driven state-machine consumer." Hellsing
+    // is phase:concept with no runnable code today, and Auriga has no
+    // SpawnAdapter method to actually terminate a stuck process (adding one
+    // pre-emptively would violate adapters/README.md's no-pre-emptive-
+    // integrations rule). So once an issue exhausts its attempt budget,
+    // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
+    // + commented on the issue) instead of silently looping forever. Real
+    // termination/actuation stays Hellsing's job once it exists and runs.
+    if (runs.length >= cfg.CAPS.zombieMaxAttempts) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        hasAssignee: !!i.assignee_id,
+        isHive,
+        action: 'give-up',
+        reason: 'max-attempts-exhausted',
+      });
+      continue;
+    }
     actions.push({
       identifier: i.identifier,
       issueId: i.id,
       projectId: i.project_id,
-      assigneeId: i.assignee_id || null,
       lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
       hasAssignee: !!i.assignee_id,
+      assigneeId: i.assignee_id || null,
       isHive,
       action: (i.assignee_id && !misLaned) ? 'rerun' : 'assign',
       reason: misLaned ? 'hive-on-noncapable-lane'
@@ -569,153 +463,34 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
 // this function only decides *dispatch*, exactly like selectAssignments decides
 // build dispatch. Router shells out (assign + rerun) to actually enqueue.
 
-// A `target_repo:` line in the description is the build-lane's own signal, so its
-// presence is a reliable "this story produced code in a repo" marker.
-const TARGET_REPO_RE = /(^|\n)\s*target_repo:\s*\S+/i;
-export function hasTargetRepo(issue = {}) {
-  return TARGET_REPO_RE.test(issue.description || '');
-}
+// hasTargetRepo/prReferencesIssue/prMatchesStory/prIdentityMatchesStory/
+// repoFromPrUrl/prIsOpen/hasOpenPrForIssue/normalizeRepoSlug/targetRepoValue
+// now live in ./pr-matching.mjs — imported + re-exported above (t011
+// decomposition).
 
-// Broad PR<->ticket matcher. The old convention (branch feat/<TICKET-ID> only) was
-// too narrow: build lanes name branches like feat/pan-6667-descriptive (lowercased +
-// suffixed) and rarely start a title with the id. Match the ticket id (case-
-// insensitive) ANYWHERE in the PR's head branch, title, or body.
-export function prReferencesIssue(pr = {}, identifier = '') {
-  if (!identifier) return false;
-  const id = String(identifier).toLowerCase();
-  const hay = [pr.headRefName, pr.head_ref, pr.branch, pr.title, pr.body]
-    .filter((s) => typeof s === 'string')
-    .join('\n')
-    .toLowerCase();
-  return hay.includes(id);
-}
-
-// Broader PR<->STORY matcher: matches on the ticket identifier (prReferencesIssue)
-// OR on the story's short epic-scoped key (storyKey) appearing in the PR's head
-// branch / title / body. The key match tolerates a trailing "-" (feat/m-01-service)
-// but rejects a trailing digit so "m-01" never matches "m-010". This is what lets
-// slug-branched PRs (mnemosyne#1 feat/m-01-service) match their PAN ticket, which
-// the narrow id-only matcher missed.
-export function prMatchesStory(pr = {}, issue = {}) {
-  if (prReferencesIssue(pr, issue.identifier)) return true;
-  const key = storyKey(issue);
-  if (!key) return false;
-  const hay = [pr.headRefName, pr.head_ref, pr.branch, pr.title, pr.body]
-    .filter((s) => typeof s === 'string').join('\n').toLowerCase();
-  const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
-  return re.test(hay);
-}
-
-// STRICT identity matcher: the ticket id or the story's short key appears in the PR's
-// HEAD BRANCH or TITLE only — never the body. A body can merely *mention* a ticket
-// ("builds on PAN-6659") without being that ticket's PR; using the body to decide a
-// status change (e.g. demoting a legitimately-merged done story) is a false-positive
-// trap. Branch/title is the PR's own identity, so this is safe for status mutations.
-export function prIdentityMatchesStory(pr = {}, issue = {}) {
-  const idHay = [pr.headRefName, pr.head_ref, pr.branch, pr.title]
-    .filter((s) => typeof s === 'string').join('\n').toLowerCase();
-  const id = String(issue.identifier || '').toLowerCase();
-  if (id && idHay.includes(id)) return true;
-  const key = storyKey(issue);
-  if (!key) return false;
-  const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
-  return re.test(idHay);
-}
-
-// owner/repo slug parsed from a PR's html url (github.com/owner/repo/pull/N), or null.
-export function repoFromPrUrl(pr = {}) {
-  const u = pr.url || pr.html_url || '';
-  const m = String(u).match(/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\//i);
-  return m ? m[1] : null;
-}
-
-// Is a PR open (not merged/closed)? Tolerant of gh's uppercase 'OPEN' and of a
-// missing state (open only when there is no merged/closed marker).
-export function prIsOpen(pr = {}) {
-  const st = (pr.state || '').toLowerCase();
-  if (st === 'open') return true;
-  if (st === 'merged' || st === 'closed') return false;
-  return !pr.merged_at && !pr.mergedAt && !pr.closed_at && !pr.closedAt;
-}
-
-// Does this ticket have at least one OPEN PR referencing it? `prs` is the array of
-// candidate PRs the router gathered (gh pr list across the story's resolvable repos).
-export function hasOpenPrForIssue(identifier, prs = []) {
-  return (prs || []).some((pr) => prIsOpen(pr) && prReferencesIssue(pr, identifier));
-}
-
-// Normalize a target_repo value (bare slug, https/ssh git URL, github.com/owner/repo,
-// with or without a trailing .git) to an owner/repo slug, or null if it is not a bare
-// GitHub slug (e.g. a local filesystem path with extra segments).
-export function normalizeRepoSlug(value = '') {
-  if (!value || typeof value !== 'string') return null;
-  const v = value.trim()
-    .replace(/^git@github\.com:/i, '')
-    .replace(/^https?:\/\/github\.com\//i, '')
-    .replace(/^github\.com\//i, '')
-    .replace(/\.git$/i, '');
-  const m = v.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
-  if (!m) return null;
-  return m[1] + '/' + m[2];
-}
-
-// The story's declared target_repo: metadata.target_repo (preferred) or a
-// `target_repo: <value>` line in the description. Raw value (not normalized).
-export function targetRepoValue(issue = {}) {
-  const meta = issue && issue.metadata && issue.metadata.target_repo;
-  if (typeof meta === 'string' && meta.trim()) return meta.trim();
-  const m = (issue.description || '').match(/(^|\n)\s*target_repo:\s*(\S+)/i);
-  return m ? m[2] : null;
-}
-
-// Whether to burn a Claude review run on an in_review story. STRICT gate: a REAL
-// open PR referencing the ticket (hasOpenPR, computed by the router via gh). No PR
-// => a parent seed / planning / idea ticket => NOT eligible => skipped (never
-// dispatched, so the review path can never false-block it). A real matching open PR
-// is also proof the target repo is resolvable (it is the PR's own repo), satisfying
-// the "resolvable target_repo AND a real open PR" requirement.
-export function reviewEligible(issue = {}, hasOpenPR = false) {
-  return !!hasOpenPR;
+// Whether to dispatch a review run for an in_review story. Auriga orchestrates —
+// it never talks to GitHub to make this call (operator correction, repeated
+// 2026-08 through 2026-09-13: "auriga has no need to integrate with github...
+// it orchestrates, it isn't checking the PR... that is the review squad").
+//
+// The old STRICT gate required a real open PR discovered via gh, which made
+// review-dispatch silently depend on whatever GitHub adapter shape the router
+// happened to be using — it broke outright for any tenant routed through the
+// core-api facade (see mdostal/auriga#87) and was the wrong layer for this
+// decision even on the path where it happened to work. Status is the only
+// signal Auriga needs: a story only ever reaches in_review via
+// detectRunCompletions (a build agent finished a real in_progress run) — a
+// seed/idea/parent ticket is routed to the planning lane and never passes
+// through in_progress at all, so it can't legitimately land here either. If a
+// genuinely wrong ticket ever does, that's the review squad's own job to
+// notice and comment/reopen — not Auriga's job to pre-filter via GitHub.
+export function reviewEligible(_issue = {}) {
+  return true;
 }
 
 // How many review slots each review-lane agent currently occupies. An in_review
-// issue assigned to a review agent = that agent is (or should be) reviewing it,
-// so it holds a slot until it leaves in_review (merged->done) or is sent back.
-// This caps concurrent reviews at each agent's maxInflight without touching the
-// build lanes' claude RUNTIME_CAP accounting (review agents use their own bucket).
-export function computeReviewInflight(inReviewIssues, cfg) {
-  const lane = cfg.REVIEW_LANE || [];
-  const idToName = {};
-  for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
-  const counts = {};
-  for (const n of lane) counts[n] = 0;
-  for (const i of inReviewIssues) {
-    const name = idToName[i.assignee_id];
-    if (name) counts[name] += 1;
-  }
-  return counts;
-}
-
-// Pick the review-lane agent with the most free capacity (lowest current+projected
-// load) that is still under its maxInflight. Returns null when the lane is full.
-export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
-  const lane = cfg.REVIEW_LANE || [];
-  const eligible = lane.filter((name) => {
-    const a = cfg.AGENTS[name];
-    if (!a) return false;
-    if (a.available === false) return false;
-    const now = (reviewInflight[name] || 0) + (projected[name] || 0);
-    return now < a.maxInflight;
-  });
-  if (!eligible.length) return null;
-  eligible.sort((x, y) => {
-    const lx = (reviewInflight[x] || 0) + (projected[x] || 0);
-    const ly = (reviewInflight[y] || 0) + (projected[y] || 0);
-    if (lx !== ly) return lx - ly;
-    return lane.indexOf(x) - lane.indexOf(y);
-  });
-  return eligible[0];
-}
+// computeReviewInflight/chooseReviewAgent now live in ./capacity.mjs —
+// imported + re-exported above (t011 decomposition).
 
 // Decide this cycle's review/ship dispatches from the in_review board.
 // runsByIssue: { [identifier]: runs[] } for the in_review issues.
@@ -736,16 +511,42 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
-  const openPrIds = opts.openPrIds instanceof Set ? opts.openPrIds : null;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
   const reviewAgentIds = new Set(lane.map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
 
+  // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
+  // single in_review ticket that can never actually RESOLVE out of in_review
+  // (e.g. a planning-only ticket with no PR ever coming, or one detectFalseDone
+  // keeps bouncing done->in_review because a build agent lied about opening a
+  // PR) would otherwise re-consume the lone slot every cycle forever, starving
+  // every OTHER genuinely-reviewable in_review ticket sitting behind it in scan
+  // order (live-reproduced: PANT-208 oscillated done/in_review for over an hour
+  // while PANT-255..260 sat completely unreviewed).
+  //
+  // Mirrors detectZombies' own precedent exactly (see zombieMaxAttempts above):
+  // runsByIssue already gives us each issue's own accumulated run count for
+  // free — a natural, stateless "how many turns has this ticket already had"
+  // signal, no new persisted state and no GitHub call required. Below the
+  // fairness threshold, candidates are considered in the caller's given order,
+  // unchanged (Array#sort is stable). At/over it, a ticket is deprioritized
+  // behind every ticket still under threshold; it's only reconsidered once
+  // nothing under-threshold qualifies this cycle, so it's slowed, never
+  // starved outright, while every other real in_review ticket gets first
+  // crack at the slot.
+  const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
+  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).length;
+  const ordered = [...inReviewIssues].sort((a, b) => {
+    const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
+    const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
+    return ea - eb;
+  });
+
   const actions = [];
   const projected = {};
-  for (const i of inReviewIssues) {
+  for (const i of ordered) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
     const runs = runsByIssue[i.identifier] || [];
@@ -763,13 +564,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       continue;
     }
 
-    // not yet under review — pick a review agent with free capacity
-    // FRESH dispatch: gate on a REAL open PR referencing the ticket (opts.openPrIds,
-    // computed by the router via gh). No PR => a parent seed / planning / idea ticket
-    // => SKIP, so the review path can never false-block it. A story already assigned
-    // to a review agent (handled above) is the self-heal path and is NOT PR-gated.
-    const hasPr = openPrIds ? openPrIds.has(i.identifier) : false;
-    if (!reviewEligible(i, hasPr)) continue;
+    // not yet under review — pick a review agent with free capacity. Dispatch is
+    // status-only now (reviewEligible no longer checks GitHub) — see
+    // reviewEligible's own doc comment for why.
+    if (!reviewEligible(i)) continue;
 
     const agent = chooseReviewAgent(cfg, reviewInflight, projected);
     if (!agent) continue;
@@ -819,7 +617,6 @@ export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
   const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
-  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -829,7 +626,7 @@ export function descDepsSatisfied(issue, allIssues = []) {
       dep = siblings.find((s) => storyKey(s) === k);
       if (!dep) continue; // unresolved — don't block (avoid deadlock)
     }
-    if (!terminal((dep.status || '').toLowerCase())) return false;
+    if (!isTerminalIssueStatus((dep.status || '').toLowerCase())) return false;
   }
   return true;
 }
@@ -851,26 +648,10 @@ export function allDepsSatisfied(issue, statusById, allIssues = []) {
 // 2026-07-31) lets the pass resolve DESCRIPTION-declared slug deps against siblings,
 // not just metadata ticket-id deps — the m-02-depends-on-m-01 case, where the dep
 // lived only in the description and the child never unblocked though its dep was done.
-// An agent that deliberately parks a story sets metadata.blocked_reason (a
-// human-needed note, e.g. "target_repo is wrong, needs a human"). That is NOT a
-// plan-time dependency block: its DECLARED deps may all be `done`, yet the story
-// must NOT be auto-unblocked or re-dispatched. Auto-unblocking it resurrects the
-// story every cycle — the agent re-blocks it, the router re-unblocks + cascade-
-// dispatches it, cancelling the just-finished run: the 2-minute cancel-thrash
-// (PAN-7771, whose own blocked_reason literally reads "Something keeps resetting
-// this issue from blocked to todo every ~2min, producing 30+ duplicate runs").
-// Treat a non-empty blocked_reason as a hard human gate on BOTH the unblock pass
-// and the cascade selector.
-export function isAgentParked(issue = {}) {
-  const r = issue && issue.metadata && issue.metadata.blocked_reason;
-  return typeof r === 'string' && r.trim() !== '';
-}
-
 export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
-    if (isAgentParked(i)) continue; // agent parked it for a human — never auto-unblock (idempotent-dispatch guard)
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -936,16 +717,30 @@ export function detectFalseDone(doneIssues, openPrs = []) {
     // carries the story key but not the PAN id): match by branch/title identity,
     // repo-qualified. Kept so the m-01-style genuine false-done still fires.
     const wantRepo = normalizeRepoSlug(targetRepoValue(i) || '');
+    const repoQualifies = (p) => {
+      if (!wantRepo) return true;
+      const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
+      return !prRepo || prRepo === wantRepo;
+    };
     const pr = (openPrs || []).find((p) => {
       if (!prIsOpen(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false; // branch/title identity only (never body)
-      if (wantRepo) {
-        const prRepo = normalizeRepoSlug(p._repo || repoFromPrUrl(p) || '');
-        if (prRepo && prRepo !== wantRepo) return false;
-      }
-      return true;
+      return repoQualifies(p);
     });
     if (!pr) continue; // no OWN open PR -> either merged or a non-code done task -> leave it
+    // GUARD (GitHub issue #76 / PANT-4 thrash): a stray still-open PR that merely
+    // identity-matches the story (a stale retry, an old draft, anything else
+    // referencing the same ticket id/key) must not out-rank a REAL merged PR for the
+    // same story in the same repo. Without this, detectVerifiedDone advances the story
+    // to done off the merged PR while detectFalseDone immediately demotes it again off
+    // the unrelated open one, and the two detectors thrash done<->in_review forever.
+    // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
+    const mergedPr = (openPrs || []).find((p) => {
+      if (!isPrMerged(p)) return false;
+      if (!prIdentityMatchesStory(p, i)) return false;
+      return repoQualifies(p);
+    });
+    if (mergedPr) continue; // a merged own PR beats a stray open one -> genuinely done, leave it
     actions.push({
       identifier: i.identifier, issueId: i.id, projectId: i.project_id,
       action: 'demote-to-in-review', prUrl: pr.url || pr.html_url || null,
@@ -969,149 +764,22 @@ export function detectParentDone(issues) {
     if (!childrenByParent.has(i.parent_issue_id)) childrenByParent.set(i.parent_issue_id, []);
     childrenByParent.get(i.parent_issue_id).push(i);
   }
-  const terminal = (s) => s === 'done' || s === 'cancelled' || s === 'canceled';
   const actions = [];
   for (const [parentId, kids] of childrenByParent) {
     const parent = byId.get(parentId);
     if (!parent) continue; // parent not in scanned set — can't judge
     if (isSmokeScratch(parent.title)) continue;
     const pst = (parent.status || '').toLowerCase();
-    if (terminal(pst)) continue; // already closed
+    if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
-    const allDone = kids.every((k) => terminal((k.status || '').toLowerCase()));
+    const allDone = kids.every((k) => isTerminalIssueStatus((k.status || '').toLowerCase()));
     if (allDone) actions.push({ identifier: parent.identifier, issueId: parent.id, projectId: parent.project_id, action: 'advance-parent-done' });
   }
   return actions;
 }
 
-// ============================================================================
-// REVIEW SQUAD — scale-by-ticket perspective plan (2026-07-31, PAN-6546).
-// ----------------------------------------------------------------------------
-// Mathew's binding intent (recovered Consus answer): a story that lands in
-// `in_review` must be reviewed by a REAL multi-perspective SQUAD that TRULY
-// verifies — not a single reviewer pass. The four perspectives are:
-//   - product   (PO): does the change satisfy the story's intent / acceptance?
-//   - technical  : correctness, conventions, security (the /hive:review pass)
-//   - qa         : author + RUN tests, real build, Playwright/E2E where it
-//                  matters — TRUE verification, never a diff read alone.
-//   - ux         : user-facing surface quality + accessibility (design-review).
-//
-// "It has to be approached from at least the product, the technical, and a QA
-//  and user-experience perspective for each and every ticket ... Some things
-//  will not need the full team." — so the DEFAULT posture is the full four, and
-// we only DROP a perspective when it is genuinely inapplicable to the ticket
-// (UX on a headless backend change, product on a pure docs/chore change). Every
-// drop is logged with a reason, so the scaling is explicit and inspectable.
-//
-// Auriga stays the THIN router: it computes this plan and fires ONE review
-// dispatch carrying it (logged + posted to the ticket). The SQUAD itself runs
-// inside the auriga-review agent, which reads the plan and executes each enabled
-// perspective (see agents/auriga-review.instructions.md). This function is the
-// single source of truth for "which perspectives, and does QA need Playwright".
-
-// Built-in rule set — used when cfg.REVIEW_SQUAD_RULES is absent so the classifier
-// is self-contained + unit-testable without a live config. cfg.REVIEW_SQUAD_RULES
-// (config.mjs) is the inspectable, editable copy the router actually passes in.
-export const DEFAULT_SQUAD_RULES = {
-  // Signals that a change is USER-FACING (gets the full squad incl. UX + Playwright).
-  ui: [
-    'ui', 'ux', 'user-facing', 'frontend', 'front-end', 'page', 'screen', 'view',
-    'component', 'dashboard', 'portal', 'css', 'tailwind', 'react', 'svelte', 'vue',
-    'html', 'button', 'form', 'modal', 'layout', 'nav', 'menu', 'visual', 'design',
-    'accessibility', 'a11y', 'responsive', 'animation', 'theme', 'styling', 'playwright',
-  ],
-  // Signals that a change is BACKEND/headless (product + technical + qa, NO ux).
-  backend: [
-    'api', 'endpoint', 'route', 'server', 'service', 'daemon', 'worker', 'schema',
-    'model', 'database', 'migration', 'sql', 'query', 'integration', 'pipeline',
-    'router', 'dispatch', 'auth', 'token', 'webhook', 'cron', 'queue', 'cli', 'sdk',
-  ],
-  // Signals that a change is DOCS/CHORE/CONFIG (technical + qa-smoke only).
-  light: [
-    'docs', 'documentation', 'readme', 'comment', 'typo', 'rename', 'chore',
-    'bump', 'version bump', 'lint', 'formatting', 'format', 'whitespace',
-    'config', 'gitignore', 'license', 'changelog',
-  ],
-  // tier -> which perspectives run + whether QA must drive a browser (Playwright).
-  tiers: {
-    full:     { product: true,  technical: true, qa: true, ux: true,  playwright: true },
-    backend:  { product: true,  technical: true, qa: true, ux: false, playwright: false },
-    light:    { product: false, technical: true, qa: true, ux: false, playwright: false },
-    standard: { product: true,  technical: true, qa: true, ux: true,  playwright: true },
-  },
-};
-
-// Count keyword hits from a list against a haystack (word-ish, case-insensitive).
-function countSignals(hay, words) {
-  const hits = [];
-  for (const w of words) {
-    const re = new RegExp('(?<![a-z0-9])' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![a-z0-9])', 'i');
-    if (re.test(hay)) hits.push(w);
-  }
-  return hits;
-}
-
-// Classify an in_review story into a review-squad plan.
-// Returns { tier, perspectives:{product,technical,qa,ux}, playwright, reason, signals }.
-// tier:
-//   'full'     — user-facing / UI change: product + technical + qa(Playwright) + ux.
-//   'backend'  — headless api/service/data change: product + technical + qa (no ux).
-//   'light'    — docs / chore / config / trivial: technical + qa-smoke only.
-//   'standard' — default when signals are mixed/unknown: the full four (safe default,
-//                honoring "each and every ticket" — we only drop a perspective on a
-//                CLEAR backend/light signal, never on absence of signal).
-export function reviewSquadPlan(issue = {}, cfg = {}) {
-  const rules = (cfg && cfg.REVIEW_SQUAD_RULES) || DEFAULT_SQUAD_RULES;
-  const labelNames = (issue.labels || [])
-    .map((l) => (typeof l === 'string' ? l : (l && l.name) || ''))
-    .join(' ');
-  const hay = [issue.title, issue.description, labelNames, targetRepoValue(issue) || '']
-    .filter((s) => typeof s === 'string')
-    .join('\n')
-    .toLowerCase();
-
-  const uiHits = countSignals(hay, rules.ui || []);
-  const backendHits = countSignals(hay, rules.backend || []);
-  const lightHits = countSignals(hay, rules.light || []);
-
-  // Decide the tier. UI signal wins (user-facing must get UX + Playwright). Then a
-  // clear light-only change (light signals, no UI, no backend). Then backend. Else
-  // the safe default: standard == full four perspectives.
-  let tier;
-  let reason;
-  const signals = { ui: uiHits, backend: backendHits, light: lightHits };
-  if (uiHits.length) {
-    tier = 'full';
-    reason = 'user-facing signals (' + uiHits.slice(0, 4).join(', ') + ') -> full squad + Playwright';
-  } else if (lightHits.length && !backendHits.length) {
-    tier = 'light';
-    reason = 'docs/chore/config signals (' + lightHits.slice(0, 4).join(', ') + '), no product/UI surface -> technical + qa-smoke';
-  } else if (backendHits.length) {
-    tier = 'backend';
-    reason = 'headless backend signals (' + backendHits.slice(0, 4).join(', ') + '), no user surface -> product + technical + qa (UX dropped: nothing to look at)';
-  } else {
-    tier = 'standard';
-    reason = 'no decisive signal -> default full squad (each and every ticket baseline)';
-  }
-
-  const t = (rules.tiers && rules.tiers[tier]) || DEFAULT_SQUAD_RULES.tiers.standard;
-  return {
-    tier,
-    perspectives: { product: !!t.product, technical: !!t.technical, qa: !!t.qa, ux: !!t.ux },
-    playwright: !!t.playwright,
-    reason,
-    signals,
-  };
-}
-
-// One-line human summary of a squad plan (for the dispatch log + ticket comment).
-export function squadPlanSummary(plan) {
-  const p = plan.perspectives;
-  const on = ['product', 'technical', 'qa', 'ux'].filter((k) => p[k]);
-  const qaTag = p.qa ? (plan.playwright ? 'qa+Playwright' : 'qa') : null;
-  const parts = on.map((k) => (k === 'qa' ? qaTag : k));
-  return `squad[${plan.tier}]: ${parts.join(' + ')} — ${plan.reason}`;
-}
+// DEFAULT_SQUAD_RULES/reviewSquadPlan/squadPlanSummary now live in
+// ./review-squad.mjs — imported + re-exported above (t011 decomposition).
 
 // ============================================================================
 // CASCADE RE-DISPATCH — completion -> enqueue now-unblocked dependents (2026-08-01).
@@ -1188,10 +856,10 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   const actions = [];
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
-    if (st !== 'todo' && st !== 'blocked') continue;
-    if (i.assignee_id && st === 'todo') continue; // already assigned+queued (inflight)
+    if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
+    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue; // already assigned+queued (inflight)
+    if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
     if (isSmokeScratch(i.title)) continue;
-    if (isAgentParked(i)) continue; // agent parked it for a human — never cascade-redispatch (idempotent-dispatch guard)
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue;
@@ -1200,6 +868,27 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, status: st, action: 'cascade-enqueue' });
   }
   return actions;
+}
+
+// Pure-code state-machine: advance changes_requested issues back to todo so a
+// build lane can iterate on the reviewer's feedback. The review lane sets this
+// status as the formal "send back" signal; the router owns the transition to
+// todo + unassign (the router must never rely solely on agent free-text for a
+// status mutation the state machine should handle).
+export function detectChangesRequested(changesRequestedIssues) {
+  const actions = [];
+  for (const i of changesRequestedIssues) {
+    if (isSmokeScratch(i.title)) continue;
+    actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
+  }
+  return actions;
+}
+
+// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
+// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
+export function isAgentParked(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  return typeof r === 'string' && r.trim() !== '';
 }
 
 // ---- PAN-7492 self-heal: recover assigned-but-idle stories ----
@@ -1245,13 +934,6 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 // Select this cycle's assigned-idle recoveries — oldest-idle-first, bounded by
 // the SAME capacity math as fresh routing (per-agent maxInflight, per-runtime
 // cap, blocked/rate-limited runtimes) instead of a flat 1-per-agent throttle.
-// A flat cap of 1 is what turned this into a dead-zone: an agent with
-// maxInflight 3 and ten stuck items only ever recovered one per cycle,
-// indistinguishable from "nothing is happening."
-//
-// Returns { selected, skipped } — every non-selected action carries a
-// skipReason ('rate-limited' | 'at-capacity' | 'per-cycle-cap') so a stuck
-// item's cause is visible in the scan log instead of just its raw count.
 export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
   const agents = opts.agents || cfg.AGENTS;

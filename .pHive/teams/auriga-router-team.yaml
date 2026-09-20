@@ -1,0 +1,54 @@
+name: auriga-router-team
+description: >
+  Single-module Node router team for Auriga. Builds and hardens the
+  pure-core/thin-shell router today, and is the team responsible for
+  extracting the adapter interface (backlog + persona/spawn) called for
+  in project-profile.yaml -> north_star.
+lead: team-lead
+methodology: classic   # from hive.config.yaml -> execution.default_methodology
+
+members:
+  - agent: backend-developer
+    role: Router core, adapter interface, and CLI entrypoint implementation
+    domain:
+      - path: src/router/**
+        read: true
+        write: true
+        delete: false
+      - path: scripts/**
+        read: true
+        write: true
+        delete: false
+
+  - agent: architect
+    role: Adapter interface design (backlog adapter, persona/spawn adapter, pantheon-v2 L2 stub) — no domain restriction, design-review across the whole module
+
+  - agent: tester
+    role: Unit + loop-level e2e test authoring against src/router/test/
+    domain:
+      - path: src/router/test/**
+        read: true
+        write: true
+        delete: false
+
+  - agent: reviewer
+    role: Code review
+    tool_access: [codex]   # codex CLI detected on PATH during kickoff
+    # no domain override — read-only everywhere, per agent default
+
+context:
+  tech_stack:
+    backend: node (ESM, node:test, zero runtime deps)
+  lint_commands: []   # no linter/formatter detected during kickoff
+  commit_granularity: medium
+  pr_style: atomic-prs
+  review_depth: standard
+  notes: |
+    Generated from project discovery (kickoff 2026-08-15).
+    Core constraint for every story on this team: no direct import of a
+    vendor-specific module (Multica CLI, a future Linear/GitHub adapter,
+    Pantheon internals) outside its own adapter implementation — see the
+    adapter-boundary-integrity cross-cutting concern in
+    .pHive/cross-cutting-concerns.yaml.
+
+team_memory_path: .pHive/team-memories/auriga-router-team/

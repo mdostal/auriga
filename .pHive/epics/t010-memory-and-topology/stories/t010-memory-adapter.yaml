@@ -1,0 +1,105 @@
+id: t010-memory-adapter
+epic: t010-memory-and-topology
+title: MemoryAdapter contract + Mnemosyne-backed implementation + CLI
+status: shipped
+complexity: medium
+methodology: classic
+depends_on: []
+
+description: |
+  Operator (2026-09-05): "auriga has a way to load in context, data,
+  memory, configs, etc -- so we should add a pre-load base memory, a
+  fetch, etc call and we'll use mnemosyne for the integration but auriga
+  could have different memory providers."
+
+  No existing memory integration anywhere in this repo. Researched
+  Mnemosyne's real, proven client contract (hooks/lib/mnemo-client.mjs in
+  the mnemosyne sibling repo): HTTP service first (POST /recall, POST
+  /remember, default :8477), swarm-memory CLI fallback second, never
+  throws. Checked pantheon-v2's core-api live: no memory-proxy route
+  exists yet (no /api/memory) -- only a persona_root_scope_id field on the
+  tenant registry anticipating per-tenant Mnemosyne scoping, not a working
+  proxy. Built this adapter direct-for-now, mirroring
+  multica/backlog.mjs's own pre-pantheon-v2-l2 history (a real, load-
+  bearing precedent for exactly this situation), explicitly flagged in
+  the code as provisional pending a future Pantheon proxy.
+
+acceptance_criteria:
+  - "lib/adapters/memory-adapter.mjs defines the MemoryAdapter typedef (recall/remember), deliberately async (documented rationale: no cycle() consumer yet, unlike BacklogAdapter/SpawnAdapter's sync constraint)."
+  - "lib/adapters/mnemosyne/memory.mjs's recall() tries the HTTP service first, falls back to the swarm-memory CLI on service failure, and never throws -- a total failure returns { total_hits: 0, scopes: [], via: 'none' }."
+  - "lib/adapters/mnemosyne/memory.mjs's remember() tries the HTTP service only (no CLI fallback for writes, by design -- the real CLI fallback has a real side effect, writing a note file under the operator's home directory, that this adapter must not silently reproduce) -- service failure returns { remembered: false, via: 'none' }, never throws."
+  - "lib/adapters/stub/memory.mjs provides an in-memory test double (substring-match recall, mutate-in-place remember) for zero-live-access testing."
+  - "auriga memory recall <query> [--scope] [--hits] and auriga memory remember <text> [--scope] [--tag] CLI commands exist, defaulting scope to AURIGA_TENANT_ID || AURIGA_INSTANCE_ID || 'default'."
+  - "AURIGA_MEMORY_ADAPTER=stub (+ optional AURIGA_STUB_MEMORY_SEED) lets CLI-level tests exercise these commands with zero live Mnemosyne service/CLI access, mirroring AURIGA_BACKLOG_ADAPTER=stub's established convention."
+  - "This epic does NOT wire recall/remember into auriga-router.mjs's cycle() decision loop -- CLI-only for now, by explicit design."
+
+steps:
+  - id: implement
+    description: >
+      Create lib/adapters/memory-adapter.mjs (typedef), lib/adapters/
+      mnemosyne/memory.mjs (real implementation), lib/adapters/stub/
+      memory.mjs (test double). Add resolveMemoryAdapter() +
+      runMemoryRecall/runMemoryRemember to bin/auriga.mjs, wired into
+      main()'s dispatch. Update lib/adapters/README.md to document the
+      third adapter and the sync-vs-async distinction.
+    agent: developer
+  - id: test
+    description: >
+      Add test/memory-adapter.test.mjs (real + stub adapters, mocked
+      fetch/execFile) and test/memory-cli.test.mjs (CLI-level, spawned
+      process, AURIGA_MEMORY_ADAPTER=stub). Run npm run test:all and
+      confirm full green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t010-memory-and-topology (shared with the
+      orchestrator-topology story).
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/adapters/memory-adapter.mjs
+      purpose: MemoryAdapter typedef contract.
+    - path: src/router/lib/adapters/mnemosyne/memory.mjs
+      purpose: real implementation, HTTP-first + CLI-fallback-for-recall-only.
+    - path: src/router/lib/adapters/stub/memory.mjs
+      purpose: in-memory test double.
+    - path: src/router/bin/auriga.mjs
+      purpose: memory recall/remember CLI commands, resolveMemoryAdapter().
+
+code_examples:
+  - title: mnemosyne repo's own proven client contract (hooks/lib/mnemo-client.mjs)
+    file: /Users/mdostal/Documents/work/pantheon/mnemosyne/hooks/lib/mnemo-client.mjs
+    snippet: |
+      export async function recall(query, scope, opts = {}) {
+        const payload = { query, scope, hits: opts.hits || 5, escalate: !!opts.escalate };
+        try {
+          const r = await httpJson("POST", "/recall", payload);
+          return { ...r, via: "service" };
+        } catch (serviceErr) {
+          try {
+            const args = ["recall", String(query), "--json", "--hits", String(payload.hits)];
+            if (scope) args.push("--scope", String(scope));
+            const { stdout } = await cli(args);
+            return { ...JSON.parse(stdout), via: "cli", service_error: String(serviceErr.message) };
+          } catch (cliErr) {
+            return { total_hits: 0, scopes: [], via: "none", ... };
+          }
+        }
+      }
+
+design_decisions:
+  - decision: Direct-to-Mnemosyne integration now, not blocked on a Pantheon proxy.
+    rationale: No such proxy exists in pantheon-v2's core-api today (verified live). Mirrors multica/backlog.mjs's own proven history (direct first, cut over once a real Pantheon proxy exists) rather than blocking real, requested work on infrastructure that doesn't exist yet.
+  - decision: MemoryAdapter is async, unlike BacklogAdapter/SpawnAdapter.
+    rationale: No synchronous cycle() consumer exists for it in this epic, and Mnemosyne's real transport is genuinely async -- forcing sync here would be premature interface-shaping with nothing to justify it.
+  - decision: remember()'s CLI fallback is NOT ported from mnemo-client.mjs.
+    rationale: That fallback path has a real side effect (writes a note file under the operator's home directory then indexes it) -- reproducing it here without its own story would be exactly the kind of scope creep the no-pre-emptive-integrations rule warns against.
+
+risks:
+  - severity: low
+    description: A future Pantheon memory-proxy route would require cutting this adapter over, a real effort similar to the pantheon-v2-l2 cutover.
+    mitigation: The file's own header comment flags this explicitly so a future session doesn't mistake this for the final, permanent shape.

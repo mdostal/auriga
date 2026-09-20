@@ -1,0 +1,186 @@
+schema_version: 1
+entries:
+  - id: t-001
+    state: closed
+    kind: bug
+    title: "Auriga does its own zombie-detection/actuation — contradicts Hellsing's documented architecture, and it's malfunctioning"
+    description: >
+      GitHub issue #75 (mdostal/auriga#75). Auriga's router (detectZombies /
+      isHiveCapableAssignee, src/router/lib/core.mjs:474) emits `zombie` events
+      with action:"assign" every dispatch cycle when it finds a stale
+      in_progress issue, and keeps re-firing indefinitely without ever
+      resolving the underlying stuck task. Live example: PANT-48 stuck
+      in_progress 3+ hours, zombie-flag fired every ~2min
+      (reason:"hive-on-noncapable-lane") but never recovered it — operator had
+      to manually reset the ticket as a workaround.
+
+      Architectural conflict: pantheon-v2's plugins/hellsing/README.md states
+      the dangerous actuation of terminating stuck processes belongs to
+      Hellsing, with Auriga staying "a thin, event-driven state-machine
+      consumer." Hellsing is phase:concept with no runnable code anywhere —
+      Auriga is standing in for a god that doesn't exist, and doing it in a
+      way that loops forever instead of resolving anything.
+
+      Verified current against live repo 2026-09-04: detectZombies still
+      detects+actuates every cycle with no terminate/give-up path.
+    reproduction_steps: >
+      Watch pantheon-auriga-1's router log across cycles: an in_progress
+      issue with a stale/failed run repeatedly gets a `zombie` event with
+      action:"assign" (or "rerun"), on repeat, without the issue ever leaving
+      the stuck state or being escalated/terminated.
+    reporter: "mdostal (GitHub issue #75, filed 2026-09-03T14:42:06Z, operator-authorized from the pantheon-v2 dogfooding nurse loop)"
+    reported_at: "2026-09-03T14:42:06Z"
+    priority: p1
+    severity: moderate
+    linked_epic: t001-zombie-give-up
+    linked_story: t001-zombie-max-attempts-give-up
+    closed_reason: "shipped in PR (merged directly to main, commit 4dd121f) — bounded-retry give-up added to detectZombies (src/router/lib/core.mjs) + auriga-router.mjs"
+    closed_at: "2026-09-04T00:00:00Z"
+    source_url: "https://github.com/mdostal/auriga/issues/75"
+    state_history:
+      - state: inbox
+        at: "2026-09-04T00:00:00Z"
+      - state: clarified
+        at: "2026-09-04T00:00:00Z"
+      - state: prioritized
+        at: "2026-09-04T00:00:00Z"
+      - state: plan-ready
+        at: "2026-09-04T00:00:00Z"
+      - state: closed
+        at: "2026-09-04T00:00:00Z"
+  - id: t-004
+    state: closed
+    kind: bug
+    title: "detectVerifiedDone never fires: state/mergedAt field casing mismatch leaves merged-PR tickets stuck in_review forever"
+    description: >
+      GitHub issue #81 (mdostal/auriga#81). detectVerifiedDone (src/router/lib/core.mjs:462)
+      checks `pr.state === 'merged'` and `pr.merged_at`, but the real
+      gh-CLI-sourced PR objects (via listCandidatePullRequests's ghPrs())
+      use `"MERGED"` (uppercase) and `mergedAt` (camelCase) -- both halves of
+      the check are always false for every real PR, so detectVerifiedDone
+      can never advance a story to done off a merged PR. prIsOpen() in the
+      same file already handles this correctly (lowercases state, checks
+      both merged_at and mergedAt) -- a clean, precedented fix shape.
+      Confirmed live on dostal-tech: PANT-59 (merged PR #112, 2026-09-01) and
+      PANT-93 (merged PR #144, 2026-09-02) both stuck in_review for 4-5 days;
+      19 stories total stuck in_review on that tenant's board. Verified
+      against the current repo code by this session (2026-09-05) -- real,
+      not stale. Third instance this week of a data-shape mismatch between
+      gh's real JSON output and core.mjs's assumptions (same class as #76's
+      false-done fix and part of what #79 touched).
+    reproduction_steps: >
+      Any story with a genuinely merged PR sourced via the board-wide gh
+      scan sits in in_review forever -- detectVerifiedDone(inReviewIssues,
+      prsByIssue) returns zero actions for it even though prsByIssue
+      contains a PR object with state:"MERGED"/mergedAt:<timestamp>.
+    reporter: "mdostal (GitHub issue #81, filed 2026-09-05T06:17:18Z)"
+    reported_at: "2026-09-05T06:17:18Z"
+    priority: p0
+    severity: critical
+    linked_epic: t006-verified-done-casing-fix
+    linked_story: t006-extract-github-pr-state-constants
+    closed_reason: "shipped — GITHUB_PR_STATE constants module + isPrOpen/isPrMerged extracted (src/router/lib/github-pr-state.mjs), detectVerifiedDone fixed"
+    closed_at: "2026-09-05T00:00:00Z"
+    source_url: "https://github.com/mdostal/auriga/issues/81"
+    state_history:
+      - state: inbox
+        at: "2026-09-05T00:00:00Z"
+      - state: clarified
+        at: "2026-09-05T00:00:00Z"
+      - state: prioritized
+        at: "2026-09-05T00:00:00Z"
+      - state: plan-ready
+        at: "2026-09-05T00:00:00Z"
+      - state: closed
+        at: "2026-09-05T00:00:00Z"
+  - id: t-003
+    state: closed
+    kind: bug
+    title: "Root-cause why build tasks hang 3+ hours under light default-config workload"
+    description: >
+      GitHub issue #77 (mdostal/auriga#77), split out from #75 (t-001, now
+      closed): why PANT-48 sat in_progress/running for 3+ hours with no
+      progress, one prior retry already failed with "task expired in queue".
+      t-001's fix (bounded zombie-recovery give-up) addresses the SYMPTOM
+      (stop looping forever on a stuck task) but not this — why the
+      underlying task runtime got stuck for hours in the first place.
+    reproduction_steps: >
+      Not reproducible from a code-only pass — needs live investigation of
+      queue/runtime state at the time of a real stall (queue starvation vs.
+      a runtime/agent-side deadlock vs. a missing upstream timeout). Blocked
+      on live production access this session does not have.
+    reporter: "mdostal (GitHub issue #77, filed 2026-09-04 by this session, split from #75)"
+    reported_at: "2026-09-04T00:00:00Z"
+    priority: p2
+    severity: moderate
+    linked_epic: null
+    linked_story: null
+    closed_reason: >
+      Closed without a code fix, real root cause documented instead of
+      guessed: live cross-session investigation traced the 3-hour stall to
+      Multica's own runtime-offline reaper being slow (3+ hours to mark a
+      dead runtime's run failed), not a bug in Auriga's detectZombies
+      logic (traced against real timestamps and found correct on paper).
+      Definitive proof detectZombies fired correctly is unrecoverable — the
+      dostal-tech container was recreated 2026-09-05 and its router log
+      lived only in the writable layer, not a persistent volume. A
+      Pantheon-side icebox item was filed to mount router logs persistently
+      so this class of incident stays forensically inspectable going
+      forward. Re-open if it recurs with real-time log evidence available.
+    closed_at: "2026-09-06T00:00:00Z"
+    source_url: "https://github.com/mdostal/auriga/issues/77"
+    state_history:
+      - state: inbox
+        at: "2026-09-04T00:00:00Z"
+      - state: clarified
+        at: "2026-09-04T00:00:00Z"
+      - state: closed
+        at: "2026-09-06T00:00:00Z"
+  - id: t-002
+    state: closed
+    kind: bug
+    title: "dostal-tech dispatch loop stuck: PANT-4 thrashes done<->in_review every cycle, blocking all other backlog items"
+    description: >
+      GitHub issue #76 (mdostal/auriga#76). Per-tenant dispatch loop
+      (pantheon-auriga-dostal-tech-1) stuck in an infinite loop on PANT-4
+      (mdostal/pantheon-v2): every cycle the router detects it as done
+      without review (kind:"false-done"), reverts it to in_review, dispatches
+      a fresh review, and on the very next cycle it's back to done again —
+      repeating for a long time (confirmed via revision 2442 on the ticket).
+      assigned:0 and every inflight bucket sits at zero on every cycle — ~20
+      other real backlog items (PANT-2,3,5-11,13,16-19,67,68,83,85-89, all
+      todo, several unassigned for a week+) get zero attention.
+
+      Suspected root cause: detectFalseDone (core.mjs:838) demotes a done
+      issue back to in_review based on an openPrs scan, while
+      detectVerifiedDone (core.mjs:446) advances it back to done based on a
+      merged-PR check on the same linked PR (mdostal/heimdall#85, merged) —
+      if the openPrs scan is stale or wrong, these two decisions can fight
+      each other forever. Not a pantheon-v2/core-api bug — ruled out by
+      querying Multica directly via CLI and seeing the same oscillation, and
+      core-api's own logs showed nothing relevant during the window.
+    reproduction_steps: >
+      Watch `docker logs pantheon-auriga-dostal-tech-1 -f` for a few cycles —
+      PANT-4 repeatedly shows advance...to in_review immediately followed by
+      dispatch-review/review_dispatched, cycle after cycle, with assigned:0
+      throughout.
+    reporter: "mdostal (GitHub issue #76, filed 2026-09-04T14:22:12Z)"
+    reported_at: "2026-09-04T14:22:12Z"
+    priority: p0
+    severity: critical
+    linked_epic: t002-false-done-thrash-fix
+    linked_story: t002-detect-false-done-merged-guard
+    closed_reason: "shipped in PR (merged directly to main, commit a3e6ca4) — fixed in detectFalseDone (src/router/lib/core.mjs)"
+    closed_at: "2026-09-04T00:00:00Z"
+    source_url: "https://github.com/mdostal/auriga/issues/76"
+    state_history:
+      - state: inbox
+        at: "2026-09-04T00:00:00Z"
+      - state: clarified
+        at: "2026-09-04T00:00:00Z"
+      - state: prioritized
+        at: "2026-09-04T00:00:00Z"
+      - state: plan-ready
+        at: "2026-09-04T00:00:00Z"
+      - state: closed
+        at: "2026-09-04T00:00:00Z"

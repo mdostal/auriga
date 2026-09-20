@@ -1,0 +1,23 @@
+name: t007-lint-tooling
+title: Wire up enforced linting repo-wide, fix all real findings
+description: >
+  First of four agreed workstreams from the 2026-09-05 codebase-wide cleanup
+  discussion. Adds a real, enforced oxlint check across src/router,
+  src/server, and src/ui (the latter already had oxlint installed but
+  disconnected from test:all), fixes all 17 real findings surfaced, and
+  wires `--deny-warnings` into npm run test:all's first step so lint is a
+  genuine local gate going forward (no GHA gating, per standing rule).
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t007-wire-lint-and-fix-findings
+    title: Add root lint tooling, fix all real oxlint findings across the repo
+    complexity: low
+    depends_on: []

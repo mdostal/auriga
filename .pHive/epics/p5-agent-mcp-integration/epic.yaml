@@ -1,0 +1,57 @@
+name: p5-agent-mcp-integration
+title: "P5: Agent/harness install-and-interact — operator-side MCP server"
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: committed
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+notes: |
+  Mirrors the pattern Portunus (sibling Pantheon plugin) shipped for itself
+  (`portunus agent init`/`agent status`, a real install.sh on GitHub Pages), but
+  reversed in direction: Portunus is PULLED FROM by agents (secrets vault), Auriga
+  DISPATCHES work TO agents/harnesses via its existing spawnAdapter. This epic adds
+  the Portunus-shaped direction on top — an operator-side MCP server so the
+  operator's own Claude Code / Codex CLI session can query Auriga's board directly as
+  tool calls, without opening the dashboard.
+
+  Full research/design-discussion/grill ceremony run (not skipped). Research read
+  Portunus's actual implementation (not just its description) at
+  /Users/mdostal/Documents/work/pantheon/portunus. Grill found 10 real findings, 2
+  touching blocking risk: no safety/authz discussion existed for write-capable MCP
+  tools (any Claude/Codex session, including unattended ones, could otherwise mutate
+  the live board via a tool call never directly typed by the operator), and a real
+  chicken-and-egg between CLI registration (needs `auriga` on $PATH) and the install
+  script (the only thing that puts it there, sequenced after).
+
+  Operator resolved all open questions, all as-recommended: v1 ships FULLY READ-ONLY
+  (no write tools of any kind — sidesteps the unresolved autonomous-mutation safety
+  question rather than accepting it silently; write capability is explicitly deferred
+  to a follow-on epic), real Multica-backed adapter by default (matching
+  auriga-router.mjs), no npm publish this epic (GitHub-based install, mirroring
+  Portunus's own current approach), plain `<details>` disclosure for the showcase
+  page's collapse (zero JS, matches its existing static design).
+
+  See docs/research-brief.md, docs/design-discussion.md, docs/grill-record.md for full
+  detail and the resolved-open-questions record.
+
+stories:
+  - id: p5-mcp-server
+    title: Operator-side MCP server (read-only query tools)
+    complexity: high
+    depends_on: []
+  - id: p5-agent-cli
+    title: "auriga agent init / agent status / mcp CLI commands"
+    complexity: medium
+    depends_on: [p5-mcp-server]
+  - id: p5-install-script
+    title: docs/install.sh published via GitHub Pages + README top line
+    complexity: low
+    depends_on: [p5-agent-cli]
+  - id: p5-install-ui-surfacing
+    title: Collapsible install/interact surface in dashboard + showcase page
+    complexity: medium
+    depends_on: [p5-install-script]

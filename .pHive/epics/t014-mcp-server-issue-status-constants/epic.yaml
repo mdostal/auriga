@@ -1,0 +1,24 @@
+name: t014-mcp-server-issue-status-constants
+title: Close t009's scope gap — mcp/server.mjs still hardcoded issue-status literals
+description: >
+  Found during the post-t013 final deep-dive scan: t009 (issue-status
+  constants) scoped its extraction to core.mjs and auriga-router.mjs only,
+  missing lib/mcp/server.mjs's listBlockedAndInflight, which still compared
+  raw 'blocked'/'in_progress'/'in_review' literals against issue.status.
+  Same operator "no hardcoded strings" rule t009 already applied elsewhere.
+  Trivial, behavior-preserving swap to the existing ISSUE_STATUS constants
+  (values unchanged, confirmed identical) -- no new module needed.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t014-mcp-issue-status-constants
+    title: Swap listBlockedAndInflight's raw status literals for ISSUE_STATUS
+    complexity: trivial
+    depends_on: []

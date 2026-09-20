@@ -34,7 +34,7 @@ const CFG = {
   HIVE_LANE: ['auriga-build', 'mnemosyne-dev', 'votum-dev'],
   PROJECT_IDS: ['CONSUS', 'HEIMDALL', 'AURIGA', 'MINERVA', 'JANUS', 'PCORE'],
   PROJECT_NAMES: { CONSUS: 'Consus', HEIMDALL: 'Heimdall', AURIGA: 'Auriga', MINERVA: 'Minerva', JANUS: 'Janus', PCORE: 'Pantheon Core' },
-  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, verifyDelayMs: 10, perCycleReview: 1 },
+  CAPS: { perCyclePerAgent: 2, perCycleTotal: 5, cycleMs: 1000, zombieStaleMs: 20 * 60 * 1000, zombieMaxAttempts: 3, verifyDelayMs: 10, perCycleReview: 1 },
   HUMAN_NAMES: ['mathew', 'dostal'],
 };
 
@@ -74,9 +74,11 @@ test('classifyRun distinguishes active/done/failed', () => {
   assert.equal(core.classifyRun({ status: 'completed', error: 'boom' }, now).failed, true);
 });
 
-test('live config uses raised throughput caps', () => {
-  assert.equal(liveCfg.CAPS.perCycleTotal, 15);
-  assert.equal(liveCfg.CAPS.perCyclePerAgent, 4);
+test('live config CAPS has required throughput and self-heal fields', () => {
+  assert.ok(typeof liveCfg.CAPS.perCycleTotal === 'number', 'perCycleTotal must be set');
+  assert.ok(typeof liveCfg.CAPS.perCyclePerAgent === 'number', 'perCyclePerAgent must be set');
+  assert.ok(typeof liveCfg.CAPS.assignedIdleStaleMs === 'number', 'assignedIdleStaleMs must be set (PAN-7492)');
+  assert.ok(typeof liveCfg.CAPS.redispatchCooldownMs === 'number', 'redispatchCooldownMs must be set (PAN-7771)');
 });
 
 test('computeInflight counts ONLY assigned+running (not assigned-todo) — P0 deadlock fix', () => {
@@ -197,7 +199,7 @@ test('idempotent dispatch no-ops unchanged router-managed assignments', () => {
     metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
   };
   const picks = core.selectAssignments([tracked], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
-  assert.deepEqual(picks, []);
+  assert.equal(picks.length, 0, 'unchanged router-managed assignment should produce no dispatch');
 });
 
 test('idempotent dispatch permits reassignment when router-managed story content changes', () => {
@@ -306,6 +308,25 @@ test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to
   assert.ok(actions.every((a) => a.action === 'advance-done'));
 });
 
+// GH #81 regression: real gh-CLI-shaped PR objects use uppercase state
+// ("MERGED") and camelCase mergedAt — NOT lowercase 'merged'/snake_case
+// merged_at. Before the fix, both fields on this exact shape failed to
+// match and detectVerifiedDone never fired. This is the literal PANT-59/
+// PANT-93 repro shape from the issue, not a shape that also happens to
+// satisfy the old broken check.
+test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, camelCase mergedAt) — GH #81', () => {
+  const inReview = [
+    { id: 'g1', identifier: 'PANT-59', project_id: 'AURIGA', status: 'in_review', title: 'real gh PR shape' },
+  ];
+  const prs = {
+    'PANT-59': [{ number: 112, state: 'MERGED', mergedAt: '2026-09-01T00:06:57Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PANT-59');
+  assert.equal(actions[0].action, 'advance-done');
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
@@ -323,6 +344,50 @@ test('detectZombies: stale-but-old run triggers recovery, fresh done does not', 
   assert.equal(byId['z4'], 'rerun');
   // z5: fresh running run -> healthy, not flagged.
   assert.equal(byId['z5'], undefined);
+});
+
+test('detectZombies: run count below zombieMaxAttempts still emits assign/rerun (no regression)', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  // CFG.CAPS.zombieMaxAttempts is 3; 2 prior runs is still below the cap.
+  const inProgress = [
+    { id: 'g1', identifier: 'g1', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled' },
+    { id: 'g2', identifier: 'g2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled' },
+  ];
+  const runs = {
+    g1: [
+      { status: 'failed', error: 'x', created_at: old },
+      { status: 'failed', error: 'x', created_at: old },
+    ],
+    g2: [
+      { status: 'running', completed_at: null, created_at: old, started_at: old },
+      { status: 'running', completed_at: null, created_at: old, started_at: old },
+    ],
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a.action]));
+  assert.equal(byId['g1'], 'assign');
+  assert.equal(byId['g2'], 'rerun');
+});
+
+test('detectZombies: run count at/above zombieMaxAttempts emits give-up instead of assign/rerun', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  const makeRuns = (n) => Array.from({ length: n }, () => ({ status: 'failed', error: 'x', created_at: old }));
+  const inProgress = [
+    { id: 'g3', identifier: 'g3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stuck at cap' },
+    { id: 'g4', identifier: 'g4', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stuck above cap' },
+  ];
+  const runs = {
+    g3: makeRuns(3), // exactly at CFG.CAPS.zombieMaxAttempts (3)
+    g4: makeRuns(5), // above the cap
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
+  assert.equal(byId['g3'].action, 'give-up');
+  assert.equal(byId['g3'].reason, 'max-attempts-exhausted');
+  assert.equal(byId['g4'].action, 'give-up');
+  assert.equal(byId['g4'].reason, 'max-attempts-exhausted');
 });
 
 test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {
@@ -414,6 +479,29 @@ test('isSeed: top-level but has a child in allIssues is not a seed', () => {
   assert.equal(core.isSeed(issue, allIssues), false);
 });
 
+// LOOP FIX (PANT-79, found live 2026-09-01): a standalone, already-scoped
+// bug/fix ticket is top-level and childless by construction (it was never
+// decomposed from anything and has no sub-issues), which the childless+
+// top-level heuristic above misreads as "unmarked seed" -- producing an
+// infinite minerva-dev decline/unassign/reassign loop, since re-evaluating
+// isSeed() on the same unchanged issue always returns true again. The
+// 'not-a-seed' label is Minerva's own durable escape hatch when it declines
+// an issue for this reason; it must short-circuit isSeed() to false.
+test("isSeed: 'not-a-seed' label overrides the childless+top-level heuristic", () => {
+  const issue = { id: 'x8', labels: ['not-a-seed'] }; // no parent, no children -- would be a seed without the label
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test("isSeed: 'not-a-seed' label (real API {name,...} object shape) still overrides", () => {
+  const issue = { id: 'x9', labels: [{ id: 'l2', name: 'not-a-seed', color: '#b45309' }] };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
+test("isSeed: 'not-a-seed' wins even if 'idea'/'needs-plan' is also present", () => {
+  const issue = { id: 'x10', labels: ['idea', 'not-a-seed'] };
+  assert.equal(core.isSeed(issue, []), false);
+});
+
 // --- selectAssignments seed routing (PAN-6646) ------------------------------
 
 test('routing: issue labeled idea routes to minerva-dev, never a build agent', () => {
@@ -435,6 +523,16 @@ test('routing: unmarked, top-level, childless issue routes to minerva-dev', () =
   const picks = core.selectAssignments([issue], CFG, {}, {});
   assert.equal(picks.length, 1);
   assert.equal(picks[0].agent, 'minerva-dev');
+});
+
+// LOOP FIX (PANT-79): otherwise-seed-shaped (top-level, childless) issue that
+// Minerva has already declined and labeled 'not-a-seed' must route to the
+// normal build lane, not loop back to minerva-dev.
+test("routing: unmarked, top-level, childless issue labeled 'not-a-seed' routes to the normal build lane, not minerva-dev", () => {
+  const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['not-a-seed'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
 });
 
 test('routing: issue with a parent_issue_id is not seed-classified, uses the normal build lane', () => {
@@ -509,30 +607,34 @@ const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOStri
 const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
 const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
 
-test('reviewEligible: gates strictly on a real open PR (seeds without a PR are skipped)', () => {
+test('reviewEligible: status-only, unconditionally true — Auriga never checks GitHub to gate review dispatch', () => {
   assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
   assert.ok(!core.hasTargetRepo({ description: 'just a design note' }));
-  // reviewEligible now REQUIRES a real open PR (2nd arg). No PR -> NOT eligible, even
-  // for a build/target_repo/hive-shaped story: that is exactly the parent-seed / no-PR
-  // case the review path used to false-block.
-  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }, true));
-  assert.ok(!core.reviewEligible({ description: 'target_repo: mdostal/x' }, false));
-  assert.ok(!core.reviewEligible({ description: HIVE_DESCRIPTION }, false));
-  assert.ok(!core.reviewEligible({ description: 'a Consus decision doc' }, false));
+  // reviewEligible no longer takes or requires a PR signal (operator correction,
+  // repeated 2026-08 through 2026-09-13: Auriga orchestrates, it does not talk to
+  // GitHub). Any issue the caller has already filtered to in_review is eligible —
+  // the caller (selectReviewDispatch) is only ever given in_review issues, which
+  // only ever get there via detectRunCompletions (a real build run finishing), so
+  // there is no separate "no build signal" case left to gate on here.
+  assert.ok(core.reviewEligible({ description: 'target_repo: mdostal/x' }));
+  assert.ok(core.reviewEligible({ description: HIVE_DESCRIPTION }));
+  assert.ok(core.reviewEligible({ description: 'a Consus decision doc' }));
+  assert.ok(core.reviewEligible());
 });
 
-test('selectReviewDispatch: an in_review story with a build signal dispatches to the review lane', () => {
-  const i = inReview('PAN-1', 1); // unassigned, eligible
-  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-1']) });
+test('selectReviewDispatch: any unassigned in_review story dispatches to the review lane — no PR check', () => {
+  const i = inReview('PAN-1', 1); // unassigned, in_review
+  const picks = core.selectReviewDispatch([i], { 'PAN-1': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].agent, 'auriga-review');
   assert.equal(picks[0].action, 'dispatch-review');
 });
 
-test('selectReviewDispatch: ineligible in_review stories (no build signal) are never dispatched', () => {
+test('selectReviewDispatch: even a plain/undecorated in_review story dispatches — Auriga hands off, the review squad decides', () => {
   const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc' };
   const picks = core.selectReviewDispatch([doc], { D1: [] }, CFG, {}, { now: NOW });
-  assert.equal(picks.length, 0);
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
 });
 
 test('selectReviewDispatch: a story already under active review is NOT re-dispatched (idempotent)', () => {
@@ -557,11 +659,11 @@ test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via
 
 test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
   const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
-  // Two eligible unassigned stories, perCycleReview=1 -> only one dispatched this cycle.
-  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-5', 'PAN-6']) });
+  // Two unassigned in_review stories, perCycleReview=1 -> only one dispatched this cycle.
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-5': [], 'PAN-6': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   // Lane already full (one review in flight) -> nothing new dispatched.
-  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW, openPrIds: new Set(['PAN-5']) });
+  const full = core.selectReviewDispatch([a], { 'PAN-5': [] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.equal(full.length, 0);
 });
 
@@ -576,6 +678,70 @@ test('selectReviewDispatch: does not dispatch to an offline review runtime', () 
   const i = inReview('PAN-RV-OFF', 9);
   const picks = core.selectReviewDispatch([i], { 'PAN-RV-OFF': [] }, cfg, {}, { now: NOW, openPrIds: new Set(['PAN-RV-OFF']) });
   assert.deepEqual(picks, []);
+});
+
+// ---- GH #102: anti-starvation fairness ------------------------------------
+// A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
+// keeps bouncing done->in_review because a build agent lied about a PR) can
+// never actually resolve out of in_review. With perCycleReview capped at 1,
+// selectReviewDispatch used to just walk inReviewIssues in caller order and
+// dispatch the FIRST one that qualified -- so that one ticket re-consumed the
+// lone slot every single cycle forever, starving every other real in_review
+// ticket sitting behind it. Live-reproduced: PANT-208 oscillated done/in_review
+// for over an hour while PANT-255..260 sat completely unreviewed.
+
+test('selectReviewDispatch: a ticket at the fairness threshold is deprioritized behind a fresher in_review ticket', () => {
+  const exhausted = inReview('PANT-208', 1); // many accumulated runs, never resolves
+  const fresh = inReview('PANT-255', 2); // brand-new in_review ticket, no runs yet
+  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', completed_at: new Date(NOW - 60_000).toISOString() }));
+  const picks = core.selectReviewDispatch(
+    [exhausted, fresh], { 'PANT-208': manyRuns, 'PANT-255': [] }, CFG, {}, { now: NOW }
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-255'); // fresh ticket wins the lone slot, not the exhausted one
+});
+
+test('selectReviewDispatch: below the fairness threshold, caller order is preserved (no regression)', () => {
+  const a = inReview('PAN-60', 60);
+  const b = inReview('PAN-61', 61);
+  const picks = core.selectReviewDispatch([a, b], { 'PAN-60': [], 'PAN-61': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PAN-60'); // stable order unchanged when neither is exhausted
+});
+
+test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopolize the slot across many cycles — GH #102', () => {
+  // STARVER: every cycle it comes back in_review, unassigned (exactly like a
+  // fresh detectFalseDone demotion), so it always LOOKS like a fresh dispatch
+  // candidate to selectReviewDispatch -- only its accumulated run history (fed
+  // back in below, exactly as the real router would leave runs behind) reveals
+  // that it never actually resolves.
+  const starver = inReview('PANT-208', 208);
+  // Six OTHER genuinely different in_review tickets that need a real review turn.
+  const others = [255, 256, 257, 258, 259, 260].map((n) => inReview(`PANT-${n}`, n));
+
+  const runsByIssue = { 'PANT-208': [] };
+  for (const o of others) runsByIssue[o.identifier] = [];
+
+  const dispatchedOther = new Set();
+  const CYCLES = 40;
+  for (let c = 0; c < CYCLES; c++) {
+    const remainingOthers = others.filter((o) => !dispatchedOther.has(o.identifier));
+    const inReviewNow = [starver, ...remainingOthers];
+    const picks = core.selectReviewDispatch(inReviewNow, runsByIssue, CFG, {}, { now: NOW + c * 1000 });
+    assert.ok(picks.length <= 1); // perCycleReview cap still respected every cycle
+    for (const p of picks) {
+      // A real dispatch always leaves a run behind -- feed that back in so the
+      // fairness signal (accumulated run count) grows exactly like production.
+      runsByIssue[p.identifier].push({ status: 'completed', completed_at: new Date(NOW + c * 1000).toISOString() });
+      if (p.identifier === starver.identifier) continue; // never resolves -- stays in_review
+      dispatchedOther.add(p.identifier); // a real ticket resolved -> leaves in_review
+    }
+    if (dispatchedOther.size === others.length) break;
+  }
+
+  // Every genuinely different in_review ticket eventually got a real dispatch
+  // turn -- not just the starver, forever.
+  assert.equal(dispatchedOther.size, others.length);
 });
 
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
@@ -625,17 +791,9 @@ test('targetRepoValue: metadata wins, else the description target_repo line', ()
   assert.equal(core.targetRepoValue({ description: 'no repo here' }), null);
 });
 
-test('selectReviewDispatch: an eligible-shaped in_review story WITHOUT a PR is NOT dispatched (seed guard)', () => {
-  const seed = inReview('PAN-SEED', 42); // has target_repo shape but no open PR
-  const picks = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW });
-  assert.equal(picks.length, 0);
-  const picks2 = core.selectReviewDispatch([seed], { 'PAN-SEED': [] }, CFG, {}, { now: NOW, openPrIds: new Set() });
-  assert.equal(picks2.length, 0);
-});
-
-test('selectReviewDispatch: dispatches a story once its id is in openPrIds (real PR found)', () => {
+test('selectReviewDispatch: dispatches an in_review story regardless of any PR shape — status is the only signal', () => {
   const s = inReview('PAN-6962', 43);
-  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW, openPrIds: new Set(['PAN-6962']) });
+  const picks = core.selectReviewDispatch([s], { 'PAN-6962': [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].action, 'dispatch-review');
   assert.equal(picks[0].agent, 'auriga-review');
@@ -820,6 +978,47 @@ test('detectFalseDone demotes a done story that still has an OPEN matching PR', 
   assert.equal(core.detectFalseDone([m01], []).length, 0);
 });
 
+test('detectFalseDone does NOT demote when a merged identity-matching PR coexists with a stray open identity-matching PR in the same repo (GitHub issue #76 / PANT-4 thrash guard)', () => {
+  // PANT-4 repro: a real merged PR (mdostal/heimdall#85) advances the story to done
+  // via detectVerifiedDone, but a SEPARATE, unrelated-but-loosely-identity-matching
+  // still-open PR in the SAME repo used to demote it right back every cycle. The
+  // merged PR must win: no demotion.
+  const pant4 = {
+    id: 'p4', identifier: 'PANT-4', project_id: 'AURIGA',
+    title: '[p4-router-loop] fix thrash', status: 'done',
+    metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const mergedOwn = {
+    headRefName: 'feat/pant-4-router-loop', title: 'PANT-4: fix thrash',
+    state: 'merged', merged_at: '2026-09-01T00:00:00Z',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/85',
+  };
+  const strayOpen = {
+    headRefName: 'agent/retry/abc123', title: 'retry: PANT-4 router loop attempt',
+    state: 'open', _repo: 'mdostal/heimdall',
+    url: 'https://github.com/mdostal/heimdall/pull/99',
+  };
+  const acts = core.detectFalseDone([pant4], [mergedOwn, strayOpen]);
+  assert.equal(acts.length, 0);
+});
+
+test('detectFalseDone still demotes on an open identity-matching PR when NO merged identity-matching PR exists (no regression)', () => {
+  const pant4 = {
+    id: 'p4b', identifier: 'PANT-4', project_id: 'AURIGA',
+    title: '[p4-router-loop] fix thrash', status: 'done',
+    metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const strayOpen = {
+    headRefName: 'agent/retry/abc123', title: 'retry: PANT-4 router loop attempt',
+    state: 'open', _repo: 'mdostal/heimdall',
+    url: 'https://github.com/mdostal/heimdall/pull/99',
+  };
+  const acts = core.detectFalseDone([pant4], [strayOpen]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'demote-to-in-review');
+  assert.equal(acts[0].prUrl, 'https://github.com/mdostal/heimdall/pull/99');
+});
+
 test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => {
   assert.ok(core.isHiveCapableAssignee('AB', CFG));  // auriga-build
   assert.ok(core.isHiveCapableAssignee('RV', CFG));  // auriga-review
@@ -899,4 +1098,96 @@ test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
   assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
   assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
   assert.equal(core.ownPrUrl({}), null);
+});
+
+// --- isHandUp / selectAssignments hand-up routing (t015) --------------------
+
+test("isHandUp: true only for the 'hand-up' label, both plain-string and real {name,...} object shapes", () => {
+  assert.equal(core.isHandUp({ labels: ['hand-up'] }), true);
+  assert.equal(core.isHandUp({ labels: [{ id: 'l1', name: 'hand-up', color: '#fff' }] }), true);
+  assert.equal(core.isHandUp({ labels: ['idea'] }), false);
+  assert.equal(core.isHandUp({ labels: [] }), false);
+  assert.equal(core.isHandUp({}), false);
+});
+
+// Uses story() (sets parent_issue_id), not todo(), so these fixtures are
+// NOT seed-classified and actually reach chooseAgentForProject -- isSeed()
+// is checked before the hand-up branch and would otherwise route an
+// unmarked top-level/childless issue to minerva-dev regardless of the
+// hand-up label, masking every assertion below.
+
+test('selectAssignments: a hand-up-labeled issue with NO local capacity and a configured parent board lands in picks.handUps, not in picks itself', () => {
+  const issue = { ...story('hu1', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  // Saturate AURIGA's sole lane agent (auriga-dev, maxInflight 3) so
+  // chooseAgentForProject returns null -- no normal local route exists.
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0, 'must NOT be dispatched to a local agent');
+  assert.deepEqual(picks.handUps, [{ identifier: 'hu1', issueId: 'hu1', reason: 'no-local-route' }]);
+});
+
+test('selectAssignments: a hand-up-labeled issue that HAS a working local route dispatches normally -- the label never preempts a resolvable dispatch', () => {
+  const issue = { ...story('hu2', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
+  assert.deepEqual(picks.handUps, []);
+});
+
+test('selectAssignments: a hand-up-labeled issue with NO local capacity and NO configured parent board produces zero handUps -- falls through unchanged to the existing human-todo path', () => {
+  const issue = { ...story('hu3', 'AURIGA', 1, 'epic1'), labels: ['hand-up'] };
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {});
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.handUps, []);
+});
+
+test('selectAssignments: a NON-hand-up-labeled issue with no local capacity produces zero handUps regardless of parentBoardConfig', () => {
+  const issue = story('hu4', 'AURIGA', 1, 'epic1');
+  const inflight = { 'auriga-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.handUps, []);
+});
+
+// ============================================================================
+// detectChangesRequested — changes_requested -> todo (review loop-back)
+// ============================================================================
+
+const cr = (id, num, assigneeId = 'RV', title = 'work') => ({
+  id, identifier: id, project_id: 'PCORE', number: num,
+  status: 'changes_requested', assignee_id: assigneeId, title,
+});
+
+test('detectChangesRequested: a changes_requested issue returns a changeback-to-todo action', () => {
+  const issue = cr('PAN-50', 50);
+  const actions = core.detectChangesRequested([issue]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-50');
+  assert.equal(actions[0].action, 'changeback-to-todo');
+});
+
+test('detectChangesRequested: multiple changes_requested issues all get changeback actions', () => {
+  const issues = [cr('PAN-51', 51), cr('PAN-52', 52)];
+  const actions = core.detectChangesRequested(issues);
+  assert.equal(actions.length, 2);
+  assert.deepEqual(actions.map((a) => a.identifier), ['PAN-51', 'PAN-52']);
+});
+
+test('detectChangesRequested: smoke/scratch issues are skipped', () => {
+  const smokeIssue = cr('PAN-53', 53, 'RV', 'SMOKE: dispatch probe');
+  const realIssue = cr('PAN-54', 54);
+  const actions = core.detectChangesRequested([smokeIssue, realIssue]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-54');
+});
+
+test('detectChangesRequested: empty input returns empty array', () => {
+  assert.deepEqual(core.detectChangesRequested([]), []);
 });

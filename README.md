@@ -1,3 +1,7 @@
+```bash
+curl -fsSL https://mdostal.github.io/auriga/install.sh | bash
+```
+
 # Auriga
 
 [![CI](https://github.com/mdostal/auriga/actions/workflows/ci.yml/badge.svg)](https://github.com/mdostal/auriga/actions/workflows/ci.yml)
@@ -85,6 +89,40 @@ Sibling gods it works alongside: **Minerva** (planning — produces the stories 
 **Heimdall** (lane gateway / token routing), **Hellsing** (zombie/worker reaping), **Consus**
 (ideation → sign-off), and **Argus** (observability).
 
+## Redeploying a live pantheon-v2 instance
+
+A pantheon-v2 deployment builds every `auriga`/`auriga-<tenant_id>` compose service's
+image from a plain git checkout of this repo at `${AURIGA_LOCAL_PATH:-./plugins/auriga}`
+(see [`src/router/lib/adapters/pantheon-v2-l2/README.md`](src/router/lib/adapters/pantheon-v2-l2/README.md)
+for the fuller integration story). Nothing rebuilds that image automatically when this
+repo's `main` gets a new commit — a merged fix sitting unreachable in a stale running
+container is a real incident that has already happened once (see
+[#76](https://github.com/mdostal/auriga/issues/76) and the redeploy-mechanism follow-up,
+[#78](https://github.com/mdostal/auriga/issues/78)).
+
+**Automatic (recommended):** in the `plugins/auriga` checkout on the deploy host (not a
+standalone dev clone — this hook is a documented no-op anywhere else), run once:
+
+```sh
+git config core.hooksPath install/lib/git-hooks
+```
+
+From then on, every `git pull` that lands a merge on that checkout's `main` fires
+[`install/lib/git-hooks/post-merge`](install/lib/git-hooks/post-merge), which discovers
+every live `auriga*` compose service (`docker compose config --services`, so it needs no
+knowledge of which tenants exist) and hands them to pantheon-v2's own
+[`bin/pantheon-redeploy`](https://github.com/mdostal/pantheon-v2/blob/main/bin/pantheon-redeploy)
+— the same build/force-recreate/health-check script pantheon-v2's own `main` uses for
+itself. This hook contains no redeploy logic of its own; it only decides when and for
+which services that script should run.
+
+**Manual:** from the pantheon-v2 deployment root, after pulling the new Auriga code:
+
+```sh
+cd plugins/auriga && git pull && cd ../..
+bin/pantheon-redeploy $(docker compose config --services | grep -E '^auriga(-|$)')
+```
+
 ## Quickstart
 
 The live router lives in [`src/router/`](src/router/) (Node 24+, no dependencies):
@@ -106,6 +144,19 @@ Env overrides: `AURIGA_PER_CYCLE_TOTAL`, `AURIGA_PER_CYCLE_PER_AGENT`, `AURIGA_C
 `AURIGA_PIDFILE`, `AURIGA_LOG`. Lane maps, agent IDs, and caps live in
 [`src/router/lib/config.mjs`](src/router/lib/config.mjs). See
 [`src/router/README.md`](src/router/README.md) for state-machine and human-queue details.
+
+`cycle()` no longer talks to Multica directly — it goes through the `backlogAdapter` /
+`spawnAdapter` boundary in [`src/router/lib/adapters/`](src/router/lib/adapters/), which holds
+the typed contracts, the real Multica-backed implementations (a behavior-preserving port of the
+former `lib/multica.mjs`), an in-memory stub used by tests, and the intentionally-unbuilt
+`pantheon-v2-l2` stub (the only sanctioned path from Auriga to Pantheon). See that directory's
+`README.md` for the two-adapter model.
+
+Alongside the router, [`src/server/`](src/server/) is a small read-only `node:http` JSON API
+over this repo's own `.pHive/` state (epics, stories, activity — see `src/server/lib/read.mjs`),
+and [`src/ui/`](src/ui/) is the Vite + Tailwind + shadcn/ui operator dashboard it serves —
+together, a local, read-only web view onto the same planning/audit data the router itself acts
+on. Neither package is a dependency of the router; each has its own `package.json` and `npm test`.
 
 ## Status
 

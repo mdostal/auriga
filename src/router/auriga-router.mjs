@@ -15,14 +15,59 @@
 //   --no-zombie       skip zombie recovery this run
 // Env overrides: AURIGA_PER_CYCLE_TOTAL, AURIGA_PER_CYCLE_PER_AGENT,
 //   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG.
+//
+// TESTABILITY: `cycle()` is exported and accepts an options bag so tests can
+// inject fixture/stub backlog+spawn adapters (opts.backlog, opts.spawn), a
+// fixture config (opts.cfg), a log sink (opts.log), and a fast/no-op sleep
+// (opts.sleep) — see test/router-cycle.e2e.test.mjs and
+// test/cutover-e2e.test.mjs. `main()` (the live daemon loop) only runs when
+// this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
-import { ASSIGNMENT_AGENT_KEY, ASSIGNMENT_FINGERPRINT_KEY, assignmentFingerprint } from './lib/fingerprint.mjs';
-import * as mca from './lib/multica.mjs';
-import { probeClaudeAuth } from './lib/claude-auth-status.mjs';
-import { runCompletionHook } from '../auriga/hooks.ts';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
+import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
+import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
+import { loadExternalConfig } from './lib/config-loader.mjs';
+
+// Live defaults — constructed once at module load (cheap: a factory closure,
+// no HTTP call happens until a method is actually invoked), exactly
+// mirroring the old `import * as mca from './lib/multica.mjs'`
+// singleton-module pattern. verifyDelayMs/lane-map fields mirror the
+// router's live CAPS/lane config so a future describeLanes() consumer sees
+// byte-identical values.
+//
+// Cutover (pantheon-owns-multica-board-bridge epic): these were
+// createMulticaBacklogAdapter/createMulticaSpawnAdapter (this file's own
+// direct-to-Multica adapters, ./lib/adapters/multica/{backlog,spawn}.mjs),
+// which shelled out to the native `multica` CLI binary -- a real,
+// standing architecture violation (Auriga integrating with Multica
+// directly) that also could not run inside this container at all. Now
+// routed exclusively through Pantheon's own backlog API -- see
+// ./lib/adapters/pantheon-v2-l2/README.md for the full rationale and its
+// documented, deliberate scope boundaries.
+//
+// KNOWN GAP, carried over from that cutover, not silently absorbed: the
+// pantheon-v2-l2 backlog adapter's getIssuePullRequests() returns Multica's
+// native issue<->PR linkage only -- it does NOT port the old adapter's
+// GitHub-based gh-scan fallback (a separate, non-Multica integration, out
+// of this epic's scope). That native linkage was previously described as
+// "empty in practice" -- so PR-based verification (false-done detection,
+// review-dispatch's PR matching) may find fewer/no PRs until a follow-up
+// story ports GitHub discovery into this adapter too. Does not block board
+// reading, status transitions, or initial dispatch -- only later-lifecycle
+// PR-verification steps, which tonight's freshly-filed board items don't
+// reach yet.
+const defaultBacklog = createPantheonV2L2BacklogAdapter();
+const defaultSpawn = createPantheonV2L2SpawnAdapter({
+  verifyDelayMs: cfg.CAPS.verifyDelayMs,
+  projectLane: cfg.PROJECT_LANE,
+  defaultLane: cfg.DEFAULT_LANE,
+  hiveLane: cfg.HIVE_LANE,
+  reviewLane: cfg.REVIEW_LANE,
+  runtimeCap: cfg.RUNTIME_CAP,
+});
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -35,66 +80,13 @@ const MAX_ASSIGN = parseInt(val('--max-assign', '0'), 10) || Infinity;
 
 const PIDFILE = process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
 const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
+const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
+const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
 if (process.env.AURIGA_PER_CYCLE_PER_AGENT) cfg.CAPS.perCyclePerAgent = parseInt(process.env.AURIGA_PER_CYCLE_PER_AGENT, 10);
 if (process.env.AURIGA_CYCLE_MS) cfg.CAPS.cycleMs = parseInt(process.env.AURIGA_CYCLE_MS, 10);
-
-let assignedThisProcess = 0;
-
-function runtimeHealth() {
-  try {
-    const runtimes = mca.listRuntimes();
-    const offline = runtimes.filter((r) => r && r.status !== 'online');
-    return {
-      runtimes,
-      offlineRuntimeIds: new Set(offline.map((r) => r.id).filter(Boolean)),
-      offline,
-    };
-  } catch (e) {
-    log('runtime_list_error', { error: e.message });
-    return { runtimes: [], offlineRuntimeIds: new Set(), offline: [] };
-  }
-}
-
-function liveAgentMap(offlineRuntimeIds = new Set()) {
-  const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, a]) => [name, { ...a }]));
-  try {
-    for (const a of mca.listAgents()) {
-      if (!a.id || !a.name) continue;
-      const configured = agents[a.name];
-      const runtimeId = a.runtime_id || configured?.runtimeId || null;
-      const offline = runtimeId && offlineRuntimeIds.has(runtimeId);
-      agents[a.name] = {
-        id: a.id,
-        runtime: configured?.runtime || a.provider || runtimeId || 'unknown',
-        runtimeId,
-        runtimeStatus: offline ? 'offline' : 'online',
-        available: !offline,
-        maxInflight: a.max_concurrent_tasks || configured?.maxInflight || 1,
-        repo: configured?.repo ?? null,
-      };
-    }
-  } catch (e) {
-    log('agent_list_error', { error: e.message });
-  }
-  return agents;
-}
-
-function dispatchConfig(agents) {
-  const effectiveAgents = {};
-  for (const [name, a] of Object.entries(cfg.AGENTS)) {
-    effectiveAgents[name] = { ...a };
-    if (agents[name]) {
-      effectiveAgents[name].runtimeId = agents[name].runtimeId;
-      effectiveAgents[name].runtimeStatus = agents[name].runtimeStatus;
-      effectiveAgents[name].available = agents[name].available;
-      effectiveAgents[name].maxInflight = agents[name].maxInflight || a.maxInflight;
-    }
-  }
-  return { ...cfg, AGENTS: effectiveAgents };
-}
 
 // ---- single-instance guard -------------------------------------------------
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
@@ -119,150 +111,110 @@ function releaseLock() {
 // ---- logging ---------------------------------------------------------------
 function log(event, data) {
   const rec = { ts: new Date().toISOString(), event, ...data };
+  if (INSTANCE_ID) rec.instance_id = INSTANCE_ID;
+  if (TENANT_ID) rec.tenant_id = TENANT_ID;
   const line = JSON.stringify(rec);
   try { fs.appendFileSync(LOGFILE, line + '\n'); } catch {}
   console.log(line);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const agentForAgentId = (agentId, agents = cfg.AGENTS) =>
-  Object.values(agents).find((a) => a.id === agentId) || null;
-
-const runtimeForAgentId = (agentId, agents = cfg.AGENTS) =>
-  agentForAgentId(agentId, agents)?.runtime || null;
-
-function stampAssignment(identifier, agent, fingerprint) {
-  if (!fingerprint) return;
-  try {
-    mca.setIssueMetadata(identifier, ASSIGNMENT_FINGERPRINT_KEY, fingerprint);
-    mca.setIssueMetadata(identifier, ASSIGNMENT_AGENT_KEY, agent);
-  } catch (e) {
-    log('assignment_fingerprint_error', { identifier, agent, error: e.message });
-  }
-}
 
 // ---- one cycle -------------------------------------------------------------
-async function cycle() {
-  const now = Date.now();
-  const blockedRuntimes = new Set();
-  const rtHealth = runtimeHealth();
-  if (rtHealth.offline.length) {
-    log('runtime_offline', {
-      count: rtHealth.offline.length,
-      runtimes: rtHealth.offline.map((r) => ({
-        id: r.id,
-        name: r.name,
-        provider: r.provider,
-        lastSeenAt: r.last_seen_at,
-      })),
-    });
-  }
-  if (Object.values(cfg.AGENTS).some((a) => a.runtime === 'claude')) {
-    const auth = probeClaudeAuth();
-    if (auth.status === 'auth_required') blockedRuntimes.add('claude');
-    log('claude_auth_status', {
-      status: auth.status,
-      checkedAt: auth.checked_at,
-      blocked: blockedRuntimes.has('claude'),
-      ...(auth.error ? { error: auth.error } : {}),
-    });
-  }
+// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
+// Every dependency defaults to the live module-level singleton, so calling
+// cycle() with no args (from main()) is exactly the original live behavior.
+// Returns { todo, picked, assigned }.
+export async function cycle(opts = {}) {
+  const backlog = opts.backlog || defaultBacklog;
+  const spawn = opts.spawn || defaultSpawn;
+  const cfgImpl = opts.cfg || cfg;
+  const coreImpl = opts.core || core;
+  const logImpl = opts.log || log;
+  const sleepImpl = opts.sleep || sleep;
+  const dryRun = opts.dryRun ?? DRY;
+  const noZombie = opts.noZombie ?? NO_ZOMBIE;
+  const maxAssign = opts.maxAssign ?? Infinity;
+  const now = opts.now ?? Date.now();
 
-  // Board-wide observation for status passes; selectAssignments still gates
-  // dispatch to cfg.PROJECT_IDS internally.
-  const discovered = mca.listAllProjectIds();
-  const scanIds = [...new Set([...(discovered.length ? discovered : cfg.PROJECT_IDS), ...cfg.PROJECT_IDS])];
-  const issues = mca.listAllIssues(scanIds);
-  const allAgents = liveAgentMap(rtHealth.offlineRuntimeIds);
-  const routeCfg = dispatchConfig(allAgents);
-  const allAgentIds = core.agentIdSet(allAgents);
-  const agentNameById = Object.fromEntries(Object.entries(allAgents).map(([name, a]) => [a.id, name]));
-  let workspaceTodoIssues = [];
-  let workspaceInProgressIssues = [];
-  try {
-    workspaceTodoIssues = mca.listAllWorkspaceIssues('todo');
-  } catch (e) {
-    log('assigned_idle_list_error', { error: e.message, phase: 'todo' });
-  }
-  try {
-    workspaceInProgressIssues = mca.listAllWorkspaceIssues('in_progress');
-  } catch (e) {
-    log('assigned_idle_list_error', { error: e.message, phase: 'in_progress' });
-  }
-  const inflight = core.computeInflight(issues, routeCfg.AGENTS);
-  const runtimeInflight = core.computeRuntimeInflight(inflight, routeCfg.AGENTS);
-  // Workspace-wide inflight (all live agents, not just the aligned-lane subset
-  // in cfg.AGENTS) — the self-heal pass below recovers stuck work for every
-  // agent on the board, so its capacity math must see every agent's real load.
-  const workspaceInflight = core.computeInflight(workspaceInProgressIssues, allAgents);
-  const workspaceRuntimeInflight = core.computeRuntimeInflight(workspaceInflight, allAgents);
+  // t015 — orchestrator hand-up: read once per cycle, same pattern as every
+  // other per-cycle config read. `createRemoteBacklog` is injectable so a
+  // test can stand up a stub adapter instead of a real cross-board HTTP
+  // call — see this file's own opts.backlog/opts.spawn precedent.
+  const loadTopologyImpl = opts.loadTopology || loadRealTopology;
+  const loadExternalConfigImpl = opts.loadExternalConfig || loadExternalConfig;
+  const createRemoteBacklog = opts.createRemoteBacklog || createPantheonV2L2BacklogAdapter;
+  const topology = loadTopologyImpl();
+  const parentBoardConfig = resolveParentBoardConfig(topology, loadExternalConfigImpl());
+
+  let assigned = 0;
+
+  // `issues` itself is fetched board-wide (scanIds spans every known project, not
+  // just this tenant's own cfgImpl.PROJECT_IDS) because dependency-graph resolution
+  // (detectUnblocks' declared-deps check, etc.) needs to see the WHOLE board to
+  // read a sibling issue's status, even outside this tenant's own aligned set.
+  //
+  // CORRECTION (2026-09-13): an earlier version of this comment claimed "only
+  // observation goes board-wide" and asserted selectAssignments was the only pass
+  // that needed a cfgImpl.PROJECT_IDS filter. That was WRONG and caused a real,
+  // live incident — every one of the STATUS passes below (unblock, parent-rollup,
+  // run-completion, verified-done, changeback, false-done) actually WRITES
+  // (setIssueStatus/unassignIssue), it is not read-only observation, and none of
+  // them were filtering their own input to cfgImpl.PROJECT_IDS before this fix. A
+  // second tenant's Auriga instance was confirmed live mutating another tenant's
+  // ticket status (a real dostal-tech PANT-* ticket, unblocked by the
+  // firefly-events instance). Every pass below now filters its own candidate set
+  // to cfgImpl.PROJECT_IDS at the point it's computed — look for that filter
+  // locally at each pass rather than trusting a blanket claim here again.
+  const discovered = backlog.listAllProjectIds();
+  const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
+  const issues = backlog.listAllIssues(scanIds);
+  const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS);
+  const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
   // signal that used to hide inside the old inflight number and deadlock the router.
-  const assignedQueued = core.computeAssignedQueued(issues, routeCfg.AGENTS);
-  const assignedQueuedAll = core.computeAssignedQueued(workspaceTodoIssues, allAgents);
+  const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
-  const todo = issues.filter((i) => (i.status || '').toLowerCase() === 'todo' && !i.assignee_id && !core.isSmokeScratch(i.title));
-  log('scan', {
+  // ---- BOARD-WIDE PR candidate scan (ONCE per cycle) ----
+  // Restores the pre-cutover router's own top-level ghListRepos/ghOpenPrs/
+  // ghPrs gather (which ran once per cycle and was reused across every
+  // issue): backlog.listCandidatePullRequests(), when the adapter provides it
+  // (the real Multica adapter does; simpler test/stub adapters generally
+  // don't), does the raw repo-wide gh scan HERE, ONCE, and every call site
+  // below that needs "does issue X have a matching PR" filters this SAME
+  // cached, unfiltered list via matchedPrs() — using core.mjs's real
+  // prMatchesStory/prIdentityMatchesStory, never a narrower per-adapter
+  // heuristic. This fixes two regressions an independent review found in this
+  // epic's diff: (1) a PR matching only via a story's short slug key (not the
+  // raw ticket identifier) is found again, and (2) the repo-wide gh scan no
+  // longer re-runs per issue per call site (an O(issues x repos) subprocess
+  // explosion), it runs once per cycle like it always did pre-cutover.
+  let candidatePrs = null;
+  if (typeof backlog.listCandidatePullRequests === 'function') {
+    try { candidatePrs = backlog.listCandidatePullRequests(); }
+    catch (e) { logImpl('candidate_pr_scan_error', { error: e.message }); }
+  }
+  // Returns the PRs in `candidatePrs` matching `issueObj` via `matcher`
+  // (coreImpl.prMatchesStory or coreImpl.prIdentityMatchesStory). Falls back
+  // to backlog.getIssuePullRequests's own per-identifier lookup (filtered by
+  // the SAME rich matcher) only when the adapter has no board-wide scan —
+  // e.g. stub/mock adapters used by unit tests.
+  function matchedPrs(identifier, issueObj, matcher) {
+    if (candidatePrs) return candidatePrs.filter((pr) => matcher(pr, issueObj));
+    return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
+  }
+
+  const todo = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
+  logImpl('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
     inflight,
     runtimeInflight,
     assignedQueued,
-    assignedQueuedAll,
   });
 
-  // ---- assigned-todo self-heal (PAN-7492 / PAN-8244) ----
-  const assignedTodoIssues = workspaceTodoIssues
-    .filter((i) => i.assignee_id && allAgentIds.has(i.assignee_id))
-    .filter((i) => !core.isSmokeScratch(i.title))
-    .filter((i) => !core.isHumanTodo(i, routeCfg));
-  const assignedRuns = {};
-  for (const i of assignedTodoIssues) assignedRuns[i.identifier] = mca.issueRuns(i.identifier);
-  const { selected: assignedIdle, skipped: assignedIdleSkipped } = core.limitAssignedIdleRecoveries(
-    core.detectAssignedIdle(assignedTodoIssues, assignedRuns, routeCfg, allAgentIds, now),
-    routeCfg,
-    {
-      agents: allAgents,
-      agentNameById,
-      inflight: workspaceInflight,
-      runtimeInflight: workspaceRuntimeInflight,
-      runtimeCap: routeCfg.RUNTIME_CAP,
-      blockedRuntimes,
-      maxTotal: Math.min(routeCfg.CAPS.assignedIdlePerCycle ?? routeCfg.CAPS.perCycleTotal, Math.max(0, MAX_ASSIGN - assignedThisProcess)),
-    }
-  );
-  // Every non-recovered item carries a skipReason (rate-limited / at-capacity /
-  // per-cycle-cap) so a stuck assignedQueued count is explainable, not just a
-  // number that never moves.
-  for (const s of assignedIdleSkipped) {
-    log('assigned_idle_skip', { identifier: s.identifier, agent: s.agent || agentNameById[s.assigneeId] || s.assigneeId, runtime: s.runtime, runtimeId: s.runtimeId, skipReason: s.skipReason, idleAgeMs: s.idleAgeMs });
-  }
-  for (const a of assignedIdle) {
-    if (assignedThisProcess >= MAX_ASSIGN) break;
-    log('assigned_idle', { ...a, applied: !DRY });
-    if (DRY) continue;
-    // `issue rerun` is the documented, deterministic way to re-enqueue an
-    // issue's current agent assignment — unlike flipping status to
-    // in_progress (which only enqueues on a backlog -> non-backlog
-    // transition server-side and is a no-op from todo), this always fires.
-    try {
-      mca.rerunIssue(a.identifier);
-      assignedThisProcess++;
-    } catch (e) {
-      log('assigned_idle_rerun_error', { identifier: a.identifier, agent: a.agent, error: e.message });
-      continue;
-    }
-    await sleep(cfg.CAPS.verifyDelayMs);
-    const runs = mca.issueRuns(a.identifier);
-    const lr = core.latestRun(runs);
-    const c = lr ? core.classifyRun(lr, Date.now()) : null;
-    if (c && (c.active || c.done || c.failed)) {
-      log('assigned_idle_verify_ok', { identifier: a.identifier, agent: a.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
-    } else {
-      log('assigned_idle_verify_no_run', { identifier: a.identifier, agent: a.agent });
-    }
-  }
+  const blockedRuntimes = new Set();
 
   // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
   // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
@@ -272,11 +224,17 @@ async function cycle() {
   // fresh candidates. Guard: skip any that already have runs (already built / in flight),
   // so an anomalous blocked-with-open-PR story is never re-dispatched.
   {
-    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked');
+    // DISPATCH stays gated to this tenant's own aligned projects (2026-09-13 fix —
+    // this pass WRITES setIssueStatus/unassignIssue, it is not observation; a
+    // second tenant instance could otherwise unblock/reassign another tenant's
+    // own blocked ticket, confirmed live). statusById/issues below stay
+    // board-wide on purpose — they're read-only context for resolving a
+    // declared dependency's status, never mutated.
+    const blockedIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.BLOCKED && cfgImpl.PROJECT_IDS.includes(i.project_id));
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
-    const unblocks = core.detectUnblocks(blockedIssues, statusById, issues);
+    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues);
     for (const u of unblocks) {
       // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
       // means it is already in review, a MERGED PR means it already shipped. A
@@ -285,31 +243,35 @@ async function cycle() {
       // pre-target_repo churn, but never actually built). So gate on a real PR,
       // discovered via gh in the story's own target repo, not on run count.
       const issueObj = blockedIssues.find((b) => b.id === u.issueId) || {};
-      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       let hasPr = false;
       if (slug) {
-        try { hasPr = mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj)); }
-        catch (e) { log('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
+        // Matches against the per-cycle cached board-wide PR scan (see
+        // matchedPrs above) via the real prMatchesStory — not a narrower
+        // per-adapter heuristic.
+        try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
+        catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       }
-      if (hasPr) { log('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
-      log('advance', { identifier: u.identifier, from: 'blocked', to: 'todo', applied: !DRY });
-      if (!DRY) {
+      if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
+      logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
+      if (!dryRun) {
         try {
-          mca.issueStatus(u.identifier, 'todo');
-          try { mca.unassignIssue(u.identifier); } catch (e) { log('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
-        } catch (e) { log('advance_error', { identifier: u.identifier, to: 'todo', error: e.message }); }
+          backlog.setIssueStatus(u.identifier, ISSUE_STATUS.TODO);
+          try { spawn.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
+        } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: ISSUE_STATUS.TODO, error: e.message }); }
       }
     }
 
     // ---- state-machine: parent/epic -> done when every child is terminal ----
     // Nothing else closes a parent when its last child completes. Fires only when
     // ALL of a parent's visible children are done/cancelled and the parent isn't
-    // already terminal.
-    const parentDone = core.detectParentDone(issues);
+    // already terminal. DISPATCH-scoped (writes setIssueStatus) — see the
+    // blocked->todo pass above for why this can't be board-wide.
+    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)));
     for (const pd of parentDone) {
-      log('advance', { identifier: pd.identifier, to: 'done', kind: 'parent-rollup', applied: !DRY });
-      if (!DRY) {
-        try { mca.issueStatus(pd.identifier, 'done'); } catch (e) { log('advance_error', { identifier: pd.identifier, to: 'done', error: e.message }); }
+      logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
+      if (!dryRun) {
+        try { backlog.setIssueStatus(pd.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
       }
     }
   }
@@ -319,56 +281,51 @@ async function cycle() {
   // makes each cycle atomic w.r.t. other router processes; re-deriving the
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
-  const inProgress = issues.filter((i) => ['in_progress', 'in progress', 'running'].includes((i.status || '').toLowerCase()));
-  const inProgressByIdentifier = Object.fromEntries(inProgress.map((i) => [i.identifier, i]));
+  // DISPATCH-scoped (writes setIssueStatus) — see the blocked->todo pass above.
+  const inProgress = issues.filter((i) => [
+    ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
+  ].includes((i.status || '').toLowerCase()) && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const runsByIssue = {};
-  for (const i of inProgress) runsByIssue[i.identifier] = mca.issueRuns(i.identifier);
+  for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  const completions = core.detectRunCompletions(inProgress, runsByIssue, now);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
   for (const c of completions) {
-    log('advance', { identifier: c.identifier, to: 'in_review', applied: !DRY });
-    if (!DRY) {
-      try { mca.issueStatus(c.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: c.identifier, to: 'in_review', error: e.message }); }
+    logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
+    if (!dryRun) {
+      try { backlog.setIssueStatus(c.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
     }
   }
 
-  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === 'in_review');
+  // DISPATCH-scoped (writes setIssueStatus via detectVerifiedDone below, and
+  // feeds review-dispatch further down) — see the blocked->todo pass above.
+  const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = mca.issuePullRequests(i.identifier);
-  const verified = core.detectVerifiedDone(inReview, prsByIssue);
-  const issueByIdentifier = new Map(inReview.map((i) => [i.identifier, i]));
+  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
+  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
   for (const v of verified) {
-    log('advance', { identifier: v.identifier, to: 'done', applied: !DRY });
-    if (!DRY) {
-      try {
-        mca.issueStatus(v.identifier, 'done');
-      } catch (e) {
-        log('advance_error', { identifier: v.identifier, to: 'done', error: e.message });
-        continue;
-      }
-      try {
-        const issueObj = issueByIdentifier.get(v.identifier) || {};
-        const result = runCompletionHook(
-          {
-            id: v.issueId,
-            identifier: v.identifier,
-            title: issueObj.title,
-            status: 'done',
-            project_id: v.projectId,
-            parent_issue_id: issueObj.parent_issue_id || null,
-          },
-          {
-            getIssue: mca.getIssue,
-            listChildren: mca.issueChildren,
-            listProjectIssues: mca.listIssues,
-            createIssue: mca.createIssue,
-            setIssueMetadata: mca.setIssueMetadata,
-          },
-          cfg.PROJECT_NAMES,
-        );
-        log('completion_hook', { identifier: v.identifier, ...result });
-      } catch (e) {
-        log('completion_hook_error', { identifier: v.identifier, error: e.message });
+    logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
+    if (!dryRun) {
+      try { backlog.setIssueStatus(v.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
+    }
+  }
+
+  // ---- state-machine: changes_requested -> todo (review loop-back) ----
+  // The review lane sets changes_requested as the formal "send back" signal;
+  // the router owns the todo transition + unassign so a build lane can pick
+  // the story up again. This is the durable code path — never rely solely on
+  // agent free-text for a status mutation the state machine should handle.
+  // DISPATCH-scoped (writes setIssueStatus/unassignIssue) — see the
+  // blocked->todo pass above.
+  {
+    const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested);
+    for (const cb of changeBacks) {
+      logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
+      if (!dryRun) {
+        try {
+          backlog.setIssueStatus(cb.identifier, ISSUE_STATUS.TODO);
+          try { spawn.unassignIssue(cb.identifier); } catch (e) { logImpl('changeback_unassign_error', { identifier: cb.identifier, error: e.message }); }
+        } catch (e) { logImpl('advance_error', { identifier: cb.identifier, to: ISSUE_STATUS.TODO, error: e.message }); }
       }
     }
   }
@@ -383,70 +340,66 @@ async function cycle() {
   // an agent setting status directly, not via the router's merged-PR gate — a purely
   // event-based trigger would miss most completions and never self-heal an already-
   // stuck chain. Idempotent + bounded: skips any dependent with an active run or an
-  // existing PR, caps per cycle (CAPS.perCycleCascade), and records each handled
+  // existing PR, caps per cycle (cfgImpl.CAPS.perCycleCascade), and records each handled
   // identifier in `cascaded` so selectAssignments below does not double-dispatch it.
   const cascaded = new Set();
   {
     const doneIds = new Set(
       issues
-        .filter((i) => { const s = (i.status || '').toLowerCase(); return s === 'done' || s === 'cancelled' || s === 'canceled'; })
+        .filter((i) => isTerminalIssueStatus((i.status || '').toLowerCase()))
         .map((i) => i.id)
     );
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
-    const cascades = core.detectCascadeDispatch(issues, doneIds, statusById, routeCfg);
+    const cascades = coreImpl.detectCascadeDispatch(issues, doneIds, statusById, cfgImpl);
     let cascadeFired = 0;
     for (const c of cascades) {
-      if (cascadeFired >= routeCfg.CAPS.perCycleCascade) break;
-      if (assignedThisProcess >= MAX_ASSIGN) break;
+      if (cascadeFired >= cfgImpl.CAPS.perCycleCascade) break;
+      if (assigned >= maxAssign) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
-      // Idempotency 1: never re-fire a story that already has an active run OR that
-      // ran within the re-dispatch cooldown. A run that just COMPLETED (even a build
-      // run that finished by setting the story back to blocked) counts as "already
-      // attempted" — re-firing it here cancels the fresh/just-finished run and starts
-      // the ~2-minute cancel-thrash (dispatch->cancel->complete->cancel forever,
-      // PAN-7771). Treat BOTH in-flight and recently-finished as "started"; fetch the
-      // runs once and reuse.
-      let runs = [];
-      try { runs = mca.issueRuns(c.identifier); }
-      catch (e) { log('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
-      const nowT = Date.now();
-      if (runs.some((r) => core.classifyRun(r, nowT).active)) { log('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
-      const lastRun = core.latestRun(runs);
-      if (lastRun) {
-        const runAgeMs = core.classifyRun(lastRun, nowT).ageMs;
-        const cooldown = routeCfg.CAPS.redispatchCooldownMs || (15 * 60 * 1000);
-        if (runAgeMs < cooldown) { log('cascade_skip', { identifier: c.identifier, reason: 'recent-run', ageMs: runAgeMs }); continue; }
-      }
+      // Idempotency 1: never re-fire a story that already has an active run.
+      let activeRun = false;
+      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
+      catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
+      if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
-      // in review, merged = shipped) — same gh-based guard the unblock pass uses.
-      const slug = core.normalizeRepoSlug(core.targetRepoValue(issueObj) || '');
+      // in review, merged = shipped) — same gh-based guard the unblock pass uses,
+      // matched against the per-cycle cached board-wide PR scan (see matchedPrs
+      // above).
+      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       if (slug) {
         try {
-          if (mca.ghPrs(slug, 'all').some((pr) => core.prMatchesStory(pr, issueObj))) {
-            log('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
+          if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
             continue;
           }
-        } catch (e) { log('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
+        } catch (e) { logImpl('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
       }
-      log('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !DRY });
-      if (DRY) { cascadeFired++; cascaded.add(c.identifier); continue; }
+      logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
+      if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
-        if (c.status === 'blocked') mca.issueStatus(c.identifier, 'todo');
+        if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
         // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
-        const agent = core.chooseAgentForProject(c.projectId, routeCfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, core.isHiveStory(issueObj));
+        // NOT routed through spawn.dispatch() (a real, tested method with a
+        // genuinely different contract here — see spawn-adapter.mjs's typedef):
+        // dispatch()'s verify-then-conditionally-rerun contract assumes assign
+        // SOMETIMES auto-enqueues a run and rerun is only a fallback; this cascade
+        // path instead treats rerun as ALWAYS required (assign never enqueues on
+        // its own) and always force-reruns, whether or not a run already exists —
+        // a genuinely different semantics, not a stale duplicate of the same logic.
+        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
-          mca.assignIssue(c.identifier, agent);
+          spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
-          await sleep(routeCfg.CAPS.verifyDelayMs);
+          await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         }
-        mca.rerunIssue(c.identifier);
-        assignedThisProcess++;
+        spawn.rerunIssue(c.identifier);
+        assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
-        log('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
+        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
       } catch (e) {
-        log('cascade_error', { identifier: c.identifier, error: e.message });
+        logImpl('cascade_error', { identifier: c.identifier, error: e.message });
       }
     }
   }
@@ -460,34 +413,17 @@ async function cycle() {
   // Assignment to the review agent is the idempotency marker (see
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
-  for (const i of inReview) inReviewRuns[i.identifier] = mca.issueRuns(i.identifier);
+  for (const i of inReview) inReviewRuns[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  // Board-wide open-PR gather (shared by false-done + review dispatch).
-  // Multica's issue<->PR linkage is empty in practice, so discover PRs directly via
-  // gh across ALL of the owner's repos (live discovery — a new repo like logic-loops
-  // is covered the moment it exists) PLUS the static fallback PLUS any explicit
-  // target_repo on an in_review/done story. Matching is slug-aware (prMatchesStory):
-  // it matches the story's short key (m-01) in a branch, not only the PAN id, so
-  // slug-branched PRs (mnemosyne#1 feat/m-01-service) are found.
-  const discoveredRepos = mca.ghListRepos(cfg.REVIEW_REPO_OWNER);
-  const repoSet = new Set([
-    ...discoveredRepos,
-    ...(cfg.REVIEW_SEARCH_REPOS || []),
-  ].map((r) => core.normalizeRepoSlug(r)).filter(Boolean));
-  for (const i of inReview) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
-  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === 'done');
-  for (const i of doneIssues) { const s = core.normalizeRepoSlug(core.targetRepoValue(i) || ''); if (s) repoSet.add(s); }
-  const openPrsAll = [];
-  for (const repo of repoSet) {
-    try { for (const pr of mca.ghOpenPrs(repo)) { pr._repo = repo; openPrsAll.push(pr); } } catch { /* one repo failing must not abort the scan */ }
-  }
-  // Gate on the story's OWN PR by branch/title identity (not a body mention), so a
-  // parent/seed ticket that some unrelated PR merely references is never dispatched.
-  const openPrIds = new Set();
-  for (const i of inReview) {
-    if (openPrsAll.some((pr) => core.prIdentityMatchesStory(pr, i))) openPrIds.add(i.identifier);
-  }
-  if (inReview.length) log('review_pr_scan', { repos: repoSet.size, openPrs: openPrsAll.length, withPr: [...openPrIds] });
+  // Per-story PR gather (shared by false-done + review dispatch), drawn from
+  // the SAME per-cycle cached board-wide scan (candidatePrs, gathered once
+  // near the top of cycle() — see matchedPrs above). Matching stays
+  // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
+  // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
+  // are still found).
+  // DISPATCH-scoped (feeds detectFalseDone below, which writes setIssueStatus)
+  // — see the blocked->todo pass above.
+  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE && cfgImpl.PROJECT_IDS.includes(i.project_id));
 
   // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
   // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
@@ -495,21 +431,51 @@ async function cycle() {
   // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
   // story with no open PR is left alone (may be a legit non-code done task).
   {
-    const falseDone = core.detectFalseDone(doneIssues, openPrsAll);
-    const cap = (cfg.CAPS && cfg.CAPS.perCycleFalseDone) || 3;
+    // detectFalseDone itself applies the prIsOpen/ownPrUrl/repo-qualified/
+    // prIdentityMatchesStory matching per doneIssue against a BOARD-WIDE
+    // candidate list (exactly like the pre-cutover router's own openPrsAll),
+    // so the full unfiltered candidatePrs scan is passed straight through
+    // when available. Only adapters with no board-wide scan (e.g. stub/test
+    // adapters) fall back to unioning each done issue's own per-identifier
+    // lookup, de-duplicated by PR url — the pre-fix per-issue gather shape,
+    // kept only as that fallback's approximation of a board-wide list.
+    let donePrs;
+    if (candidatePrs) {
+      donePrs = candidatePrs;
+    } else {
+      donePrs = [];
+      const seenPr = new Set();
+      for (const i of doneIssues) {
+        let prs = [];
+        try { prs = backlog.getIssuePullRequests(i.identifier); }
+        catch (e) { logImpl('false_done_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
+        for (const pr of prs) {
+          const key = pr.url || pr.html_url || `${pr._repo || ''}#${pr.number}`;
+          if (seenPr.has(key)) continue;
+          seenPr.add(key);
+          donePrs.push(pr);
+        }
+      }
+    }
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs);
+    const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
-      if (n >= cap) { log('false_done_capped', { remaining: falseDone.length - n }); break; }
+      if (n >= cap) { logImpl('false_done_capped', { remaining: falseDone.length - n }); break; }
       n++;
-      log('advance', { identifier: f.identifier, from: 'done', to: 'in_review', kind: 'false-done', prUrl: f.prUrl, applied: !DRY });
-      if (!DRY) {
-        try { mca.issueStatus(f.identifier, 'in_review'); } catch (e) { log('advance_error', { identifier: f.identifier, to: 'in_review', error: e.message }); }
+      logImpl('advance', { identifier: f.identifier, from: ISSUE_STATUS.DONE, to: ISSUE_STATUS.IN_REVIEW, kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
+      if (!dryRun) {
+        try { backlog.setIssueStatus(f.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
       }
     }
   }
 
-  const reviewInflight = core.computeReviewInflight(inReview, routeCfg);
-  const reviewPicks = core.selectReviewDispatch(inReview, inReviewRuns, routeCfg, reviewInflight, { now, openPrIds });
+  // inReview is already PROJECT_IDS-scoped at its own definition above (2026-09-13
+  // fix — a firefly-events instance was confirmed live trying to dispatch review
+  // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
+  // this and the whole board-wide-status-pass audit that followed it).
+  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
@@ -519,20 +485,20 @@ async function cycle() {
     // and runs each enabled perspective, truly verifying. See core.reviewSquadPlan +
     // agents/auriga-review.instructions.md.
     const issueObj = inReviewById.get(r.issueId) || { identifier: r.identifier };
-    const plan = core.reviewSquadPlan(issueObj, routeCfg);
-    log('review', {
+    const plan = coreImpl.reviewSquadPlan(issueObj, cfgImpl);
+    logImpl('review', {
       identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason,
-      squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !DRY,
+      squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !dryRun,
     });
-    if (DRY) continue;
+    if (dryRun) continue;
     try {
       if (r.action === 'dispatch-review') {
         // Publish the squad plan onto the ticket so what the squad will do is visible
         // on the board up front and is read by the squad agent (best-effort; a comment
         // failure must never block the dispatch).
-        mca.issueComment(
+        backlog.commentOnIssue(
           r.identifier,
-          'REVIEW SQUAD PLAN — ' + core.squadPlanSummary(plan) +
+          'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
           '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
           (plan.playwright ? ' + Playwright/E2E' : '') +
           '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
@@ -541,100 +507,173 @@ async function cycle() {
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
         // sleep first to let the new assignee propagate before rerun).
-        mca.assignIssue(r.identifier, r.agent);
-        await sleep(routeCfg.CAPS.verifyDelayMs);
+        // NOT routed through spawn.dispatch() (a real, tested method with a
+        // genuinely different contract here — see spawn-adapter.mjs's typedef):
+        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
+        // branch, which never assigns at all) rather than verifying a run started
+        // first — a different contract than dispatch()'s verify-then-conditionally-
+        // rerun, not a stale duplicate of it.
+        spawn.assignIssue(r.identifier, r.agent);
+        await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
-      mca.rerunIssue(r.identifier);
-      log('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
+      spawn.rerunIssue(r.identifier);
+      logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
     } catch (e) {
-      log('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
+      logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
     }
   }
 
   // ---- zombie recovery ----
   // Board-wide scan feeds the STATUS passes, but zombie recovery DISPATCHES
-  // (rerun/assign), so restrict it to the aligned dispatch set (cfg.PROJECT_IDS) —
+  // (rerun/assign), so restrict it to the aligned dispatch set (cfgImpl.PROJECT_IDS) —
   // never fire a build run into an unscanned/unaligned project.
-  if (!NO_ZOMBIE) {
-    const inProgressDispatch = inProgress.filter((i) => routeCfg.PROJECT_IDS.includes(i.project_id));
-    const zombies = core.detectZombies(inProgressDispatch, runsByIssue, routeCfg, now);
+  if (!noZombie) {
+    const inProgressDispatch = inProgress.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
+    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
     for (const z of zombies) {
-      if (assignedThisProcess >= MAX_ASSIGN) break;
+      if (assigned >= maxAssign) break;
+      if (z.action === 'give-up') {
+        // GH #75 / t001-zombie-give-up: attempt cap exhausted — stop re-actuating.
+        // Never call spawn.assignIssue/rerunIssue on this path. Best-effort leave
+        // a human-visible marker on the issue; a comment failure must never crash
+        // the cycle (matches zombie_error/unblock_unassign_error convention).
+        logImpl('zombie_give_up', { ...z, applied: !dryRun });
+        if (!dryRun) {
+          try { backlog.setIssueStatus(z.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked', error: e.message }); }
+          try {
+            backlog.commentOnIssue(
+              z.identifier,
+              `Auriga auto-retried this issue ${cfgImpl.CAPS.zombieMaxAttempts} time(s) and it is still stuck with no successful run.\n` +
+              'Giving up on further automatic retry attempts (bounded-retry stopgap).\n' +
+              'Status set to `blocked` — a human must review and manually re-trigger or reassign.'
+            );
+          } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'comment', error: e.message }); }
+        }
+        continue;
+      }
       if (z.action === 'rerun') {
-        const currentAgent = agentForAgentId(z.assigneeId, allAgents);
-        const runtime = currentAgent?.runtime || runtimeForAgentId(z.assigneeId, routeCfg.AGENTS);
-        if (currentAgent?.available === false) {
-          log('zombie_skip', { ...z, runtime, runtimeId: currentAgent.runtimeId, reason: 'runtime-offline' });
-          continue;
-        }
-        if (runtime && blockedRuntimes.has(runtime)) {
-          log('zombie_skip', { ...z, runtime, runtimeId: currentAgent?.runtimeId, reason: 'runtime-blocked' });
-          continue;
-        }
-        log('zombie', { ...z, applied: !DRY });
-        if (!DRY) { try { mca.rerunIssue(z.identifier); assignedThisProcess++; } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        logImpl('zombie', { ...z, applied: !dryRun });
+        if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = core.chooseAgentForProject(z.projectId, routeCfg, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
-        if (!agent) { log('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
-        if (blockedRuntimes.has(routeCfg.AGENTS[agent].runtime)) {
-          log('zombie_skip', { ...z, agent, runtime: routeCfg.AGENTS[agent].runtime, runtimeId: routeCfg.AGENTS[agent].runtimeId, reason: 'runtime-blocked' });
-          continue;
-        }
-        log('zombie', { ...z, agent, applied: !DRY });
-        if (!DRY) {
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
+        if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        logImpl('zombie', { ...z, agent, applied: !dryRun });
+        if (!dryRun) {
           try {
-            mca.assignIssue(z.identifier, agent);
-            stampAssignment(z.identifier, agent, assignmentFingerprint(inProgressByIdentifier[z.identifier] || z, agent, routeCfg));
-            assignedThisProcess++;
+            spawn.assignIssue(z.identifier, agent);
+            assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
-          } catch (e) { log('zombie_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }
     }
   }
 
   // ---- route new todos ----
-  const remaining = Math.max(0, MAX_ASSIGN - assignedThisProcess);
-  const picks = core.selectAssignments(issues, routeCfg, inflight, {
+  const remaining = Math.max(0, maxAssign - assigned);
+  const picks = coreImpl.selectAssignments(issues, cfgImpl, inflight, {
     blockedRuntimes,
     exclude: cascaded,
-    maxTotal: Math.min(routeCfg.CAPS.perCycleTotal, remaining || routeCfg.CAPS.perCycleTotal),
+    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining || cfgImpl.CAPS.perCycleTotal),
+    parentBoardConfig,
   });
 
   for (const p of picks) {
-    if (assignedThisProcess >= MAX_ASSIGN) break;
-    log('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !DRY });
-    if (DRY) continue;
+    if (assigned >= maxAssign) break;
+    logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
+    if (dryRun) continue;
     try {
-      mca.assignIssue(p.identifier, p.agent);
-      stampAssignment(p.identifier, p.agent, p.assignmentFingerprint);
-      assignedThisProcess++;
+      spawn.assignIssue(p.identifier, p.agent);
+      assigned++;
     } catch (e) {
       const msg = e.message || '';
-      log('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
+      logImpl('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
       // If a lane errors with a limit/quota, block that runtime for the rest of this cycle.
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
     }
-    // verify a run started; force-enqueue if not (dead-zone fix)
-    await sleep(routeCfg.CAPS.verifyDelayMs);
-    const runs = mca.issueRuns(p.identifier);
-    const started = runs.length > 0 && runs.some((r) => {
-      const c = core.classifyRun(r, Date.now());
+    // verify a run started; force-enqueue if not (dead-zone fix).
+    //
+    // Deliberately INLINE here, not routed through spawn.dispatch() (which
+    // ports this exact assign -> verify -> force-rerun sequence — see
+    // lib/adapters/multica/spawn.mjs's dispatch() and
+    // lib/adapters/spawn-adapter.mjs's typedef), for the same "don't force a
+    // bad abstraction" reasoning that already keeps the cascade-dispatch and
+    // review-dispatch passes below off dispatch(), just a different mismatch:
+    // dispatch()'s verify-wait is a REAL synchronous Atomics.wait block
+    // (consistent with the SpawnAdapter interface's synchronous-by-design
+    // contract — see spawn.mjs's header comment). That's fine for a
+    // short-lived caller, but auriga-router.mjs is a long-lived, supervised
+    // daemon (see main()'s SIGTERM/SIGINT handlers) that must stay responsive
+    // during this wait, so this call site keeps its own non-blocking
+    // `await sleepImpl(...)` instead of freezing the event loop for up to
+    // CAPS.verifyDelayMs per dispatch (bounded by CAPS.perCycleTotal /
+    // perCyclePerAgent, but still a real, live hit to signal responsiveness).
+    // dispatch() itself remains correct and available for a future caller
+    // that doesn't need non-blocking behavior (e.g. a short-lived CLI tool).
+    await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+    const runs = backlog.getIssueRuns(p.identifier);
+    const started = runs.some((r) => {
+      const c = coreImpl.classifyRun(r, Date.now());
       return c.active || c.done || c.failed; // any run row means it dispatched
     });
     if (!started) {
-      log('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
-      try { mca.rerunIssue(p.identifier); } catch (e) { log('rerun_error', { identifier: p.identifier, error: e.message }); }
+      logImpl('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
+      try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
     } else {
-      const lr = core.latestRun(runs);
-      const c = lr ? core.classifyRun(lr, Date.now()) : {};
-      log('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
+      const lr = coreImpl.latestRun(runs);
+      const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+      logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     }
   }
 
-  return { todo: todo.length, picked: picks.length };
+  // ---- route hand-ups (t015 — orchestrator hand-up) ----
+  // coreImpl.selectAssignments only ever populates picks.handUps when
+  // parentBoardConfig was non-null (see that function's own routing branch),
+  // so this loop is a no-op whenever no real parent board is configured —
+  // exactly the "no knowledge or nowhere to move it -- 100% human job"
+  // fallback; those tickets already fell through to the existing
+  // isHumanTodo/human-queue-export path untouched.
+  for (const h of picks.handUps || []) {
+    logImpl('hand_up', {
+      identifier: h.identifier, reason: h.reason,
+      parent: topology.parent ? topology.parent.id : null,
+      targetProjectId: parentBoardConfig.projectId,
+      applied: !dryRun,
+    });
+    if (dryRun) continue;
+
+    const issue = issues.find((i) => i.identifier === h.identifier);
+    let createdIssue;
+    try {
+      const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
+      createdIssue = remoteBacklog.createIssue({
+        title: issue ? issue.title : h.identifier,
+        description: issue ? issue.description : undefined,
+        metadata: { handed_up_from: h.identifier },
+      });
+    } catch (e) {
+      // Remote create failed -- NEVER apply the local comment/unassign/
+      // status-change side effects below (would otherwise leave a "handed
+      // up" ticket pointing at nothing).
+      logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
+      continue;
+    }
+
+    logImpl('hand_up_ok', { identifier: h.identifier, newIdentifier: createdIssue && createdIssue.identifier });
+    try {
+      backlog.commentOnIssue(h.identifier, `Handed up — created ${createdIssue && createdIssue.identifier} on the parent board.`);
+    } catch (e) { logImpl('hand_up_comment_error', { identifier: h.identifier, error: e.message }); }
+    try {
+      spawn.unassignIssue(h.identifier);
+    } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
+    try {
+      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
+    } catch (e) { logImpl('hand_up_status_error', { identifier: h.identifier, error: e.message }); }
+  }
+
+  return { todo: todo.length, picked: picks.length, assigned };
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -646,18 +685,25 @@ async function main() {
 
   log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS });
 
+  let totalAssigned = 0;
   do {
     try {
-      await cycle();
+      const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
+      const result = await cycle({ maxAssign: remaining });
+      totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
     }
-    if (assignedThisProcess >= MAX_ASSIGN) { log('max_assign_reached', { assigned: assignedThisProcess }); break; }
+    if (totalAssigned >= MAX_ASSIGN) { log('max_assign_reached', { assigned: totalAssigned }); break; }
     if (!ONCE) await sleep(cfg.CAPS.cycleMs);
   } while (!ONCE);
 
-  log('stop', { assigned: assignedThisProcess });
+  log('stop', { assigned: totalAssigned });
   releaseLock();
 }
 
-main();
+// Only run the live daemon loop when this file is executed directly (`node
+// auriga-router.mjs ...` / the `auriga-router` bin) — never when imported,
+// e.g. by tests that want `cycle()` against a mock Multica layer.
+const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) main();

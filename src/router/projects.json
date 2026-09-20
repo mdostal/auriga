@@ -1,0 +1,543 @@
+{
+  "//": [
+    "Standalone project registry (p6-registry-core). Replaces config-substrate.mjs's",
+    "hardcoded PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE object literals \u2014 that module now",
+    "derives those three exports from this file at import time (lib/project-registry.mjs).",
+    "Edit via `auriga project add/remove` (p6-project-cli) once that lands; hand-editing",
+    "this file directly works too (see design-discussion.md's HUMAN_NAMES precedent) but",
+    "is not concurrency-safe against a simultaneous CLI write (accepted low-probability",
+    "risk, grill finding H4 \u2014 single-operator tool, not a multi-writer service).",
+    "",
+    "`dispatch_order`: the real, order-sensitive dispatch-eligibility gate (mirrors",
+    "today's PROJECT_IDS exactly). A project id NOT in this list is SILENTLY excluded",
+    "from real dispatch/cascade \u2014 see core.mjs's selectAssignments/detectCascadeDispatch.",
+    "Order determines dispatch priority (aligned lanes first, Consus last so it's",
+    "drained sparingly). A project can be registered below (known to Auriga, has a",
+    "lane) without being dispatch-eligible \u2014 see the Minerva entry.",
+    "",
+    "`projects`: every project Auriga knows about. Each entry is",
+    "{id, name, notes, lane, registered_at}. `lane` is an optional array of candidate",
+    "agent-lane names (mirrors PROJECT_LANE's existing shape); absent/empty falls back",
+    "to DEFAULT_LANE, unchanged from today's behavior.",
+    "",
+    "Seeded 2026-08-19 by p6-registry-core: migrated verbatim from",
+    "config-substrate.mjs's hardcoded PROJECT_NAMES/PROJECT_IDS/PROJECT_LANE (the 4 real",
+    "PROJECT_IDS entries plus Minerva, which is PROJECT_LANE-load-bearing but",
+    "dispatch-ineligible today \u2014 see that story's migration notes). The other ~12 names",
+    "formerly in PROJECT_NAMES are deliberately NOT migrated here \u2014 left for a future",
+    "`auriga project scan` to re-surface as real candidates, not silently dropped or",
+    "silently auto-added.",
+    "",
+    "PRUNED 2026-08-29: the 4 aligned-repo entries (Auriga/Heimdall/Consus/the original",
+    "Pantheon Core) from the 2026-08-19 migration were all scoped to a DIFFERENT, stale",
+    "Multica workspace that this host no longer talks to (confirmed live via GET",
+    "/api/projects against the real, current workspace f32af269-7b85-48d0-8a1b-5b09125b12b4:",
+    "it returns exactly ONE project, 032ea2e7 below -- none of the 4 pruned ids exist in",
+    "it). They were harmless (a project id that never matches a real issue's project_id",
+    "simply never routes anything -- selectAssignments/detectCascadeDispatch silently",
+    "no-op), but actively misleading: they implied per-repo 'aligned lane' project",
+    "routing was live for this workspace when it structurally could not be. Minerva",
+    "stays -- see its own entry's note for why that one is a different, intentional case.",
+    "",
+    "PANT-59 (2026-08-31): added 6 per-god projects created live in workspace f32af269.",
+    "The per-god projects replace Pantheon Core as the primary project-per-repo dispatch",
+    "surface. Seeds dropped in Consus (god) route to minerva-dev via isSeed() in core.mjs",
+    "(overrides PROJECT_LANE); non-seed build stories route to the aligned build lane.",
+    "BATCH ONBOARDING 2026-09-15: added 39 personal/Dostal-Tech/client repo projects (Multica project-create batch), all routed to auriga-build fallback lane. Root-caused a real bug: these existed as real Multica projects + had real idea-labeled seed tickets auto-assigned to minerva-dev, but were invisible to Auriga's dispatch entirely because this registry file -- the real dispatch_order gate -- was never updated. That's why the backlog looked frozen after the import (assignedQueued counts static with zero inflight) despite the daemon actively polling and having working credentials."
+  ],
+  "dispatch_order": [
+    "032ea2e7-39b0-46d4-804e-57e74f627310",
+    "8c13f273-ab62-425f-aee2-45e7c324dc09",
+    "9ebce7eb-01db-4274-8829-5472d13b76ae",
+    "4aa2f07d-79e0-421f-9618-fae642056237",
+    "6a21cc72-5ca5-47d2-a791-9db5dce112bb",
+    "23dd7a13-d801-4d68-9886-ed5a86b3ec40",
+    "0e3d94f1-4846-43b9-90c3-b449d26869d6",
+    "767ba977-ea3c-41e8-9d83-e01224f9f0e7",
+    "23e5c325-eeb6-4046-8a47-88d3d24397da",
+    "a4184bda-62b1-43d0-b8bf-92a381c36c2d",
+    "ef2679c2-0ce5-44c1-9f8b-96ec2bf5dc46",
+    "a4deca1a-4952-424e-88b5-77ace7b0c71a",
+    "028628ab-450b-4f79-9930-4aa33210c3bb",
+    "2ac935c9-91e6-44e8-baae-81fecf62e38e",
+    "beac6cd5-0c70-4b7c-97c7-37d2d8cacb96",
+    "70e8f097-8bfc-4e29-82e6-efc2fa753452",
+    "817b5cc4-8d13-4d85-a090-5688bdd8bf00",
+    "297fad94-ef86-4390-9a13-87195daa77d8",
+    "e2f837d6-4505-40fe-ae61-9237653d3e83",
+    "1a45e73e-b760-4b8f-9147-6668cb95ba8a",
+    "30cba7db-3c73-4ae4-8222-a32ec59d422f",
+    "9b919d7c-4c8d-4cdd-9d46-7a849c48b018",
+    "8787e1f9-a123-4060-b8c2-69659f6f81ef",
+    "52cd0e2e-a2dd-4ff8-b6c2-354bf33ae0a3",
+    "03faacca-5933-4085-84eb-5634cd1af993",
+    "22ecd1d9-98f3-4c2b-99d3-36ff89160c42",
+    "4ca91395-dac8-453c-93b0-b8163282e241",
+    "31597b3f-3b46-4332-9101-cc7c68fb3c8d",
+    "1d0d55e9-4043-4438-8583-51a7effbb77c",
+    "52e4b16e-5e51-4256-973f-7130b3283203",
+    "38f0294b-b01e-4fc1-9bb6-632c97edb12c",
+    "e6455a24-ab40-4679-a5b9-2f997d6c2f60",
+    "62072e32-b533-4d1e-af71-15721b84e704",
+    "f019921d-0cd5-4368-89dd-67b64094c15e",
+    "8a072cab-4373-41b2-b940-c17b080268ab",
+    "47a63a0b-feca-41dc-80cb-18f74a53b195",
+    "f57540d3-2108-49f7-918f-f2a93f82036f",
+    "4ba371a9-7823-49ab-a18c-8acb878a596e",
+    "a408f069-d303-45d7-8189-7620ddb97488",
+    "fb2cdbff-8ce6-464d-befb-2a305a3954c5",
+    "3a4571c4-faa2-4178-ab2b-5962fb042e40",
+    "f7e1c660-e0ae-4f51-9eab-cc678fd59b86",
+    "2cbe5f9a-1e11-4db4-9160-71a461ec42a4",
+    "690ef9a7-ec88-48ab-acc1-ec38f6446a30",
+    "96e2fec0-9b3a-43de-b653-fe5ed5ce9e60",
+    "5f46f640-de18-4268-af49-46aaf613f231",
+    "3cb46df5-3b1b-41ed-a61f-dd3775061259",
+    "3be2a60e-56a1-4548-aac6-d2cd733b8447"
+  ],
+  "projects": [
+    {
+      "id": "032ea2e7-39b0-46d4-804e-57e74f627310",
+      "name": "Pantheon Core",
+      "notes": "Dogfood seed-drop project, REAL workspace (f32af269-7b85-48d0-8a1b-5b09125b12b4) -- created 2026-08-28 because an older 'Pantheon Core' entry (d8ecfab4-..., pruned 2026-08-29, see the top-level comment block) was scoped to a DIFFERENT, stale Multica workspace and did not exist in this one (confirmed live: `project not found in this workspace` when decision-bridge.ts tried to file a ticket there). Consus decision/idea seeds land here (via core-api's DECISION_SEED_PROJECT_ID override) and route to the minerva-dev planning lane via core.mjs's isSeed() check (overrides this entry's own PROJECT_LANE default below); Minerva's decomposed non-seed child stories route to auriga-build. This is the ONLY real project in the live workspace (confirmed via GET /api/projects, 2026-08-29).",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-28T01:42:58Z"
+    },
+    {
+      "id": "8c13f273-ab62-425f-aee2-45e7c324dc09",
+      "name": "Consus (god)",
+      "notes": "Per-god project for Consus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Decision seeds from decision-bridge.ts land here and route to minerva-dev via isSeed() in core.mjs (overrides this lane); non-seed build stories route to consus-dev (aligned) then auriga-build (hive fallback). Confirmed live 2026-08-31.",
+      "lane": [
+        "consus-dev",
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "9ebce7eb-01db-4274-8829-5472d13b76ae",
+      "name": "Auriga (god)",
+      "notes": "Per-god project for Auriga in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Auriga-specific god stories route to the hive build lane. Confirmed live 2026-08-31.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "4aa2f07d-79e0-421f-9618-fae642056237",
+      "name": "Heimdall (god)",
+      "notes": "Per-god project for Heimdall in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). GH #80 (2026-09-06): 'heimdall-dev' (the intended aligned, non-codex lane) was confirmed live to not exist as a real Multica agent in this workspace at all -- GET /api/backlog/agents/heimdall-dev 404s, and a full agent-name scan for 'heimdall' finds only heimdall-dev-codex. Worse than a cosmetic gap: chooseAgentForProject's tie-break always preferred the first lane entry with the lowest inflight load, and a nonexistent agent's inflight count is always 0 (nothing ever successfully assigns to it) -- so heimdall-dev always won the tie-break and every Heimdall dispatch attempt likely failed with assign_error before ever reaching heimdall-dev-codex. Pruned to the one real agent. If an aligned opencode Heimdall lane is created in Multica later, re-add it here once its real id is confirmed live -- never guessed.",
+      "lane": [
+        "heimdall-dev-codex"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "6a21cc72-5ca5-47d2-a791-9db5dce112bb",
+      "name": "Mnemosyne (god)",
+      "notes": "Per-god project for Mnemosyne in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). Mnemosyne god stories route to mnemosyne-dev (aligned) then auriga-build (hive fallback). Confirmed live 2026-08-31.",
+      "lane": [
+        "mnemosyne-dev",
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "23dd7a13-d801-4d68-9886-ed5a86b3ec40",
+      "name": "Janus (god)",
+      "notes": "Per-god project for Janus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). No dedicated Janus agent yet; routes to auriga-build (hive build lane). Confirmed live 2026-08-31.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "0e3d94f1-4846-43b9-90c3-b449d26869d6",
+      "name": "Portunus (god)",
+      "notes": "Per-god project for Portunus in workspace f32af269 (PANT-59, pantheon-repo-tenant-grouping). No dedicated Portunus agent yet; routes to auriga-build (hive build lane). Confirmed live 2026-08-31.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-08-31T23:59:00Z"
+    },
+    {
+      "id": "6327fdaf-789e-4290-ab41-1421957b55c6",
+      "name": "Minerva",
+      "notes": "Dispatch-ineligible today (deliberately absent from dispatch_order above, exactly as it was absent from the hardcoded PROJECT_IDS) but routing-policy-load-bearing: PROJECT_LANE routed it to auriga-dev (no dedicated agent, nearest Codex lane) and that lane assignment is preserved here. Registered so `auriga project scan` doesn't perpetually flag it as wholly undiscovered. Migrated verbatim from config-substrate.mjs's hardcoded PROJECT_LANE by p6-registry-core. NOTE (2026-08-29 audit): like the 4 pruned entries above, this id does not correspond to a real project in the current live workspace (f32af269-...) either -- GET /api/projects returns only 032ea2e7 (Pantheon Core). Left in place, unlike those 4, because it is dispatch-ineligible by design (never routes anything on its own) and exists purely as a documented lane-fallback placeholder, not a claim that a real 'Minerva' project exists.",
+      "lane": [
+        "auriga-dev"
+      ],
+      "registered_at": "2026-08-19T00:00:00Z"
+    },
+    {
+      "id": "767ba977-ea3c-41e8-9d83-e01224f9f0e7",
+      "name": "cleanup-tools",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "23e5c325-eeb6-4046-8a47-88d3d24397da",
+      "name": "compound-content",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "a4184bda-62b1-43d0-b8bf-92a381c36c2d",
+      "name": "dt-forge",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "ef2679c2-0ce5-44c1-9f8b-96ec2bf5dc46",
+      "name": "gigradar",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "a4deca1a-4952-424e-88b5-77ace7b0c71a",
+      "name": "house-finder",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "028628ab-450b-4f79-9930-4aa33210c3bb",
+      "name": "medical-study-tracker",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "2ac935c9-91e6-44e8-baae-81fecf62e38e",
+      "name": "model-forge",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "beac6cd5-0c70-4b7c-97c7-37d2d8cacb96",
+      "name": "rolodex",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "70e8f097-8bfc-4e29-82e6-efc2fa753452",
+      "name": "stock",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "817b5cc4-8d13-4d85-a090-5688bdd8bf00",
+      "name": "video-utils",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "297fad94-ef86-4390-9a13-87195daa77d8",
+      "name": "allergy-locator",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "e2f837d6-4505-40fe-ae61-9237653d3e83",
+      "name": "anonymizer",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "1a45e73e-b760-4b8f-9147-6668cb95ba8a",
+      "name": "approval",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "30cba7db-3c73-4ae4-8222-a32ec59d422f",
+      "name": "Claud-ometer",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "9b919d7c-4c8d-4cdd-9d46-7a849c48b018",
+      "name": "digsite",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "8787e1f9-a123-4060-b8c2-69659f6f81ef",
+      "name": "dostal-meta",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "52cd0e2e-a2dd-4ff8-b6c2-354bf33ae0a3",
+      "name": "dostal-orchestration",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "03faacca-5933-4085-84eb-5634cd1af993",
+      "name": "dostal-swarm",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "22ecd1d9-98f3-4c2b-99d3-36ff89160c42",
+      "name": "drone-hub",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "4ca91395-dac8-453c-93b0-b8163282e241",
+      "name": "mapstack-us",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "31597b3f-3b46-4332-9101-cc7c68fb3c8d",
+      "name": "mdostal-tools-hub",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "1d0d55e9-4043-4438-8583-51a7effbb77c",
+      "name": "plugin-framework",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "52e4b16e-5e51-4256-973f-7130b3283203",
+      "name": "swarm-memory",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "38f0294b-b01e-4fc1-9bb6-632c97edb12c",
+      "name": "command-center",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "e6455a24-ab40-4679-a5b9-2f997d6c2f60",
+      "name": "answer-desk",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "62072e32-b533-4d1e-af71-15721b84e704",
+      "name": "arizona-compound",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "f019921d-0cd5-4368-89dd-67b64094c15e",
+      "name": "business-materials",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "8a072cab-4373-41b2-b940-c17b080268ab",
+      "name": "coin-finder",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "47a63a0b-feca-41dc-80cb-18f74a53b195",
+      "name": "iosDiceRoller",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "f57540d3-2108-49f7-918f-f2a93f82036f",
+      "name": "drone-diy",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "4ba371a9-7823-49ab-a18c-8acb878a596e",
+      "name": "life",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "a408f069-d303-45d7-8189-7620ddb97488",
+      "name": "me-mdostal-com",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "fb2cdbff-8ce6-464d-befb-2a305a3954c5",
+      "name": "mercatus-liber",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "3a4571c4-faa2-4178-ab2b-5962fb042e40",
+      "name": "outreach",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "f7e1c660-e0ae-4f51-9eab-cc678fd59b86",
+      "name": "personal-drone",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "2cbe5f9a-1e11-4db4-9160-71a461ec42a4",
+      "name": "personal-site",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "690ef9a7-ec88-48ab-acc1-ec38f6446a30",
+      "name": "shop-mdostal-com",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "96e2fec0-9b3a-43de-b653-fe5ed5ce9e60",
+      "name": "frontiers-market-test",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "5f46f640-de18-4268-af49-46aaf613f231",
+      "name": "att-site",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "3cb46df5-3b1b-41ed-a61f-dd3775061259",
+      "name": "att-recreation-internal",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    },
+    {
+      "id": "3be2a60e-56a1-4548-aac6-d2cd733b8447",
+      "name": "cadex-legacy",
+      "notes": "Personal/Dostal-Tech repo, batch-onboarded 2026-09-15 per operator's real Consus decisions (pantheon-repo-scope: onboard-everything; pantheon-multica-hierarchy: flat-now). No dedicated agent yet -- routes to auriga-build (hive fallback lane), same pattern as Janus/Portunus above.",
+      "lane": [
+        "auriga-build"
+      ],
+      "registered_at": "2026-09-15T22:15:00Z"
+    }
+  ]
+}

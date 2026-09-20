@@ -1,0 +1,26 @@
+name: t009-issue-status-constants
+title: Extract ISSUE_STATUS constants, collapse a 3x-duplicated terminal-status check
+description: >
+  Third of four agreed workstreams from the 2026-09-05 codebase-wide
+  cleanup discussion. Extracts a new src/router/lib/issue-status.mjs
+  (ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus),
+  replacing every raw issue-status string literal in core.mjs and
+  auriga-router.mjs, and collapsing three hand-copied "is this issue
+  terminal" closures into one shared function. Wider blast radius than
+  originally scoped (auriga-router.mjs had as many occurrences as
+  core.mjs). Also fixes an incidental real YAML-quoting bug found in
+  t008's own story docs during verification.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: patch
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t009-extract-issue-status-constants
+    title: Extract ISSUE_STATUS constants module, apply across core.mjs and auriga-router.mjs
+    complexity: medium
+    depends_on: []

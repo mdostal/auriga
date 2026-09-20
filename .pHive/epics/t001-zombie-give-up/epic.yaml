@@ -1,0 +1,26 @@
+name: t001-zombie-give-up
+title: Bound Auriga's zombie-recovery retries and give up cleanly instead of looping forever
+description: >
+  Fixes GitHub issue #75 (triage t-001): detectZombies re-fires assign/rerun
+  every cycle indefinitely on a stuck issue, never resolving it. Decision:
+  keep zombie detection in Auriga (Hellsing, which the pantheon-v2 docs say
+  should own actuation, has zero runnable code anywhere) but bound the
+  retries and give up cleanly + visibly once the cap is hit, instead of
+  looping forever. Full rationale in docs/design-discussion.md.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: none
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/75"
+source_triage: t-001
+
+stories:
+  - id: t001-zombie-max-attempts-give-up
+    title: Cap zombie-recovery attempts via run count and emit a give-up action
+    complexity: low
+    depends_on: []

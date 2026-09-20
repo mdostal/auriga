@@ -294,8 +294,9 @@ export function postComment(identifier, body) {
   }
 }
 
-// Post a comment onto a Multica issue. Best-effort: a comment failure must never
-// abort a review dispatch.
+// Post a comment onto a Multica issue (used to publish the review-squad plan onto
+// the ticket at dispatch time so it is visible on the board + read by the squad
+// agent). Best-effort: a comment failure must never abort a review dispatch.
 export function issueComment(identifier, body) {
   try {
     return postComment(identifier, body);

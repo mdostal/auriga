@@ -1,0 +1,146 @@
+id: t001-zombie-max-attempts-give-up
+epic: t001-zombie-give-up
+title: Cap zombie-recovery attempts via run count and emit a give-up action
+status: shipped
+complexity: low
+methodology: classic
+depends_on: []
+
+description: |
+  GitHub issue #75 (mdostal/auriga#75, triage t-001). Auriga's
+  `detectZombies` (src/router/lib/core.mjs, ~line 474) detects a stale
+  `in_progress` issue and pushes an `assign`/`rerun` action every single
+  cycle, forever, without ever resolving the underlying stuck task. Live
+  example: PANT-48 stuck 3+ hours, the zombie flag fired every ~2 minutes
+  with `reason: "hive-on-noncapable-lane"` and never recovered it.
+
+  Architectural context (see docs/design-discussion.md for the full
+  reasoning): pantheon-v2's plugins/hellsing/README.md documents that
+  "the dangerous actuation of terminating stuck processes" belongs to a
+  separate god (Hellsing), with Auriga staying "a thin, event-driven
+  state-machine consumer." Hellsing is phase:concept with no runnable code
+  anywhere. DECISION: Auriga keeps bounded zombie-recovery attempts (a
+  stuck story with zero recovery attempts is worse than one Auriga tries a
+  bounded number of times) but must stop retrying UNBOUNDED — that
+  indefinite-retry behavior is the actual scope-creep/malfunction the issue
+  flags, not the recovery attempt itself. Auriga also has no capability to
+  terminate a stuck process (no such SpawnAdapter method exists, and this
+  story does not add one — see src/router/lib/adapters/README.md's
+  no-pre-emptive-integrations rule) — real process termination stays
+  Hellsing's job once it exists.
+
+  Fix: `detectZombies` already receives `runsByIssue` (the issue's run
+  history) as an argument — use its length as a stateless attempt counter
+  (no new persistent state). Add `cfg.CAPS.zombieMaxAttempts` (new config
+  field, default 3) to config.mjs, alongside the existing `zombieStaleMs`.
+  Once an issue's run count reaches that cap, `detectZombies` must emit a
+  `give-up` action instead of `assign`/`rerun` for that issue.
+
+  `auriga-router.mjs`'s zombie-recovery block (~line 479-501) must handle
+  the `give-up` action distinctly: log a `zombie_give_up` event (must never
+  call `spawn.assignIssue`/`spawn.rerunIssue` for that action) and
+  best-effort call `backlog.commentOnIssue(identifier, <clear message>)`
+  wrapped in try/catch (matching this file's existing
+  try/catch-and-continue convention for comment/log side effects — a
+  comment failure must never throw or block the cycle).
+
+acceptance_criteria:
+  - "Given an in_progress stale issue with run count below cfg.CAPS.zombieMaxAttempts, when detectZombies runs, then it still emits assign/rerun exactly as before (no regression on the existing, working recovery path)."
+  - "Given an in_progress stale issue with run count AT OR ABOVE cfg.CAPS.zombieMaxAttempts, when detectZombies runs, then it emits a give-up action instead of assign/rerun for that issue."
+  - "Given a give-up action, when the router processes it, then it does NOT call spawn.assignIssue or spawn.rerunIssue for that issue, DOES log a zombie_give_up event, and best-effort calls backlog.commentOnIssue without letting a comment failure crash the cycle."
+  - "cfg.CAPS.zombieMaxAttempts has a sane default (3) in config.mjs, following the exact placement/style convention of the existing zombieStaleMs field."
+  - "All existing tests for detectZombies and the router's zombie-recovery block still pass unmodified."
+
+steps:
+  - id: implement
+    description: >
+      Add cfg.CAPS.zombieMaxAttempts (default 3) to src/router/lib/config.mjs
+      next to zombieStaleMs. Add the attempt-cap check + give-up action to
+      detectZombies in src/router/lib/core.mjs, with a code comment
+      documenting the Hellsing boundary decision (bounded stopgap now,
+      Hellsing takes over real actuation later — see design-discussion.md).
+      Add the give-up branch to auriga-router.mjs's zombie-recovery block
+      (~line 479-501): log zombie_give_up, best-effort commentOnIssue,
+      never call spawn.assignIssue/rerunIssue for that action.
+    agent: developer
+  - id: test
+    description: >
+      Add test cases: (1) run count below cap -> assign/rerun unchanged
+      (no regression), (2) run count at/above cap -> give-up action emitted
+      instead, in core.test.mjs for detectZombies. Add or extend a
+      router-level test (check what test file already covers the zombie
+      block, likely router-cycle.e2e.test.mjs or similar) confirming a
+      give-up action never triggers spawn.assignIssue/rerunIssue and does
+      call commentOnIssue best-effort. Run the repo's real test command
+      (npm test from repo root) and confirm the FULL suite is green, not
+      just the new cases. Paste the actual output.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t001-zombie-give-up with a clear message
+      referencing GitHub issue #75. Do not open a PR, do not merge, do not
+      push. The orchestrator handles verification, PR, and merge after this
+      story completes.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/core.mjs
+      purpose: "detectZombies (~line 474) — add the run-count attempt cap and give-up action here."
+    - path: src/router/lib/config.mjs
+      purpose: "line 48 has zombieStaleMs: 20 * 60 * 1000 — add zombieMaxAttempts: 3 next to it, same CAPS object."
+    - path: src/router/auriga-router.mjs
+      purpose: "lines ~475-501 — the zombie-recovery dispatch block that must gain a give-up branch."
+    - path: src/router/test/core.test.mjs
+      purpose: existing detectZombies test coverage — new tests should follow the same fixture/style.
+
+code_examples:
+  - title: detectZombies' existing action shape (core.mjs:474-502)
+    file: src/router/lib/core.mjs
+    snippet: |
+      export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now()) {
+        const actions = [];
+        for (const i of inProgressIssues) {
+          if (isSmokeScratch(i.title)) continue;
+          const runs = runsByIssue[i.identifier] || [];
+          if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
+          const lr = latestRun(runs);
+          const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > cfg.CAPS.zombieStaleMs;
+          if (!stale) continue;
+          // ... existing misLaned logic, then pushes { action: 'rerun'|'assign', ... }
+        }
+        return actions;
+      }
+  - title: router's zombie-recovery dispatch (auriga-router.mjs:479-501)
+    file: src/router/auriga-router.mjs
+    snippet: |
+      const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
+      for (const z of zombies) {
+        if (assigned >= maxAssign) break;
+        if (z.action === 'rerun') {
+          logImpl('zombie', { ...z, applied: !dryRun });
+          if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { ... } }
+        } else {
+          // needs (re)routing — route via its lane
+          ...
+        }
+      }
+
+design_decisions:
+  - decision: Use runsByIssue.length as the attempt counter instead of new persistent state.
+    rationale: detectZombies already receives runsByIssue; every assign/rerun creates a new run entry, so it's a natural, stateless, already-available signal — matches this file's existing pure-function style (no external state).
+  - decision: give-up does NOT attempt to terminate the underlying process — only stops re-actuating and leaves a comment.
+    rationale: Auriga has no SpawnAdapter method for process termination and adding one would be a pre-emptive integration ahead of a real consumer (adapters/README.md rule); real termination stays Hellsing's documented job.
+
+risks:
+  - severity: low
+    description: A legitimately slow-but-eventually-successful task could hit the attempt cap and stop being retried before it would have succeeded on a later attempt.
+    mitigation: Default cap of 3 with zombieStaleMs already at 20 minutes means ~60+ minutes of retry budget before giving up — matches the scale of the observed 3+ hour PANT-48 stall this issue reports; still logged/commented, not silently dropped, so a human can manually rerun if needed.
+
+references:
+  - path: src/router/lib/config.mjs
+    relevant_excerpt: |
+      zombieStaleMs: 20 * 60 * 1000, // 20 min

@@ -1,0 +1,71 @@
+id: t013-extract-spawn-dispatch-module
+epic: t013-spawn-dispatch-dedup
+title: Extract shared spawn-dispatch.mjs, wire both adapters to it
+status: shipped
+complexity: small
+methodology: classic
+depends_on: []
+
+description: |
+  multica/spawn.mjs and pantheon-v2-l2/index.mjs each defined dispatch(issue,
+  lane) and describeLanes() as private, byte-identical functions (confirmed
+  by direct side-by-side read, 2026-09-06). pantheon-v2-l2's own header
+  comment already admitted its copy was "a behavior-preserving port of
+  multica/spawn.mjs's own dispatch()" -- an explicit, self-documented
+  duplication.
+
+  assignIssue/rerunIssue/unassignIssue/getIssueRuns are genuinely different
+  per adapter (multica CLI args vs pantheon-v2-l2 HTTP calls) and are
+  correctly left alone -- only dispatch()/describeLanes(), which are 100%
+  transport-agnostic on top of those primitives, are extracted.
+
+acceptance_criteria:
+  - "src/router/lib/adapters/spawn-dispatch.mjs exports makeDispatch({ assignIssue, rerunIssue, getIssueRuns, sleep, verifyDelayMs }) and makeDescribeLanes({ projectLane, defaultLane, hiveLane, reviewLane, runtimeCap })."
+  - "multica/spawn.mjs no longer defines its own dispatch()/describeLanes() bodies -- it calls the shared factories, passing its own assignIssue/rerunIssue/getIssueRuns/sleep/VERIFY_DELAY_MS and lane consts."
+  - "pantheon-v2-l2/index.mjs no longer defines its own dispatch()/describeLanes() bodies -- it calls the shared factories the same way, passing getIssueRunsForVerify as the getIssueRuns dependency."
+  - "spawn-dispatch.mjs imports classifyRun/latestRun from ../run-classification.mjs directly (not via the core.mjs facade), since it is a new leaf module with no existing call-site constraint."
+  - "A new test file exercises makeDispatch/makeDescribeLanes directly against fake dependencies (assign failure short-circuit, started-run no-rerun, no-run force-rerun with caught rerun error, lane map pass-through)."
+  - "All existing tests (spawn-adapter.test.mjs, pantheon-l2-stub.test.mjs, and every other suite) continue to pass unmodified -- zero behavior change."
+
+steps:
+  - id: implement
+    description: >
+      Create src/router/lib/adapters/spawn-dispatch.mjs with makeDispatch and
+      makeDescribeLanes, following github-cli.mjs's dependency-injection
+      convention. Update multica/spawn.mjs and pantheon-v2-l2/index.mjs to
+      call the shared factories instead of defining their own copies.
+    agent: developer
+  - id: test
+    description: >
+      Add src/router/test/spawn-dispatch.test.mjs covering the shared
+      module directly. Run npm run test:all and confirm full green.
+    agent: developer
+    depends_on: [implement]
+  - id: integrate
+    description: >
+      Commit on branch feat/t013-spawn-dispatch-dedup.
+    agent: developer
+    depends_on: [test]
+
+context:
+  codebase: /Users/mdostal/Documents/work/pantheon/auriga
+  key_files:
+    - path: src/router/lib/adapters/spawn-dispatch.mjs
+      purpose: new shared module, single source of truth for dispatch/describeLanes logic.
+    - path: src/router/lib/adapters/github-cli.mjs
+      purpose: the precedent this extraction directly mirrors (t008, same DI convention, same reason).
+    - path: src/router/lib/adapters/multica/spawn.mjs
+      purpose: first consumer.
+    - path: src/router/lib/adapters/pantheon-v2-l2/index.mjs
+      purpose: "second consumer, passes getIssueRunsForVerify as the getIssueRuns dependency."
+
+design_decisions:
+  - decision: Only dispatch()/describeLanes() are extracted, not assignIssue/rerunIssue/unassignIssue/getIssueRuns.
+    rationale: The latter four are genuinely different per adapter (CLI vs HTTP transport) -- sharing them would either force a leaky abstraction or silently paper over a real difference. Only the transport-agnostic orchestration logic on top is duplicated.
+  - decision: spawn-dispatch.mjs imports from ../run-classification.mjs directly, not core.mjs.
+    rationale: t011 already moved classifyRun/latestRun to a dedicated leaf module; a brand-new module has no reason to route through core.mjs's facade re-export (that facade exists only to keep EXISTING call sites unchanged).
+
+risks:
+  - severity: low
+    description: None identified -- pure refactor, no behavior change, both call sites already have full test coverage of dispatch()/describeLanes() through the real adapters.
+    mitigation: Full test:all run (lint + 402 router tests + 52 server tests + e2e) confirmed green before and after.

@@ -249,4 +249,7 @@ pre { margin: 0; }
 @media (max-width: 640px) {
   .topnav-links { display: none; }
   .topnav-gh { display: none; }
+  code { word-break: break-all; }
+  .doc-main { overflow-x: hidden; }
+  .param-table { display: block; overflow-x: auto; }
 }

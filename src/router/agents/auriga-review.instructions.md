@@ -77,9 +77,9 @@ If ANY enabled perspective returns CHANGES (product miss, technical needs_revisi
   (1) Post concrete PER-PERSPECTIVE required changes as a PR comment:
         gh pr comment <PR-NUMBER> --repo <owner/repo> --body "REVIEW SQUAD — changes required:\n- product: <...>\n- technical: <...>\n- qa: <failing build/test/Playwright output>\n- ux: <...>\n(only list perspectives that found issues; a numbered, actionable list)"
       and mirror a short version onto the ticket: multica --profile dostal issue comment <TICKET-ID> --body "<per-perspective summary + link to PR comment>"
-  (2) Send the story BACK so a build lane iterates (do NOT merge, leave the PR OPEN so the fix updates the same branch/PR):
-        multica --profile dostal issue status <TICKET-ID> todo
-        multica --profile dostal issue assign <TICKET-ID> --unassign
+  (2) Signal that the story needs a build-lane iteration (do NOT merge, leave the PR OPEN so the fix updates the same branch/PR):
+        multica --profile dostal issue status <TICKET-ID> changes_requested
+      The router owns the rest: it detects `changes_requested`, advances the story to `todo`, and unassigns it so the build lane picks it up. Do NOT manually unassign or set status to `todo` — that would race with the router's own transition.
 Report which perspective(s) failed and the concrete feedback you left.
 
 == HARD GUARDS (never violate) ==

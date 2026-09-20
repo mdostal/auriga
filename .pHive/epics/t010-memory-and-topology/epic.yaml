@@ -1,0 +1,29 @@
+name: t010-memory-and-topology
+title: Memory adapter (Mnemosyne-backed) + orchestrator topology registry
+description: >
+  Two related additions requested together: (1) a provider-agnostic
+  MemoryAdapter contract with a real Mnemosyne-backed implementation
+  (direct-for-now, mirroring multica/backlog.mjs's own pre-pantheon-v2-l2
+  history) plus CLI recall/remember commands; (2) a pure-data orchestrator
+  topology registry letting one Auriga instance be manually registered as
+  another's parent or child, laying groundwork for the operator's
+  multi-level orchestration vision without building any orchestration/
+  handoff logic itself.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+stories:
+  - id: t010-memory-adapter
+    title: MemoryAdapter contract + Mnemosyne-backed implementation + CLI
+    complexity: medium
+    depends_on: []
+  - id: t010-orchestrator-topology
+    title: Orchestrator topology registry (pure data) + CLI
+    complexity: low
+    depends_on: []

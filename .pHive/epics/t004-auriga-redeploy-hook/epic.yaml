@@ -1,0 +1,25 @@
+name: t004-auriga-redeploy-hook
+title: Add a post-merge redeploy hook so live pantheon-v2 deployments pick up Auriga fixes
+description: >
+  Fixes GitHub issue #78: merges to Auriga's main never reached the live
+  dostal-tech dispatch container because nothing rebuilt it. Adds a
+  standalone-safe post-merge git hook (mirroring pantheon-v2's own proven
+  convention) that redeploys every live auriga* compose service when a
+  merge lands on main inside a real pantheon-v2-nested checkout, plus a
+  documented manual fallback. Zero pantheon-v2-side changes needed.
+target_codebase: /Users/mdostal/Documents/work/pantheon/auriga
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: main
+  branch_strategy: per-epic
+
+source_issue: "https://github.com/mdostal/auriga/issues/78"
+
+stories:
+  - id: t004-post-merge-redeploy-hook
+    title: Standalone-safe post-merge hook that redeploys live auriga* compose services
+    complexity: low
+    depends_on: []
