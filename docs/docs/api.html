@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Auriga Docs — API Reference</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="description" content="Auriga API reference: CLI flags, cycle() options, BacklogAdapter, SpawnAdapter, MemoryAdapter, and MCP server." />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIj48bGluZSB4MT0iMzgiIHkxPSIzMCIgeDI9IjYyIiB5Mj0iMzIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjYyIiB5MT0iMzIiIHgyPSI2NiIgeTI9IjU4IiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxsaW5lIHgxPSI2NiIgeTE9IjU4IiB4Mj0iNTAiIHkyPSI4MiIgc3Ryb2tlPSIjZjNjNjY3IiBzdHJva2Utd2lkdGg9IjQiLz48bGluZSB4MT0iNTAiIHkxPSI4MiIgeDI9IjIyIiB5Mj0iNjIiIHN0cm9rZT0iI2YzYzY2NyIgc3Ryb2tlLXdpZHRoPSI0Ii8+PGxpbmUgeDE9IjIyIiB5MT0iNjIiIHgyPSIzOCIgeTI9IjMwIiBzdHJva2U9IiNmM2M2NjciIHN0cm9rZS13aWR0aD0iNCIvPjxjaXJjbGUgY3g9IjM4IiBjeT0iMzAiIHI9IjgiIGZpbGw9IiNmM2M2NjciLz48Y2lyY2xlIGN4PSI2MiIgY3k9IjMyIiByPSI1LjUiIGZpbGw9IiNlZWYxZmIiLz48Y2lyY2xlIGN4PSI2NiIgY3k9IjU4IiByPSI1IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iNTAiIGN5PSI4MiIgcj0iNS41IiBmaWxsPSIjZWVmMWZiIi8+PGNpcmNsZSBjeD0iMjIiIGN5PSI2MiIgcj0iNSIgZmlsbD0iI2VlZjFmYiIvPjwvc3ZnPg==" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="topnav-inner">
+    <a class="topnav-brand" href="../">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <line x1="38" y1="30" x2="62" y2="32" stroke="#f3c667" stroke-width="4"/>
+        <line x1="62" y1="32" x2="66" y2="58" stroke="#f3c667" stroke-width="4"/>
+        <line x1="66" y1="58" x2="50" y2="82" stroke="#f3c667" stroke-width="4"/>
+        <line x1="50" y1="82" x2="22" y2="62" stroke="#f3c667" stroke-width="4"/>
+        <line x1="22" y1="62" x2="38" y2="30" stroke="#f3c667" stroke-width="4"/>
+        <circle cx="38" cy="30" r="8" fill="#f3c667"/>
+        <circle cx="62" cy="32" r="5.5" fill="#eef1fb"/>
+        <circle cx="66" cy="58" r="5" fill="#eef1fb"/>
+        <circle cx="50" cy="82" r="5.5" fill="#eef1fb"/>
+        <circle cx="22" cy="62" r="5" fill="#eef1fb"/>
+      </svg>
+      Auriga
+    </a>
+    <div class="topnav-links">
+      <a href="index.html">Overview</a>
+      <a href="concepts.html">Concepts</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="configuration.html">Configuration</a>
+      <a href="api.html" class="active">API Reference</a>
+      <a href="guides.html">Guides</a>
+    </div>
+    <a class="topnav-gh" href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub ↗</a>
+  </div>
+</nav>
+
+<div class="doc-layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-section">
+      <span class="sidebar-label">API Reference</span>
+      <ul class="sidebar-nav">
+        <li><a href="#cli-flags" class="current">CLI flags</a></li>
+        <li><a href="#subcommands">CLI subcommands</a></li>
+        <li><a href="#cycle-api">cycle() API</a></li>
+        <li><a href="#backlog-adapter">BacklogAdapter</a></li>
+        <li><a href="#spawn-adapter">SpawnAdapter</a></li>
+        <li><a href="#memory-adapter">MemoryAdapter</a></li>
+        <li><a href="#mcp-server">MCP server</a></li>
+      </ul>
+    </div>
+    <div class="sidebar-section">
+      <span class="sidebar-label">Other sections</span>
+      <ul class="sidebar-nav">
+        <li><a href="concepts.html">Concepts</a></li>
+        <li><a href="architecture.html">Architecture</a></li>
+        <li><a href="configuration.html">Configuration</a></li>
+        <li><a href="guides.html">Guides</a></li>
+      </ul>
+    </div>
+  </aside>
+
+  <main class="doc-main">
+
+    <header class="doc-header">
+      <p class="doc-eyebrow">API Reference</p>
+      <h1>Interface reference</h1>
+      <p class="doc-intro">CLI flags, the <code>cycle()</code> options bag, the three adapter interfaces, and the MCP server — everything you need to drive, test, or extend Auriga.</p>
+    </header>
+
+    <!-- CLI FLAGS -->
+    <section class="doc-section" id="cli-flags">
+      <h2>CLI flags</h2>
+      <p class="prose">Pass flags to <code>auriga-router.mjs</code> (or via <code>npm run ...</code> scripts in <code>src/router/</code>):</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead>
+          <tr><th>Flag</th><th>Type</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">--once</td>
+            <td class="type">boolean</td>
+            <td>Run exactly one cycle then exit. No sleep, no loop. Equivalent to <code>npm run once</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">--dry-run</td>
+            <td class="type">boolean</td>
+            <td>Compute and log all dispatch decisions without executing any assignments. No board mutations. Equivalent to <code>npm run dry</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">--max-assign N</td>
+            <td class="type">number</td>
+            <td>Override <code>CAPS.perCycleTotal</code> for this run. Maximum N total dispatches this cycle.</td>
+          </tr>
+          <tr>
+            <td class="name">--no-zombie</td>
+            <td class="type">boolean</td>
+            <td>Skip the zombie recovery pass this cycle. Useful for debugging dispatch logic without the zombie pass interfering.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre class="code-block"><span class="c"># Convenience scripts in src/router/package.json</span>
+npm run once          <span class="c"># node auriga-router.mjs --once</span>
+npm run dry           <span class="c"># node auriga-router.mjs --once --dry-run</span>
+npm test              <span class="c"># node --test test/*.test.mjs</span></pre>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- SUBCOMMANDS -->
+    <section class="doc-section" id="subcommands">
+      <h2>CLI subcommands</h2>
+      <p class="prose">The <code>auriga</code> CLI (at <code>src/router/bin/auriga.mjs</code>) provides subcommands for memory and agent integration:</p>
+
+      <h3>auriga memory</h3>
+      <pre class="code-block">auriga memory recall  --scope &lt;scope&gt; --query &lt;text&gt;
+auriga memory remember --scope &lt;scope&gt; --content &lt;text&gt;</pre>
+
+      <p class="prose" style="margin-top:10px">Recall or remember context via the configured MemoryAdapter. The <code>--scope</code> is a namespace string (e.g. a project ID or agent name). Use <code>AURIGA_MEMORY_ADAPTER=stub</code> to use the in-memory stub without a live Mnemosyne instance.</p>
+
+      <h3>auriga agent</h3>
+      <pre class="code-block">auriga agent init    <span class="c"># detect and wire up Claude Code / Codex MCP server</span>
+auriga agent status  <span class="c"># show which agents are registered</span></pre>
+
+      <p class="prose" style="margin-top:10px">Registers Auriga's read-only MCP server with the agent CLI(s) found on the machine. Idempotent — safe to re-run. See <a href="#mcp-server">MCP server</a> below.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- CYCLE API -->
+    <section class="doc-section" id="cycle-api">
+      <h2>cycle() options bag</h2>
+      <p class="prose"><code>cycle(opts)</code> is exported from <code>auriga-router.mjs</code> and is the primary integration point for tests. All dependencies default to their live production singletons, so passing no options is equivalent to running a real production cycle.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead>
+          <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="name">backlog</td>
+            <td class="type">BacklogAdapter</td>
+            <td class="default">createMulticaBacklogAdapter()</td>
+            <td>Board read/write adapter. Pass a stub for tests.</td>
+          </tr>
+          <tr>
+            <td class="name">spawn</td>
+            <td class="type">SpawnAdapter</td>
+            <td class="default">createMulticaSpawnAdapter()</td>
+            <td>Agent dispatch adapter. Pass a stub for tests.</td>
+          </tr>
+          <tr>
+            <td class="name">cfg</td>
+            <td class="type">object</td>
+            <td class="default">imported config</td>
+            <td>Full config object (CAPS, AGENTS, lane maps, etc.).</td>
+          </tr>
+          <tr>
+            <td class="name">core</td>
+            <td class="type">object</td>
+            <td class="default">imported core</td>
+            <td>Decision logic module. Rarely overridden — only for testing core module itself.</td>
+          </tr>
+          <tr>
+            <td class="name">log</td>
+            <td class="type">function</td>
+            <td class="default">console.log</td>
+            <td>Logging function. Captures log output in tests.</td>
+          </tr>
+          <tr>
+            <td class="name">sleep</td>
+            <td class="type">function(ms)</td>
+            <td class="default">real sleep</td>
+            <td>Async sleep. Pass <code>async () => {}</code> in tests to skip waits.</td>
+          </tr>
+          <tr>
+            <td class="name">dryRun</td>
+            <td class="type">boolean</td>
+            <td class="default">false</td>
+            <td>If true, compute decisions but execute no mutations.</td>
+          </tr>
+          <tr>
+            <td class="name">noZombie</td>
+            <td class="type">boolean</td>
+            <td class="default">false</td>
+            <td>If true, skip the zombie recovery pass.</td>
+          </tr>
+          <tr>
+            <td class="name">maxAssign</td>
+            <td class="type">number</td>
+            <td class="default">CAPS.perCycleTotal</td>
+            <td>Max total dispatches this cycle.</td>
+          </tr>
+          <tr>
+            <td class="name">now</td>
+            <td class="type">number (ms)</td>
+            <td class="default">Date.now()</td>
+            <td>Current timestamp. Override in tests for deterministic zombie detection.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre class="code-block"><span class="c">// Example: drive cycle() in a test</span>
+import { cycle } from '../auriga-router.mjs';
+import { createStubBacklogAdapter } from '../lib/adapters/stub/backlog.mjs';
+import { createStubSpawnAdapter } from '../lib/adapters/stub/spawn.mjs';
+
+const backlog = createStubBacklogAdapter({ issues: [...] });
+const spawn   = createStubSpawnAdapter();
+await cycle({ backlog, spawn, sleep: async () => {}, now: Date.now() });
+assert.deepEqual(spawn.calls, [{ op: 'assign', issueId: 'X', agentId: 'Y' }]);</pre>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- BACKLOG ADAPTER -->
+    <section class="doc-section" id="backlog-adapter">
+      <h2>BacklogAdapter</h2>
+      <p class="prose">JSDoc typedef in <code>lib/adapters/backlog-adapter.mjs</code>. All methods are synchronous — they return plain values, never Promises.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead><tr><th>Method</th><th>Returns</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">listIssues(projectIds, statuses)</td>
+            <td class="type">Issue[]</td>
+            <td>List issues across the given projects with the given status values.</td>
+          </tr>
+          <tr>
+            <td class="name">getIssueRuns(issueId)</td>
+            <td class="type">Run[]</td>
+            <td>Get all runs for an issue, ordered most-recent first.</td>
+          </tr>
+          <tr>
+            <td class="name">getIssuePullRequests(issueId)</td>
+            <td class="type">PR[]</td>
+            <td>Get all pull requests linked to an issue.</td>
+          </tr>
+          <tr>
+            <td class="name">setIssueStatus(issueId, status)</td>
+            <td class="type">void</td>
+            <td>Set an issue's status. <code>status</code> is one of: <code>todo</code>, <code>in_progress</code>, <code>in_review</code>, <code>done</code>, <code>blocked</code>.</td>
+          </tr>
+          <tr>
+            <td class="name">assignIssue(issueId, agentId)</td>
+            <td class="type">void</td>
+            <td>Assign an issue to an agent.</td>
+          </tr>
+          <tr>
+            <td class="name">commentOnIssue(issueId, body)</td>
+            <td class="type">void</td>
+            <td>Post a comment on an issue.</td>
+          </tr>
+          <tr>
+            <td class="name">getIssue(issueId)</td>
+            <td class="type">Issue</td>
+            <td>Fetch a single issue by ID.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- SPAWN ADAPTER -->
+    <section class="doc-section" id="spawn-adapter">
+      <h2>SpawnAdapter</h2>
+      <p class="prose">JSDoc typedef in <code>lib/adapters/spawn-adapter.mjs</code>. All methods are synchronous.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead><tr><th>Method</th><th>Returns</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">assignAndRun(issueId, agentId, lane)</td>
+            <td class="type">RunResult</td>
+            <td>Assign an issue to an agent and trigger a run in the given lane. Returns enough information to verify a run started.</td>
+          </tr>
+          <tr>
+            <td class="name">rerun(issueId, agentId, lane)</td>
+            <td class="type">RunResult</td>
+            <td>Re-trigger a run for an already-assigned issue (used in zombie recovery).</td>
+          </tr>
+          <tr>
+            <td class="name">unassign(issueId)</td>
+            <td class="type">void</td>
+            <td>Remove an agent assignment from an issue.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-note">
+        <p class="callout-title">No provisioning hooks</p>
+        <p>SpawnAdapter deliberately has no provisioning method, hook, or middleware slot. Auriga must never pre-build concepts for tools it doesn't have a real story for. If a future story needs provisioning, add the method then.</p>
+      </div>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- MEMORY ADAPTER -->
+    <section class="doc-section" id="memory-adapter">
+      <h2>MemoryAdapter</h2>
+      <p class="prose">JSDoc typedef in <code>lib/adapters/memory-adapter.mjs</code>. Unlike the other two adapters, MemoryAdapter is <strong>async</strong> — Mnemosyne's transport is genuinely asynchronous over HTTP.</p>
+
+      <table class="param-table" style="margin-top:20px">
+        <thead><tr><th>Method</th><th>Returns</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">recall(scope, query)</td>
+            <td class="type">Promise&lt;string[]&gt;</td>
+            <td>Recall context entries matching <code>query</code> within <code>scope</code>. Semantic search via Mnemosyne.</td>
+          </tr>
+          <tr>
+            <td class="name">remember(scope, content)</td>
+            <td class="type">Promise&lt;void&gt;</td>
+            <td>Store a context entry under <code>scope</code> in Mnemosyne.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p class="prose" style="margin-top:16px">The stub implementation (<code>stub/memory.mjs</code>) uses simple substring matching rather than semantic search — sufficient for testing the recall/remember round-trip in isolation.</p>
+    </section>
+
+    <hr class="doc-divider" />
+
+    <!-- MCP SERVER -->
+    <section class="doc-section" id="mcp-server">
+      <h2>MCP server</h2>
+      <p class="prose">Auriga ships a read-only MCP (Model Context Protocol) server at <code>src/router/lib/mcp/server.mjs</code>. Once registered with an AI agent CLI, the agent can query Auriga's board state directly without the operator dashboard.</p>
+
+      <h3>Setup</h3>
+      <pre class="code-block"><span class="c"># One-command install + MCP registration</span>
+curl -fsSL https://mdostal.github.io/auriga/install.sh | bash
+
+<span class="c"># Or manually after cloning:</span>
+auriga agent init     <span class="c"># detects Claude Code / Codex, registers MCP server</span>
+auriga agent status   <span class="c"># verify registration</span></pre>
+
+      <h3>Available MCP tools</h3>
+      <table class="param-table">
+        <thead><tr><th>Tool</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="name">auriga_list_epics</td>
+            <td>List all epics and their story counts.</td>
+          </tr>
+          <tr>
+            <td class="name">auriga_list_stories</td>
+            <td>List stories in an epic with status and metadata.</td>
+          </tr>
+          <tr>
+            <td class="name">auriga_get_story</td>
+            <td>Get full detail for a single story including acceptance criteria and risks.</td>
+          </tr>
+          <tr>
+            <td class="name">auriga_list_activity</td>
+            <td>List recent audit records and commits from <code>.pHive/</code> state.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-tip">
+        <p class="callout-title">Read-only</p>
+        <p>The MCP server exposes only read operations — it is a window onto Auriga's planning state, not a control channel. No board mutations can be triggered through MCP.</p>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer class="doc-footer">
+  <span>Auriga · Pantheon Router</span>
+  <span>
+    <a href="../">Project page</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/mdostal/auriga" target="_blank" rel="noopener">GitHub</a>
+  </span>
+</footer>
+
+</body>
+</html>
