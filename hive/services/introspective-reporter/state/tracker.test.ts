@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { StateTracker } from "./tracker.js";
+import { StateTracker } from "./tracker.ts";
 
 describe("StateTracker", () => {
   let tempDir: string;
