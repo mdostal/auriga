@@ -59,7 +59,20 @@ import { loadExternalConfig } from './lib/config-loader.mjs';
 // reading, status transitions, or initial dispatch -- only later-lifecycle
 // PR-verification steps, which tonight's freshly-filed board items don't
 // reach yet.
-const defaultBacklog = createPantheonV2L2BacklogAdapter();
+//
+// PANT-260: read here (ahead of defaultBacklog/defaultSpawn below, which need
+// it) rather than down by INSTANCE_ID/PIDFILE/etc. This WAS already being read
+// from AURIGA_TENANT_ID (and shows up in this instance's own startup/cycle
+// logs, see log() further down) but was never actually forwarded to the
+// Pantheon-facing adapters that make the real HTTP calls -- so a tenant-scoped
+// instance silently scanned/mutated Pantheon's own default board instead of
+// its own tenant's. Passed straight through to both factories' `tenantId`
+// option (see lib/adapters/pantheon-v2-l2/index.mjs's withTenant()), which
+// appends `?tenant_id=<id>` to every backlog-route call when set, and is a
+// no-op (byte-identical URLs) when TENANT_ID is null -- exactly the top-level,
+// non-tenant-scoped instance's existing behavior.
+const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
+const defaultBacklog = createPantheonV2L2BacklogAdapter({ tenantId: TENANT_ID });
 const defaultSpawn = createPantheonV2L2SpawnAdapter({
   verifyDelayMs: cfg.CAPS.verifyDelayMs,
   projectLane: cfg.PROJECT_LANE,
@@ -67,6 +80,7 @@ const defaultSpawn = createPantheonV2L2SpawnAdapter({
   hiveLane: cfg.HIVE_LANE,
   reviewLane: cfg.REVIEW_LANE,
   runtimeCap: cfg.RUNTIME_CAP,
+  tenantId: TENANT_ID,
 });
 
 const args = process.argv.slice(2);
@@ -81,7 +95,8 @@ const MAX_ASSIGN = parseInt(val('--max-assign', '0'), 10) || Infinity;
 const PIDFILE = process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
 const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
 const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
-const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
+// (TENANT_ID is declared above, ahead of defaultBacklog/defaultSpawn — see
+// that declaration's own PANT-260 comment.)
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);

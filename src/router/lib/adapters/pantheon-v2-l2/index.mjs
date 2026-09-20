@@ -59,6 +59,34 @@ import {
 const DEFAULT_BASE_URL = 'http://core-api:3012';
 const DEFAULT_VERIFY_DELAY_MS = 6000;
 
+// PANT-260 (consumer-side half; core-api's own route-level support landed in
+// mdostal/pantheon-v2#214): every /api/backlog/* route now accepts an optional
+// `tenant_id` querystring -- when supplied, core-api resolves THAT tenant's own
+// Multica workspace/credentials instead of falling back to Pantheon's own
+// default board. AURIGA_TENANT_ID *was* already being read into this process's
+// config (auriga-router.mjs's own TENANT_ID const, confirmed live in this
+// instance's startup log), but it was never actually forwarded on any real
+// HTTP call this adapter makes -- so a tenant-scoped Auriga instance silently
+// scanned/mutated Pantheon's own default board instead of its own tenant's.
+// This appends `tenant_id=<id>` to every backlog-route URL when this adapter
+// instance is constructed with one, and is a complete no-op (byte-identical
+// URLs, confirmed by this file's own pre-existing test suite) when it isn't --
+// exactly matching the top-level, non-tenant-scoped Auriga instance's existing
+// behavior.
+//
+// NOT applied to GET /api/backlog/agents/:name (resolveAgentId, below): that
+// route deliberately has no tenant_id querystring support at all yet (see
+// pantheon-v2's core/api/backlog.ts -- defaultAgentResolver's own doc comment
+// explicitly scopes PANT-260 to the issue/board routes only, leaving
+// tenant-aware agent-name resolution as a separate, not-yet-built story).
+// Appending it there would be inert today, but forwarding a param a route
+// doesn't support yet risks masking that gap instead of surfacing it.
+function withTenant(path, tenantId) {
+  if (!tenantId) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return `${path}${sep}tenant_id=${encodeURIComponent(tenantId)}`;
+}
+
 // Real synchronous sleep — ported verbatim from multica/spawn.mjs (same
 // Atomics.wait-on-a-throwaway-SharedArrayBuffer trick; see that file's own
 // comment for why this is safe on Node's main thread).
@@ -98,6 +126,7 @@ function toRawIssue(issue) {
  * @param {{
  *   baseUrl?: string, exec?: Function,
  *   reviewRepoOwner?: string, reviewSearchRepos?: string[], project?: string,
+ *   tenantId?: string,
  * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
@@ -107,12 +136,16 @@ function toRawIssue(issue) {
  *   project is createIssue's default target project (t015) -- lets a caller
  *   stand up a whole adapter instance pointed at a specific board+project
  *   (e.g. a hand-up target) without repeating the project on every createIssue
- *   call.
+ *   call. tenantId (PANT-260), when set, is forwarded as `?tenant_id=` on every
+ *   backlog-route call this adapter makes (see withTenant() above) -- defaults
+ *   to unset (undefined), matching every pre-existing caller/test's expectation
+ *   of byte-identical, tenant_id-less URLs.
  * @returns {import('../backlog-adapter.mjs').BacklogAdapter}
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
+  const TENANT_ID = cfg.tenantId || null;
 
   const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
   const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
@@ -134,7 +167,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // BacklogAdapter typedef contract, so implemented for real rather than
   // left throwing.
   function listIssues(projectId) {
-    const res = run('GET', `/api/backlog/issues?project=${encodeURIComponent(projectId)}`);
+    const res = run('GET', withTenant(`/api/backlog/issues?project=${encodeURIComponent(projectId)}`, TENANT_ID));
     return ((res && res.issues) || []).map(toRawIssue);
   }
 
@@ -160,7 +193,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // (core/api/backlog.ts's GET /api/backlog/issues already paginates
   // internally via MulticaBoardAdapter.list()).
   function listAllIssues(_scanIds) {
-    const res = run('GET', '/api/backlog/issues');
+    const res = run('GET', withTenant('/api/backlog/issues', TENANT_ID));
     return ((res && res.issues) || []).map(toRawIssue);
   }
 
@@ -168,7 +201,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // multica-direct adapter's own established convention for this method.
   function getIssueRuns(identifier) {
     try {
-      const res = run('GET', `/api/backlog/issues/${encodeURIComponent(identifier)}/runs`);
+      const res = run('GET', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/runs`, TENANT_ID));
       return (res && res.runs) || [];
     } catch (e) {
       process.stderr.write(`pantheon-v2-l2: getIssueRuns(${identifier}) failed: ${e.message}\n`);
@@ -184,7 +217,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // integration. Degrades gracefully on failure, matching the old adapter.
   function getIssuePullRequests(identifier) {
     try {
-      const res = run('GET', `/api/backlog/issues/${encodeURIComponent(identifier)}/pull-requests`);
+      const res = run('GET', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/pull-requests`, TENANT_ID));
       return (res && res.pull_requests) || [];
     } catch (e) {
       process.stderr.write(`pantheon-v2-l2: getIssuePullRequests(${identifier}) failed: ${e.message}\n`);
@@ -196,7 +229,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // matches the multica-direct adapter's own convention; auriga-router.mjs's
   // call sites already wrap this in their own try/catch.
   function setIssueStatus(identifier, status) {
-    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/status`, { status });
+    return run('POST', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/status`, TENANT_ID), { status });
   }
 
   // Best-effort: degrades gracefully (returns null on failure) — matches
@@ -204,7 +237,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // never abort a review dispatch.
   function commentOnIssue(identifier, body) {
     try {
-      return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/comments`, {
+      return run('POST', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/comments`, TENANT_ID), {
         body,
         author: 'auriga',
       });
@@ -230,7 +263,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // overrides it per-call when the caller targets a different project on
   // the same board.
   function createIssue(ticket = {}) {
-    const res = run('POST', '/api/backlog/issues', {
+    const res = run('POST', withTenant('/api/backlog/issues', TENANT_ID), {
       title: ticket.title,
       description: ticket.description,
       status: ticket.status,
@@ -267,8 +300,13 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
  *   baseUrl?: string, exec?: Function,
  *   verifyDelayMs?: number, sleep?: (ms: number) => void,
  *   projectLane?: object, defaultLane?: string[], hiveLane?: string[],
- *   reviewLane?: string[], runtimeCap?: object,
+ *   reviewLane?: string[], runtimeCap?: object, tenantId?: string,
  * }} [cfg]
+ *   tenantId (PANT-260), when set, is forwarded as `?tenant_id=` on every
+ *   backlog-route call this adapter makes (assign/rerun/unassign) -- see
+ *   withTenant() above. NOT forwarded on resolveAgentId's own GET
+ *   /api/backlog/agents/:name call (see that function's comment): core-api
+ *   doesn't support tenant_id on that route yet.
  * @returns {import('../spawn-adapter.mjs').SpawnAdapter}
  */
 export function createPantheonV2L2SpawnAdapter(cfg = {}) {
@@ -276,6 +314,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL);
   const VERIFY_DELAY_MS = cfg.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS;
   const sleep = cfg.sleep || sleepSync;
+  const TENANT_ID = cfg.tenantId || null;
 
   // Lane config is pure Auriga-side static config (lib/config-substrate.mjs)
   // — zero Multica/Pantheon dependency, so it's carried over unchanged from
@@ -295,6 +334,9 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // scoped so this adapter never needs to learn a Multica workspace id or
   // agent uuid on its own; it only ever hands over a name it already has.
   function resolveAgentId(agentName) {
+    // Deliberately NOT withTenant()'d -- see this file's module-level
+    // withTenant() comment and this function's own factory-level jsdoc: this
+    // route has no tenant_id querystring support in core-api yet.
     const res = run('GET', `/api/backlog/agents/${encodeURIComponent(agentName)}`);
     if (!res || !res.id) {
       throw new Error(`pantheon-v2-l2: no agent named "${agentName}"`);
@@ -306,7 +348,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // matches the multica-direct adapter's own convention.
   function assignIssue(identifier, agentName) {
     const agentId = resolveAgentId(agentName);
-    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/assign`, {
+    return run('POST', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/assign`, TENANT_ID), {
       type: 'agent',
       id: agentId,
     });
@@ -315,7 +357,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // WRITE method: propagates any failure to the caller — matches the
   // multica-direct adapter's own convention.
   function rerunIssue(identifier) {
-    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/rerun`);
+    return run('POST', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/rerun`, TENANT_ID));
   }
 
   // WRITE method: propagates any failure to the caller — matches the
@@ -323,7 +365,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // auto-unblock pass so a freshly-unblocked story re-enters build routing
   // as an UNASSIGNED candidate.
   function unassignIssue(identifier) {
-    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/unassign`);
+    return run('POST', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/unassign`, TENANT_ID));
   }
 
   // Private: run history for one issue, used only by dispatch()'s verify
@@ -332,7 +374,7 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // the multica-direct adapter's own convention.
   function getIssueRunsForVerify(identifier) {
     try {
-      const res = run('GET', `/api/backlog/issues/${encodeURIComponent(identifier)}/runs`);
+      const res = run('GET', withTenant(`/api/backlog/issues/${encodeURIComponent(identifier)}/runs`, TENANT_ID));
       return (res && res.runs) || [];
     } catch (e) {
       process.stderr.write(`pantheon-v2-l2: getIssueRuns(${identifier}) failed: ${e.message}\n`);

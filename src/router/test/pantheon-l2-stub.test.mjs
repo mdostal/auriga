@@ -313,6 +313,106 @@ test('createIssue() falls back to cfg.project as the default target when ticket.
   assert.equal(calls[0].body.project, 'default-project-id');
 });
 
+// ---- PANT-260: tenant_id forwarding -----------------------------------------------------
+// A tenant-scoped Auriga instance (AURIGA_TENANT_ID set) must forward `?tenant_id=<id>` on
+// EVERY real backlog-route call this adapter makes, so core-api resolves that tenant's own
+// Multica workspace (mdostal/pantheon-v2#214) instead of silently falling back to Pantheon's
+// own default board -- the real, live-confirmed bug this closes. A non-tenant-scoped instance
+// (no tenantId cfg) must be completely unaffected -- see every test above, none of which pass
+// tenantId and all of which assert byte-identical, tenant_id-less URLs.
+
+test('listIssues() appends ?tenant_id= after the existing ?project= query when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { issues: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events' });
+
+  backlog.listIssues('proj-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues?project=proj-1&tenant_id=firefly-events`);
+});
+
+test('listAllIssues() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { issues: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events' });
+
+  backlog.listAllIssues(['ignored']);
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues?tenant_id=firefly-events`);
+});
+
+test('listAllIssues() does NOT append tenant_id when no tenantId is configured (unchanged, byte-identical URL)', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { issues: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  backlog.listAllIssues(['ignored']);
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues`);
+});
+
+test('getIssueRuns() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { runs: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  backlog.getIssueRuns('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/runs?tenant_id=dostal-tech`);
+});
+
+test('getIssuePullRequests() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { pull_requests: [] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  backlog.getIssuePullRequests('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/pull-requests?tenant_id=dostal-tech`);
+});
+
+test('setIssueStatus() appends ?tenant_id= when tenantId is configured, body unaffected', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  backlog.setIssueStatus('PAN-1', 'in_review');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/status?tenant_id=dostal-tech`);
+  assert.deepEqual(calls[0].body, { status: 'in_review' });
+});
+
+test('setIssueStatus() does NOT append tenant_id when no tenantId is configured (unchanged, byte-identical URL)', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  backlog.setIssueStatus('PAN-1', 'in_review');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/status`);
+});
+
+test('commentOnIssue() appends ?tenant_id= when tenantId is configured, body unaffected', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 201, body: { id: 'c1' } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  backlog.commentOnIssue('PAN-1', 'hello');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/comments?tenant_id=dostal-tech`);
+  assert.deepEqual(calls[0].body, { body: 'hello', author: 'auriga' });
+});
+
+test('createIssue() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 201, body: rawBoardIssue({ identifier: 'PAN-101' }) }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  backlog.createIssue({ title: 'Handed up' });
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues?tenant_id=dostal-tech`);
+});
+
 // ---- SpawnAdapter ----------------------------------------------------------------------
 
 test('describeLanes(): unchanged from the multica-direct adapter -- zero Pantheon dependency', async (t) => {
@@ -394,6 +494,95 @@ test('unassignIssue() POSTs to the unassign route and propagates a failure', asy
   spawn.unassignIssue('PAN-1');
 
   assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/unassign`);
+});
+
+// ---- PANT-260: tenant_id forwarding (SpawnAdapter) --------------------------------------
+
+test('assignIssue() appends ?tenant_id= on the /assign call, but NOT on the agent-name-resolution call (core-api does not support tenant_id on /api/backlog/agents/:name)', async (t) => {
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.includes('/api/backlog/agents/')) return { status: 200, body: { name: 'auriga-dev', id: 'agent-uuid-9' } };
+    return { status: 204 };
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events' });
+
+  spawn.assignIssue('PAN-1', 'auriga-dev');
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/agents/auriga-dev`, 'agent resolution: unaffected, no tenant_id support on this route');
+  assert.equal(calls[1].url, `${BASE_URL}/api/backlog/issues/PAN-1/assign?tenant_id=firefly-events`);
+  assert.deepEqual(calls[1].body, { type: 'agent', id: 'agent-uuid-9' });
+});
+
+test('assignIssue() does NOT append tenant_id anywhere when no tenantId is configured (unchanged, byte-identical URLs)', async (t) => {
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.includes('/api/backlog/agents/')) return { status: 200, body: { name: 'auriga-dev', id: 'agent-uuid-9' } };
+    return { status: 204 };
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.assignIssue('PAN-1', 'auriga-dev');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/agents/auriga-dev`);
+  assert.equal(calls[1].url, `${BASE_URL}/api/backlog/issues/PAN-1/assign`);
+});
+
+test('rerunIssue() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  spawn.rerunIssue('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/rerun?tenant_id=dostal-tech`);
+  assert.equal(calls[0].body, undefined);
+});
+
+test('rerunIssue() does NOT append tenant_id when no tenantId is configured (unchanged, byte-identical URL)', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.rerunIssue('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/rerun`);
+});
+
+test('unassignIssue() appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, tenantId: 'dostal-tech' });
+
+  spawn.unassignIssue('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/unassign?tenant_id=dostal-tech`);
+});
+
+test('unassignIssue() does NOT append tenant_id when no tenantId is configured (unchanged, byte-identical URL)', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.unassignIssue('PAN-1');
+
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/unassign`);
+});
+
+test('dispatch(): the verify-step run-history GET also appends ?tenant_id= when tenantId is configured', async (t) => {
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.includes('/api/backlog/agents/')) return { status: 200, body: { id: 'agent-uuid-1' } };
+    if (url.endsWith('/assign?tenant_id=firefly-events')) return { status: 204 };
+    if (url.includes('/runs?tenant_id=firefly-events')) return { status: 200, body: { runs: [{ id: 'run-1', status: 'running' }] } };
+    throw new Error('unexpected url: ' + url);
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, sleep: () => {}, tenantId: 'firefly-events' });
+
+  const result = spawn.dispatch({ identifier: 'PAN-1' }, 'auriga-dev');
+
+  assert.equal(result.assigned, true);
+  assert.ok(calls.some((c) => c.url.includes('/runs?tenant_id=firefly-events')));
 });
 
 test('dispatch(): a run that started within the verify delay does NOT force-rerun', async (t) => {
