@@ -33,15 +33,17 @@ type SqliteDatabase = Database.Database;
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 
 export class StateTracker {
+  private readonly databasePath: string;
   private readonly logger: Pick<Console, "debug" | "warn">;
   private readonly busyTimeoutMs: number;
   private readonly enableWal: boolean;
   private db: SqliteDatabase | null = null;
 
   constructor(
-    private readonly databasePath: string,
+    databasePath: string,
     options: StateTrackerOptions = {},
   ) {
+    this.databasePath = databasePath;
     this.logger = options.logger ?? console;
     this.busyTimeoutMs = Math.max(
       0,
