@@ -457,3 +457,77 @@ test('createPantheonV2L2SpawnAdapter(): has no provision/createEnvironment/boots
   assert.equal(spawn.createEnvironment, undefined);
   assert.equal(spawn.bootstrap, undefined);
 });
+
+// ---- tenant_id pass-through (PANT-260) ----
+// Verifies that both adapters append ?tenant_id=<AURIGA_TENANT_ID> to every request URL
+// when the env var is set, routing board calls to the right per-tenant workspace in core-api.
+
+test('BacklogAdapter with cfg.tenantId appends ?tenant_id= to every request URL', async (t) => {
+  const seenUrls = [];
+  t.mock.module('node:child_process', {
+    exports: {
+      execFileSync: (_cmd, args) => {
+        const xIdx = args.indexOf('-X');
+        seenUrls.push(args[xIdx + 2]);
+        return `${JSON.stringify({ issues: [] })}\n200`;
+      },
+    },
+  });
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events' });
+
+  backlog.listAllIssues([]);
+
+  assert.ok(seenUrls.length > 0, 'expected at least one URL');
+  for (const url of seenUrls) {
+    assert.ok(url.includes('tenant_id=firefly-events'), `expected ?tenant_id= in URL, got ${url}`);
+  }
+});
+
+test('SpawnAdapter with cfg.tenantId appends ?tenant_id= to agent-resolve and assign URLs', async (t) => {
+  const seenUrls = [];
+  t.mock.module('node:child_process', {
+    exports: {
+      execFileSync: (_cmd, args) => {
+        const xIdx = args.indexOf('-X');
+        const url = args[xIdx + 2];
+        seenUrls.push(url);
+        if (url.includes('/api/backlog/agents/')) return `${JSON.stringify({ id: 'agent-uuid-1' })}\n200`;
+        if (url.includes('/assign')) return '\n204';
+        if (url.includes('/runs')) return `${JSON.stringify({ runs: [{ id: 'r1', startedAt: 'now' }] })}\n200`;
+        return '\n204';
+      },
+    },
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, tenantId: 'firefly-events', sleep: () => {} });
+
+  spawn.assignIssue('PAN-1', 'auriga-dev');
+
+  assert.ok(seenUrls.length > 0, 'expected at least one URL');
+  for (const url of seenUrls) {
+    assert.ok(url.includes('tenant_id=firefly-events'), `expected ?tenant_id= in URL, got ${url}`);
+  }
+});
+
+test('BacklogAdapter without tenantId (no AURIGA_TENANT_ID) sends plain URLs with no ?tenant_id=', async (t) => {
+  const seenUrls = [];
+  t.mock.module('node:child_process', {
+    exports: {
+      execFileSync: (_cmd, args) => {
+        const xIdx = args.indexOf('-X');
+        seenUrls.push(args[xIdx + 2]);
+        return `${JSON.stringify({ issues: [] })}\n200`;
+      },
+    },
+  });
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  backlog.listAllIssues([]);
+
+  assert.ok(seenUrls.length > 0, 'expected at least one URL');
+  for (const url of seenUrls) {
+    assert.ok(!url.includes('tenant_id='), `expected NO ?tenant_id= in URL without cfg.tenantId, got ${url}`);
+  }
+});

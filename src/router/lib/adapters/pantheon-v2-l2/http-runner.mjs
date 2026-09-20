@@ -21,13 +21,27 @@ const DEFAULT_TIMEOUT_SECONDS = 10;
  * @param {(cmd: string, args: string[], opts: object) => string} execFileSync
  *   Injected rather than imported by this module — see file header comment.
  * @param {string} baseUrl Pantheon's backlog API base URL (no trailing slash).
+ * @param {{ staticQueryParams?: Record<string, string> }} [options]
+ *   staticQueryParams: key=value pairs appended to every request URL (e.g. { tenant_id: 'firefly-events' }).
+ *   Used by tenant-scoped Auriga instances to route all backlog API calls through the
+ *   correct per-tenant board adapter in core-api (PANT-260).
  * @returns {(method: string, path: string, body?: object) => any}
  *   Returns the parsed JSON response body, or `null` for an empty body.
  *   Throws on any transport failure or non-2xx response.
  */
-export function makeHttpRun(execFileSync, baseUrl) {
+export function makeHttpRun(execFileSync, baseUrl, options = {}) {
+  const staticQueryString = options.staticQueryParams
+    ? Object.entries(options.staticQueryParams)
+        .filter(([, v]) => v != null && v !== '')
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join('&')
+    : '';
+
   return function httpRun(method, path, body) {
-    const url = `${baseUrl}${path}`;
+    const fullPath = staticQueryString
+      ? `${path}${path.includes('?') ? '&' : '?'}${staticQueryString}`
+      : path;
+    const url = `${baseUrl}${fullPath}`;
     const args = [
       '-sS',
       '--max-time', String(DEFAULT_TIMEOUT_SECONDS),
