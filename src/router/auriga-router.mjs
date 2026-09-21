@@ -442,23 +442,25 @@ export async function cycle(opts = {}) {
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
-        // If no agent has capacity, skip — dispatching rerun without a
-        // valid assignee burns a cascade slot and enqueues on an already-full
-        // agent. Try again next cycle when capacity frees up.
-        if (!agent) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
-        if (typeof spawn.selectRoute === 'function') {
-          try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
+        // Skip only when no agent has capacity AND the issue has no existing assignee.
+        // If the issue already has an assignee, rerunIssue re-enqueues it without a
+        // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
+        if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+        if (agent) {
+          if (typeof spawn.selectRoute === 'function') {
+            try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
+          }
+          spawn.assignIssue(c.identifier, agent);
+          inflight[agent] = (inflight[agent] || 0) + 1;
+          const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+          if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
+          await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+          assigned++;
         }
-        spawn.assignIssue(c.identifier, agent);
-        inflight[agent] = (inflight[agent] || 0) + 1;
-        const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
-        if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
-        await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         spawn.rerunIssue(c.identifier);
-        assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
-        logImpl('cascade_enqueued', { identifier: c.identifier, agent });
+        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
       } catch (e) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
       }
