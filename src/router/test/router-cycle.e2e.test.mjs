@@ -692,3 +692,69 @@ test('changeback: dry-run does NOT call setIssueStatus or unassignIssue, but log
   assert.ok(advance, 'dry-run must still log the advance event');
   assert.equal(advance.applied, false);
 });
+
+// ---- s14: multi-tenant consolidation loop shape (2026-09-21) --------------
+// Not another single-cycle scoping test (PANT-40 above already covers that
+// exhaustively) -- this proves the specific NEW shape mainMultiTenant()
+// introduces: TWO SEQUENTIAL cycle() calls, each with a different tenant's
+// own cfg/adapters, sharing one real underlying board (as they would in
+// production, since both go through the same Pantheon core-api). Confirms
+// the second tenant's cycle() call cannot see or touch the first tenant's
+// dispatch, and vice versa -- the real risk this loop shape introduces that
+// a single cycle() call's own internal scoping can't by itself guarantee.
+test('s14: two sequential per-tenant cycle() calls against one shared board never cross-dispatch', async () => {
+  const tenantACfg = withFixtureLanes({ 'tenant-a-project': ['auriga-dev'] });
+  const tenantBCfg = withFixtureLanes({ 'tenant-b-project': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'tenant-a-project' });
+  const issueB = makeIssue({ project_id: 'tenant-b-project' });
+  const sharedBoard = [issueA, issueB];
+
+  const adaptersA = createMockAdapters(sharedBoard, tenantACfg.AGENTS);
+  const adaptersB = createMockAdapters(sharedBoard, tenantBCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog: adaptersA.backlog, spawn: adaptersA.spawn, cfg: tenantACfg, log, sleep: NOOP_SLEEP });
+  await cycle({ backlog: adaptersB.backlog, spawn: adaptersB.spawn, cfg: tenantBCfg, log, sleep: NOOP_SLEEP });
+
+  assert.deepEqual(adaptersA.calls.assign.map((a) => a.identifier), [issueA.identifier],
+    "tenant A's cycle() must only ever dispatch tenant A's own issue");
+  assert.deepEqual(adaptersB.calls.assign.map((a) => a.identifier), [issueB.identifier],
+    "tenant B's cycle() must only ever dispatch tenant B's own issue");
+  assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
+  assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
+});
+
+// ---- maxAssign in simulated multi-tenant loop (2026-09-21) ----------------
+// mainMultiTenant() was not threading MAX_ASSIGN into cycle() calls at all,
+// so --max-assign was silently ignored in multi-tenant mode. The fix tracks
+// totalAssigned and passes maxAssign: remaining to each tenant's cycle().
+// This test simulates the mainMultiTenant loop shape: two sequential cycle()
+// calls sharing a totalAssigned budget of 1. After the first dispatch,
+// remaining=0 and the second tenant's cycle must dispatch nothing.
+test('s14: maxAssign budget is shared across sequential per-tenant cycle() calls (simulates mainMultiTenant MAX_ASSIGN threading)', async () => {
+  const tenantACfg = withFixtureLanes({ 'tenant-a-project': ['auriga-dev'] });
+  const tenantBCfg = withFixtureLanes({ 'tenant-b-project': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'tenant-a-project' });
+  const issueB = makeIssue({ project_id: 'tenant-b-project' });
+  const sharedBoard = [issueA, issueB];
+
+  const adaptersA = createMockAdapters(sharedBoard, tenantACfg.AGENTS);
+  const adaptersB = createMockAdapters(sharedBoard, tenantBCfg.AGENTS);
+  const log = createLogSink();
+
+  const MAX_ASSIGN = 1;
+  let totalAssigned = 0;
+
+  // Tenant A's cycle: remaining budget = 1
+  const resultA = await cycle({ backlog: adaptersA.backlog, spawn: adaptersA.spawn, cfg: tenantACfg, log, sleep: NOOP_SLEEP, maxAssign: Math.max(0, MAX_ASSIGN - totalAssigned) });
+  totalAssigned += resultA.assigned;
+
+  // Tenant B's cycle: remaining budget = 0 (A used it all)
+  const remaining = Math.max(0, MAX_ASSIGN - totalAssigned);
+  const resultB = await cycle({ backlog: adaptersB.backlog, spawn: adaptersB.spawn, cfg: tenantBCfg, log, sleep: NOOP_SLEEP, maxAssign: remaining });
+  totalAssigned += resultB.assigned;
+
+  assert.equal(totalAssigned, 1, 'total dispatches must not exceed maxAssign=1');
+  assert.equal(adaptersA.calls.assign.length, 1, "tenant A's cycle must dispatch exactly 1 (within budget)");
+  assert.equal(adaptersB.calls.assign.length, 0, "tenant B's cycle must dispatch 0 (budget exhausted by A)");
+});

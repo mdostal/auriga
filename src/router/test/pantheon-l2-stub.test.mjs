@@ -503,3 +503,62 @@ test('BacklogAdapter without tenantId (no AURIGA_TENANT_ID) sends plain URLs wit
     assert.ok(!url.includes('tenant_id='), `expected NO ?tenant_id= in URL without cfg.tenantId, got ${url}`);
   }
 });
+
+// ---- SpawnAdapter: selectRoute / reportRouteOutcome (PANT-263) ----
+
+test('selectRoute() POSTs to /api/route/select with task_id and task_type', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { decision_id: 'dec-1', chosen_lane: 'build' } }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  const res = spawn.selectRoute('PAN-1', 'build');
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].url, `${BASE_URL}/api/route/select`);
+  assert.deepEqual(calls[0].body, { task_id: 'PAN-1', task_type: 'build' });
+  assert.equal(res.decision_id, 'dec-1');
+});
+
+test('selectRoute() degrades to null on failure — never throws', async (t) => {
+  makeCurlMock(t, () => new Error('HTTP 503'));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  assert.equal(spawn.selectRoute('PAN-1', 'build'), null);
+});
+
+test('reportRouteOutcome() POSTs to /api/route/:decisionId/outcome after a successful selectRoute()', async (t) => {
+  let selectCount = 0;
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.endsWith('/api/route/select')) {
+      selectCount++;
+      return { status: 200, body: { decision_id: 'dec-42', chosen_lane: 'build' } };
+    }
+    if (url.includes('/api/route/') && url.endsWith('/outcome')) {
+      return { status: 200, body: { ok: true } };
+    }
+    throw new Error('unexpected url: ' + url);
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.selectRoute('PAN-1', 'build');
+  spawn.reportRouteOutcome('PAN-1', 'success');
+
+  const outcomeCalls = calls.filter((c) => c.url.includes('/api/route/dec-42/outcome'));
+  assert.equal(outcomeCalls.length, 1);
+  assert.equal(outcomeCalls[0].method, 'POST');
+  assert.deepEqual(outcomeCalls[0].body, { outcome: 'success' });
+});
+
+test('reportRouteOutcome() returns null without making a request when no prior selectRoute() was called', async (t) => {
+  const calls = makeCurlMock(t, () => { throw new Error('should never be called'); });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  const res = spawn.reportRouteOutcome('PAN-UNKNOWN', 'success');
+
+  assert.equal(res, null);
+  assert.equal(calls.length, 0);
+});

@@ -369,11 +369,53 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
     reviewLane: REVIEW_LANE, runtimeCap: RUNTIME_CAP,
   });
 
+  // Per-adapter decision store: identifier → decision_id.
+  // Populated at dispatch time by selectRoute(); consumed (and cleared) at
+  // outcome time by reportRouteOutcome(). Survives across cycles in the same
+  // process instance; entries are cleaned up once the outcome is reported.
+  const _decisions = new Map();
+
+  // Best-effort: calls POST /api/route/select before assignIssue() so Heimdall
+  // can record the routing decision and inform future lane selection. Stores the
+  // returned decision_id keyed by identifier for the matching reportRouteOutcome()
+  // call. Never throws — a failure is logged to stderr and dispatch continues.
+  function selectRoute(identifier, taskType) {
+    try {
+      const res = run('POST', '/api/route/select', { task_id: identifier, task_type: taskType });
+      if (res && res.decision_id) _decisions.set(identifier, res.decision_id);
+      return res;
+    } catch (e) {
+      process.stderr.write(`pantheon-v2-l2: selectRoute(${identifier}) failed: ${e.message}\n`);
+      return null;
+    }
+  }
+
+  // Best-effort: calls POST /api/route/:decisionId/outcome using the decision_id
+  // stored by a prior selectRoute() call for this identifier. No-ops silently
+  // when no prior select was recorded (e.g. the process restarted between
+  // dispatch and completion). Clears the stored entry on success.
+  function reportRouteOutcome(identifier, outcome, metadata) {
+    const decisionId = _decisions.get(identifier);
+    if (!decisionId) return null;
+    try {
+      const body = { outcome };
+      if (metadata !== undefined) body.metadata = metadata;
+      const res = run('POST', `/api/route/${encodeURIComponent(decisionId)}/outcome`, body);
+      _decisions.delete(identifier);
+      return res;
+    } catch (e) {
+      process.stderr.write(`pantheon-v2-l2: reportRouteOutcome(${identifier}) failed: ${e.message}\n`);
+      return null;
+    }
+  }
+
   return Object.freeze({
     dispatch,
     describeLanes,
     assignIssue,
     rerunIssue,
     unassignIssue,
+    selectRoute,
+    reportRouteOutcome,
   });
 }

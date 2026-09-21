@@ -30,6 +30,7 @@ import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from 
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
+import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
 // no HTTP call happens until a method is actually invoked), exactly
@@ -83,6 +84,26 @@ const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
 const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
 const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
 
+// s14: single-instance multi-tenant consolidation. Off by default -- a
+// deliberate, explicit opt-in per docs/s14-consolidation-design.md's own
+// no-big-bang rollout plan, never inferred from other env vars.
+// AURIGA_TENANT_ID/AURIGA_CONFIG remain fully live and unchanged for every
+// existing single-tenant container (standalone mode) when this is unset.
+const MULTI_TENANT = process.env.AURIGA_MULTI_TENANT === '1';
+const PANTHEON_API_URL = process.env.PANTHEON_API_URL || 'http://core-api:3012';
+// Real safety gap found live during s14's own first deploy (2026-09-21): the
+// facade returns EVERY tenant with auriga_project_ids set, including ones a
+// separate, already-live standalone container is actively dispatching --
+// running this loop unfiltered risks a genuine double-dispatch race. Unset
+// (the default) means "no restriction" -- the deliberate, later, full-
+// rollout mode once a tenant's standalone container has actually been
+// retired. Comma-separated tenant_ids, e.g. "dostal-tech,personal".
+const _allowlistRaw = process.env.AURIGA_MULTI_TENANT_ALLOWLIST
+  ? new Set(process.env.AURIGA_MULTI_TENANT_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean))
+  : null;
+// An empty Set (whitespace-only env value) is truthy but blocks every tenant silently — treat it as null (unfiltered).
+const MULTI_TENANT_ALLOWLIST = _allowlistRaw && _allowlistRaw.size > 0 ? _allowlistRaw : null;
+
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
 if (process.env.AURIGA_PER_CYCLE_PER_AGENT) cfg.CAPS.perCyclePerAgent = parseInt(process.env.AURIGA_PER_CYCLE_PER_AGENT, 10);
@@ -112,13 +133,38 @@ function releaseLock() {
 function log(event, data) {
   const rec = { ts: new Date().toISOString(), event, ...data };
   if (INSTANCE_ID) rec.instance_id = INSTANCE_ID;
-  if (TENANT_ID) rec.tenant_id = TENANT_ID;
+  if (TENANT_ID && !('tenant_id' in rec)) rec.tenant_id = TENANT_ID;
   const line = JSON.stringify(rec);
   try { fs.appendFileSync(LOGFILE, line + '\n'); } catch {}
   console.log(line);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// s14: builds a fresh {backlog, spawn} adapter pair scoped to one tenant's
+// merged config -- mirrors defaultBacklog/defaultSpawn's own construction
+// above exactly, just parameterized per tenant instead of module-scope-once.
+function buildAdaptersForTenant(tenantId, tenantCfg) {
+  const backlog = createPantheonV2L2BacklogAdapter({ tenantId });
+  const spawn = createPantheonV2L2SpawnAdapter({
+    tenantId,
+    verifyDelayMs: tenantCfg.CAPS.verifyDelayMs,
+    projectLane: tenantCfg.PROJECT_LANE,
+    defaultLane: tenantCfg.DEFAULT_LANE,
+    hiveLane: tenantCfg.HIVE_LANE,
+    reviewLane: tenantCfg.REVIEW_LANE,
+    runtimeCap: tenantCfg.RUNTIME_CAP,
+  });
+  return { backlog, spawn };
+}
+
+// s14: wraps the module-level log() with a fixed tenant_id, so per-tenant
+// cycle() calls tag their own log lines without log() itself needing any
+// change (mirrors the existing INSTANCE_ID/TENANT_ID-on-every-record
+// pattern, just bound per call instead of per process).
+function tenantLog(tenantId) {
+  return (event, data) => log(event, { ...data, tenant_id: tenantId });
+}
 
 // ---- one cycle -------------------------------------------------------------
 // opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
@@ -306,6 +352,9 @@ export async function cycle(opts = {}) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {
       try { backlog.setIssueStatus(v.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
+      if (typeof spawn.reportRouteOutcome === 'function') {
+        try { spawn.reportRouteOutcome(v.identifier, 'success'); } catch (e) { logImpl('route_outcome_error', { identifier: v.identifier, error: e.message }); }
+      }
     }
   }
 
@@ -389,6 +438,9 @@ export async function cycle(opts = {}) {
         // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
         if (agent) {
+          if (typeof spawn.selectRoute === 'function') {
+            try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
+          }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
@@ -491,6 +543,30 @@ export async function cycle(opts = {}) {
       squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !dryRun,
     });
     if (dryRun) continue;
+
+    // PANT-262: give-up-review parallel to zombie give-up (detectZombies/auriga-router.mjs
+    // zombie recovery). Fires after reviewMaxAttempts accumulated runs where the review
+    // agent's run is consistently stale/failed — sets blocked + posts a diagnostic comment
+    // so a human can find and fix the root-cause startup hang. Never retries further.
+    if (r.action === 'give-up-review') {
+      logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: true });
+      try { backlog.setIssueStatus(r.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked', error: e.message }); }
+      try {
+        backlog.commentOnIssue(
+          r.identifier,
+          `Auriga review dispatch accumulated ${cfgImpl.CAPS.reviewMaxAttempts ?? 5}+ runs with no successful output (status: blocked).\n\n` +
+          'The live process showed zero output tokens and near-zero CPU — consistent with a startup hang before prompt processing.\n\n' +
+          '**Leading hypothesis (PANT-262 / GitHub #94):** a Playwright/E2E MCP server registered for the auriga-review agent hangs on startup — browser binary missing or network-blocked install.\n\n' +
+          'Human investigation required:\n' +
+          '1. Inspect MCP server registrations in the auriga-review runtime: `claude mcp list` (or `claude mcp get <name>` per server)\n' +
+          '2. Look for a Playwright / browser-automation MCP server that fails to start (missing binary, blocked network)\n' +
+          '3. Either pre-install the browser binary or remove the problematic MCP registration\n' +
+          '4. Once the root cause is fixed, reset this ticket to `in_review` to re-enter the review queue'
+        );
+      } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'comment', error: e.message }); }
+      continue;
+    }
+
     try {
       if (r.action === 'dispatch-review') {
         // Publish the squad plan onto the ticket so what the squad will do is visible
@@ -513,11 +589,34 @@ export async function cycle(opts = {}) {
         // branch, which never assigns at all) rather than verifying a run started
         // first — a different contract than dispatch()'s verify-then-conditionally-
         // rerun, not a stale duplicate of it.
+        if (typeof spawn.selectRoute === 'function') {
+          try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
+        }
         spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
       spawn.rerunIssue(r.identifier);
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
+      // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
+      // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
+      // For dispatch-review this is the SECOND sleep (first was pre-rerunIssue); for
+      // rerun-review there was no prior sleep, so this is the only one. Both cases end
+      // with a run-presence check that logs review_verify_ok / review_verify_no_run —
+      // the latter is the clearest early signal that the hang is happening THIS cycle
+      // (not 30 minutes later when idle_watchdog fires).
+      await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+      const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
+      const reviewRunStarted = reviewVerifyRuns.some((run) => {
+        const c = coreImpl.classifyRun(run, Date.now());
+        return c.active || c.done || c.failed;
+      });
+      if (!reviewRunStarted) {
+        logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: r.action });
+      } else {
+        const lr = coreImpl.latestRun(reviewVerifyRuns);
+        const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+        logImpl('review_verify_ok', { identifier: r.identifier, agent: r.agent, action: r.action, runStatus: c.status });
+      }
     } catch (e) {
       logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
     }
@@ -561,6 +660,9 @@ export async function cycle(opts = {}) {
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
           try {
+            if (typeof spawn.selectRoute === 'function') {
+              try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
+            }
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
@@ -584,6 +686,9 @@ export async function cycle(opts = {}) {
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
     try {
+      if (typeof spawn.selectRoute === 'function') {
+        try { spawn.selectRoute(p.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: p.identifier, error: e.message }); }
+      }
       spawn.assignIssue(p.identifier, p.agent);
       assigned++;
     } catch (e) {
@@ -676,7 +781,7 @@ export async function cycle(opts = {}) {
   return { todo: todo.length, picked: picks.length, assigned };
 }
 
-// ---- main loop -------------------------------------------------------------
+// ---- main loop (single-tenant, standalone -- unchanged) --------------------
 async function main() {
   acquireLock();
   process.on('exit', releaseLock);
@@ -702,8 +807,63 @@ async function main() {
   releaseLock();
 }
 
+// ---- main loop (s14: multi-tenant consolidation) ---------------------------
+// One process, every real tenant. Fetches the live tenant list + per-tenant
+// config once per FULL loop iteration (not per cycle-internal step -- see
+// s14 design doc §4's cycle-timing note), then runs one cycle() per tenant,
+// sequentially, rotating iteration order each pass so no single tenant is
+// always scanned last. AURIGA_TENANT_ID/AURIGA_CONFIG are not read at all in
+// this mode -- every tenant's config comes from the live facade.
+async function mainMultiTenant() {
+  acquireLock();
+  process.on('exit', releaseLock);
+  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+
+  log('start_multi_tenant', { pid: process.pid, once: ONCE, dry: DRY, pantheonApiUrl: PANTHEON_API_URL });
+
+  let rotation = 0;
+  let iterations = 0;
+  let totalAssigned = 0;
+  do {
+    let tenants = [];
+    try {
+      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: cfg, allowlist: MULTI_TENANT_ALLOWLIST });
+    } catch (e) {
+      log('tenant_configs_error', { error: e.message });
+    }
+    if (!tenants.length) {
+      log('no_tenants_found', {});
+    } else {
+      for (const { tenantId, cfg: tenantCfg } of rotate(tenants, rotation)) {
+        if (totalAssigned >= MAX_ASSIGN) break;
+        const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
+        try {
+          const { backlog, spawn } = buildAdaptersForTenant(tenantId, tenantCfg);
+          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining });
+          totalAssigned += result.assigned;
+          log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
+        } catch (e) {
+          log('tenant_cycle_error', { tenant_id: tenantId, error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
+        }
+      }
+      rotation += 1;
+    }
+    iterations += 1;
+    if (totalAssigned >= MAX_ASSIGN) { log('max_assign_reached', { assigned: totalAssigned }); break; }
+    if (!ONCE) await sleep(cfg.CAPS.cycleMs);
+  } while (!ONCE);
+
+  log('stop_multi_tenant', { iterations, assigned: totalAssigned });
+  releaseLock();
+}
+
 // Only run the live daemon loop when this file is executed directly (`node
 // auriga-router.mjs ...` / the `auriga-router` bin) — never when imported,
 // e.g. by tests that want `cycle()` against a mock Multica layer.
 const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMainModule) main();
+if (isMainModule) {
+  if (MULTI_TENANT) { mainMultiTenant(); } else { main(); }
+}
+
+export { buildAdaptersForTenant, mainMultiTenant };

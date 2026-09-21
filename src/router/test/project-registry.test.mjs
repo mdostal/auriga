@@ -188,11 +188,12 @@ test('loadRegistryConfig(): a well-formed reader derives real, non-empty config 
 
 // ---- 2. THE HARD MERGE GATE: byte-identical migration, against the REAL file --
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches the registry (PANT-59 2026-08-31) — Pantheon Core plus 6 per-god projects, Minerva must NOT appear', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches the registry — Pantheon Core + 6 per-god projects (PANT-59 2026-08-31) + 41 batch-onboarded repos (2026-09-15), Minerva must NOT appear', async () => {
   const { PROJECT_IDS } = await import('../lib/config-substrate.mjs');
   // PANT-59 (2026-08-31): added 6 per-god projects (confirmed live in workspace f32af269).
-  // Pantheon Core remains first; per-god projects follow in order.
-  assert.deepEqual(PROJECT_IDS, [
+  // Batch onboarding (2026-09-15): added 41 personal/Dostal-Tech/client repos.
+  // Total dispatch-eligible: 48 (7 original + 41 batch). Minerva stays ineligible.
+  const CORE_IDS = [
     '032ea2e7-39b0-46d4-804e-57e74f627310', // Pantheon Core
     '8c13f273-ab62-425f-aee2-45e7c324dc09', // Consus (god)
     '9ebce7eb-01db-4274-8829-5472d13b76ae', // Auriga (god)
@@ -200,28 +201,29 @@ test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_IDS matches 
     '6a21cc72-5ca5-47d2-a791-9db5dce112bb', // Mnemosyne (god)
     '23dd7a13-d801-4d68-9886-ed5a86b3ec40', // Janus (god)
     '0e3d94f1-4846-43b9-90c3-b449d26869d6', // Portunus (god)
-  ]);
+  ];
+  for (const id of CORE_IDS) {
+    assert.ok(PROJECT_IDS.includes(id), `core project ${id} must remain in dispatch order`);
+  }
+  assert.equal(PROJECT_IDS.length, 48, 'dispatch_order count: 7 core + 41 batch-onboarded (2026-09-15)');
   assert.ok(!PROJECT_IDS.includes('6327fdaf-789e-4290-ab41-1421957b55c6'), 'Minerva must stay dispatch-ineligible');
 });
 
-test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the registry (PANT-59 2026-08-31, pruned per GH #80 2026-09-06) — Pantheon Core, 6 per-god projects, plus Minerva placeholder', async () => {
+test('HARD GATE: config-substrate.mjs\'s real (live-loaded) PROJECT_LANE matches the registry — core god projects verified, batch-onboarded repos (2026-09-15) expand total to 49', async () => {
   const { PROJECT_LANE } = await import('../lib/config-substrate.mjs');
-  assert.deepEqual(PROJECT_LANE, {
-    '032ea2e7-39b0-46d4-804e-57e74f627310': ['auriga-build'],              // Pantheon Core
-    '8c13f273-ab62-425f-aee2-45e7c324dc09': ['consus-dev', 'auriga-build'],// Consus (god)
-    '9ebce7eb-01db-4274-8829-5472d13b76ae': ['auriga-build'],              // Auriga (god)
-    // GH #80: 'heimdall-dev' pruned -- confirmed live it does not exist as
-    // a real Multica agent, and its presence here always won
-    // chooseAgentForProject's tie-break (a nonexistent agent's inflight is
-    // always 0), so every Heimdall dispatch attempt failed with
-    // assign_error before ever reaching the one real agent.
-    '4aa2f07d-79e0-421f-9618-fae642056237': ['heimdall-dev-codex'], // Heimdall (god)
-    '6a21cc72-5ca5-47d2-a791-9db5dce112bb': ['mnemosyne-dev', 'auriga-build'],     // Mnemosyne (god)
-    '23dd7a13-d801-4d68-9886-ed5a86b3ec40': ['auriga-build'],              // Janus (god)
-    '0e3d94f1-4846-43b9-90c3-b449d26869d6': ['auriga-build'],              // Portunus (god)
-    '6327fdaf-789e-4290-ab41-1421957b55c6': ['auriga-dev'],                // Minerva (placeholder)
-  });
-  assert.equal(Object.keys(PROJECT_LANE).length, 8);
+  // Core lane assignments from PANT-59 (2026-08-31) and GH #80 (2026-09-06) must stay intact.
+  // GH #80: 'heimdall-dev' pruned — not a real agent, caused every Heimdall dispatch to fail.
+  // Batch onboarding (2026-09-15): 41 additional repos all route to ['auriga-build'].
+  // Total entries: 49 (7 core + 1 Minerva placeholder + 41 batch-onboarded).
+  assert.deepEqual(PROJECT_LANE['032ea2e7-39b0-46d4-804e-57e74f627310'], ['auriga-build']);              // Pantheon Core
+  assert.deepEqual(PROJECT_LANE['8c13f273-ab62-425f-aee2-45e7c324dc09'], ['consus-dev', 'auriga-build']); // Consus (god)
+  assert.deepEqual(PROJECT_LANE['9ebce7eb-01db-4274-8829-5472d13b76ae'], ['auriga-build']);              // Auriga (god)
+  assert.deepEqual(PROJECT_LANE['4aa2f07d-79e0-421f-9618-fae642056237'], ['heimdall-dev-codex']);         // Heimdall (god) — heimdall-dev pruned per GH #80
+  assert.deepEqual(PROJECT_LANE['6a21cc72-5ca5-47d2-a791-9db5dce112bb'], ['mnemosyne-dev', 'auriga-build']); // Mnemosyne (god)
+  assert.deepEqual(PROJECT_LANE['23dd7a13-d801-4d68-9886-ed5a86b3ec40'], ['auriga-build']);              // Janus (god)
+  assert.deepEqual(PROJECT_LANE['0e3d94f1-4846-43b9-90c3-b449d26869d6'], ['auriga-build']);              // Portunus (god)
+  assert.deepEqual(PROJECT_LANE['6327fdaf-789e-4290-ab41-1421957b55c6'], ['auriga-dev']);                 // Minerva (placeholder)
+  assert.equal(Object.keys(PROJECT_LANE).length, 49, '49 total: 7 core + 1 Minerva + 41 batch-onboarded (2026-09-15)');
 });
 
 // GH #80 regression: chooseAgentForProject must never be ABLE to select a
@@ -318,7 +320,7 @@ test('INTEGRATION: with NO override, config-substrate.mjs loads the REAL committ
   const { captured, result: mod } = await captureStderrAsync(() => freshConfigSubstrate());
   const { PROJECT_IDS } = mod;
   assert.equal(captured, '', 'no warning should be logged when the real file loads cleanly');
-  // 7 dispatch-eligible project ids as of PANT-59 (2026-08-31): Pantheon Core
-  // plus 6 per-god projects created live in workspace f32af269.
-  assert.equal(PROJECT_IDS.length, 7);
+  // 48 dispatch-eligible project ids: 7 core (PANT-59 2026-08-31) +
+  // 41 batch-onboarded personal/Dostal-Tech/client repos (2026-09-15).
+  assert.equal(PROJECT_IDS.length, 48);
 });

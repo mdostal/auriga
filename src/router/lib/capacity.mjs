@@ -107,7 +107,7 @@ export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
     if (!a) return false;
     if (a.available === false) return false; // PAN-8645: offline runtime
     const now = (reviewInflight[name] || 0) + (projected[name] || 0);
-    return now < a.maxInflight;
+    return now < (a.maxInflight ?? Infinity);
   });
   if (!eligible.length) return null;
   eligible.sort((x, y) => {

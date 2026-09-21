@@ -28,7 +28,7 @@ jobs:
         if: steps.detect.outputs.stack == 'node'
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Node install / build / test
         if: steps.detect.outputs.stack == 'node'
