@@ -833,3 +833,37 @@ test('cascade: per-runtime cap is enforced across multiple cascade iterations (l
   assert.ok(calls.assign.length <= 1,
     `per-runtime cap 1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
 });
+
+test('cascade: skips a dependent whose most-recent run finished within the redispatchCooldownMs window (PANT-344)', async () => {
+  // Regression test for the cooldown guard dropped in the p2-router-cutover.
+  // A blocked child with a completed (failed) run from 1 minute ago must NOT
+  // be re-dispatched — doing so restarts the cancel-thrash loop PAN-7771 diagnosed.
+  const fixtureCfg = withFixtureLanes({ 'cascade-cooldown-proj': ['auriga-dev'] });
+  const cooldownCfg = {
+    ...fixtureCfg,
+    CAPS: { ...fixtureCfg.CAPS, redispatchCooldownMs: 15 * 60 * 1000 },
+  };
+  const doneParent = makeIssue({ project_id: 'cascade-cooldown-proj', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cascade-cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([doneParent, blockedChild], cooldownCfg.AGENTS);
+
+  // Pre-seed a failed run completed 1 minute ago (well within 15-min cooldown).
+  const oneMinuteAgo = new Date(Date.now() - 60 * 1000).toISOString();
+  runsByIdentifier[blockedChild.identifier] = [
+    { status: 'failed', created_at: oneMinuteAgo, dispatched_at: oneMinuteAgo },
+  ];
+
+  const log = createLogSink();
+  await cycle({ backlog, spawn, cfg: cooldownCfg, log, sleep: NOOP_SLEEP });
+
+  // The cascade loop's distinguishing action is assignIssue + rerunIssue. Regular
+  // assignment only calls assignIssue (the inline verify step sees the synthetic
+  // active run the mock produces and does not call rerunIssue). So the absence of
+  // rerunIssue, combined with the cascade_skip log entry, proves the cooldown guard
+  // fired in the cascade loop without conflating it with the unblock-then-assign path.
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT rerun a child whose recent run is within the cooldown window');
+  const skipLog = log.byEvent('cascade_skip').find((e) => e.identifier === blockedChild.identifier && e.reason === 'recent-run');
+  assert.ok(skipLog, 'cascade_skip(recent-run) must be logged when skipping due to cooldown');
+  assert.ok(typeof skipLog.ageMs === 'number', 'ageMs must be included in the cascade_skip log entry');
+});

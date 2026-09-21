@@ -412,9 +412,18 @@ export async function cycle(opts = {}) {
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
       let activeRun = false;
-      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, now).active); }
+      let runs = [];
+      try { runs = backlog.getIssueRuns(c.identifier); activeRun = runs.some((r) => coreImpl.classifyRun(r, now).active); }
       catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
       if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      // Idempotency 1b: skip if the most-recent run finished within the cooldown
+      // window — prevents the cancel-thrash loop diagnosed in PAN-7771.
+      const lastRun = coreImpl.latestRun(runs);
+      if (lastRun) {
+        const runAgeMs = coreImpl.classifyRun(lastRun, now).ageMs;
+        const cooldown = cfgImpl.CAPS.redispatchCooldownMs ?? (15 * 60 * 1000);
+        if (runAgeMs < cooldown) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'recent-run', ageMs: runAgeMs }); continue; }
+      }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses,
       // matched against the per-cycle cached board-wide PR scan (see matchedPrs
