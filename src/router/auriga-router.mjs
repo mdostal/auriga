@@ -30,6 +30,7 @@ import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from 
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
+import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
 // no HTTP call happens until a method is actually invoked), exactly
@@ -83,6 +84,14 @@ const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
 const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
 const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
 
+// s14: single-instance multi-tenant consolidation. Off by default -- a
+// deliberate, explicit opt-in per docs/s14-consolidation-design.md's own
+// no-big-bang rollout plan, never inferred from other env vars.
+// AURIGA_TENANT_ID/AURIGA_CONFIG remain fully live and unchanged for every
+// existing single-tenant container (standalone mode) when this is unset.
+const MULTI_TENANT = process.env.AURIGA_MULTI_TENANT === '1';
+const PANTHEON_API_URL = process.env.PANTHEON_API_URL || 'http://core-api:3012';
+
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
 if (process.env.AURIGA_PER_CYCLE_PER_AGENT) cfg.CAPS.perCyclePerAgent = parseInt(process.env.AURIGA_PER_CYCLE_PER_AGENT, 10);
@@ -119,6 +128,31 @@ function log(event, data) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// s14: builds a fresh {backlog, spawn} adapter pair scoped to one tenant's
+// merged config -- mirrors defaultBacklog/defaultSpawn's own construction
+// above exactly, just parameterized per tenant instead of module-scope-once.
+function buildAdaptersForTenant(tenantId, tenantCfg) {
+  const backlog = createPantheonV2L2BacklogAdapter({ tenantId });
+  const spawn = createPantheonV2L2SpawnAdapter({
+    tenantId,
+    verifyDelayMs: tenantCfg.CAPS.verifyDelayMs,
+    projectLane: tenantCfg.PROJECT_LANE,
+    defaultLane: tenantCfg.DEFAULT_LANE,
+    hiveLane: tenantCfg.HIVE_LANE,
+    reviewLane: tenantCfg.REVIEW_LANE,
+    runtimeCap: tenantCfg.RUNTIME_CAP,
+  });
+  return { backlog, spawn };
+}
+
+// s14: wraps the module-level log() with a fixed tenant_id, so per-tenant
+// cycle() calls tag their own log lines without log() itself needing any
+// change (mirrors the existing INSTANCE_ID/TENANT_ID-on-every-record
+// pattern, just bound per call instead of per process).
+function tenantLog(tenantId) {
+  return (event, data) => log(event, { ...data, tenant_id: tenantId });
+}
 
 // ---- one cycle -------------------------------------------------------------
 // opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
@@ -735,7 +769,7 @@ export async function cycle(opts = {}) {
   return { todo: todo.length, picked: picks.length, assigned };
 }
 
-// ---- main loop -------------------------------------------------------------
+// ---- main loop (single-tenant, standalone -- unchanged) --------------------
 async function main() {
   acquireLock();
   process.on('exit', releaseLock);
@@ -761,8 +795,58 @@ async function main() {
   releaseLock();
 }
 
+// ---- main loop (s14: multi-tenant consolidation) ---------------------------
+// One process, every real tenant. Fetches the live tenant list + per-tenant
+// config once per FULL loop iteration (not per cycle-internal step -- see
+// s14 design doc §4's cycle-timing note), then runs one cycle() per tenant,
+// sequentially, rotating iteration order each pass so no single tenant is
+// always scanned last. AURIGA_TENANT_ID/AURIGA_CONFIG are not read at all in
+// this mode -- every tenant's config comes from the live facade.
+async function mainMultiTenant() {
+  acquireLock();
+  process.on('exit', releaseLock);
+  process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+  process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+
+  log('start_multi_tenant', { pid: process.pid, once: ONCE, dry: DRY, pantheonApiUrl: PANTHEON_API_URL });
+
+  let rotation = 0;
+  let iterations = 0;
+  do {
+    let tenants = [];
+    try {
+      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: cfg });
+    } catch (e) {
+      log('tenant_configs_error', { error: e.message });
+    }
+    if (!tenants.length) {
+      log('no_tenants_found', {});
+    } else {
+      for (const { tenantId, cfg: tenantCfg } of rotate(tenants, rotation)) {
+        try {
+          const { backlog, spawn } = buildAdaptersForTenant(tenantId, tenantCfg);
+          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY });
+          log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
+        } catch (e) {
+          log('tenant_cycle_error', { tenant_id: tenantId, error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
+        }
+      }
+      rotation += 1;
+    }
+    iterations += 1;
+    if (!ONCE) await sleep(cfg.CAPS.cycleMs);
+  } while (!ONCE);
+
+  log('stop_multi_tenant', { iterations });
+  releaseLock();
+}
+
 // Only run the live daemon loop when this file is executed directly (`node
 // auriga-router.mjs ...` / the `auriga-router` bin) — never when imported,
 // e.g. by tests that want `cycle()` against a mock Multica layer.
 const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
-if (isMainModule) main();
+if (isMainModule) {
+  if (MULTI_TENANT) { mainMultiTenant(); } else { main(); }
+}
+
+export { buildAdaptersForTenant, mainMultiTenant };
