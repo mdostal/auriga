@@ -407,7 +407,7 @@ export async function cycle(opts = {}) {
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
       let activeRun = false;
-      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
+      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, now).active); }
       catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
       if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
@@ -437,19 +437,21 @@ export async function cycle(opts = {}) {
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
-        if (agent) {
-          if (typeof spawn.selectRoute === 'function') {
-            try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
-          }
-          spawn.assignIssue(c.identifier, agent);
-          inflight[agent] = (inflight[agent] || 0) + 1;
-          await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+        // If no agent has capacity, skip — dispatching rerun without a
+        // valid assignee burns a cascade slot and enqueues on an already-full
+        // agent. Try again next cycle when capacity frees up.
+        if (!agent) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+        if (typeof spawn.selectRoute === 'function') {
+          try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
         }
+        spawn.assignIssue(c.identifier, agent);
+        inflight[agent] = (inflight[agent] || 0) + 1;
+        await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         spawn.rerunIssue(c.identifier);
         assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
-        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
+        logImpl('cascade_enqueued', { identifier: c.identifier, agent });
       } catch (e) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
       }
@@ -607,14 +609,14 @@ export async function cycle(opts = {}) {
       await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
       const reviewRunStarted = reviewVerifyRuns.some((run) => {
-        const c = coreImpl.classifyRun(run, Date.now());
+        const c = coreImpl.classifyRun(run, now);
         return c.active || c.done || c.failed;
       });
       if (!reviewRunStarted) {
         logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: r.action });
       } else {
         const lr = coreImpl.latestRun(reviewVerifyRuns);
-        const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+        const c = lr ? coreImpl.classifyRun(lr, now) : {};
         logImpl('review_verify_ok', { identifier: r.identifier, agent: r.agent, action: r.action, runStatus: c.status });
       }
     } catch (e) {
@@ -677,7 +679,7 @@ export async function cycle(opts = {}) {
   const picks = coreImpl.selectAssignments(issues, cfgImpl, inflight, {
     blockedRuntimes,
     exclude: cascaded,
-    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining || cfgImpl.CAPS.perCycleTotal),
+    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining),
     parentBoardConfig,
   });
 
@@ -720,7 +722,7 @@ export async function cycle(opts = {}) {
     await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
     const runs = backlog.getIssueRuns(p.identifier);
     const started = runs.some((r) => {
-      const c = coreImpl.classifyRun(r, Date.now());
+      const c = coreImpl.classifyRun(r, now);
       return c.active || c.done || c.failed; // any run row means it dispatched
     });
     if (!started) {
@@ -728,7 +730,7 @@ export async function cycle(opts = {}) {
       try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
     } else {
       const lr = coreImpl.latestRun(runs);
-      const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+      const c = lr ? coreImpl.classifyRun(lr, now) : {};
       logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     }
   }

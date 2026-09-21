@@ -73,7 +73,7 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   if (!a) return false;
   if (a.available === false) return false; // PAN-8645: offline runtime block
   const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
-  if (agentNow >= a.maxInflight) return false;
+  if (agentNow >= (a.maxInflight ?? Infinity)) return false;
   const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
   if (rtNow >= (runtimeCap[a.runtime] ?? Infinity)) return false;
   return true;

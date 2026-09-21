@@ -54,3 +54,16 @@ test('chooseReviewAgent: null when the whole lane is at capacity', () => {
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 1 }), null);
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 0 }), 'auriga-review');
 });
+
+test('agentHasCapacity: missing maxInflight field treats cap as Infinity — agent always has capacity regardless of inflight count', () => {
+  const agents = { 'agent-no-cap': { id: 'X', runtime: 'claude' } };
+  // Without the fix: `agentNow >= undefined` is NaN comparison → always false → agent had unlimited
+  // capacity but silently (no explicit contract). With the fix: `?? Infinity` makes the contract explicit.
+  // Either way the agent has capacity; what we verify is that the fix does NOT accidentally block
+  // an agent that has no maxInflight configured.
+  assert.equal(
+    agentHasCapacity('agent-no-cap', agents, {}, { 'agent-no-cap': 999 }, {}, { perAgent: {}, perRuntime: {} }),
+    true,
+    'agent without maxInflight must never be blocked by the per-agent cap check alone',
+  );
+});
