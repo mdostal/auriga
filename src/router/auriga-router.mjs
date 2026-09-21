@@ -581,13 +581,15 @@ export async function cycle(opts = {}) {
         // Publish the squad plan onto the ticket so what the squad will do is visible
         // on the board up front and is read by the squad agent (best-effort; a comment
         // failure must never block the dispatch).
-        backlog.commentOnIssue(
-          r.identifier,
-          'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
-          '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
-          (plan.playwright ? ' + Playwright/E2E' : '') +
-          '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
-        );
+        try {
+          backlog.commentOnIssue(
+            r.identifier,
+            'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
+            '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
+            (plan.playwright ? ' + Playwright/E2E' : '') +
+            '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
+          );
+        } catch (e) { logImpl('review_comment_error', { identifier: r.identifier, error: e.message }); }
         // reassign the in_review story to the review agent, then force-enqueue a
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
