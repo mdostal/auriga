@@ -692,3 +692,34 @@ test('changeback: dry-run does NOT call setIssueStatus or unassignIssue, but log
   assert.ok(advance, 'dry-run must still log the advance event');
   assert.equal(advance.applied, false);
 });
+
+// ---- s14: multi-tenant consolidation loop shape (2026-09-21) --------------
+// Not another single-cycle scoping test (PANT-40 above already covers that
+// exhaustively) -- this proves the specific NEW shape mainMultiTenant()
+// introduces: TWO SEQUENTIAL cycle() calls, each with a different tenant's
+// own cfg/adapters, sharing one real underlying board (as they would in
+// production, since both go through the same Pantheon core-api). Confirms
+// the second tenant's cycle() call cannot see or touch the first tenant's
+// dispatch, and vice versa -- the real risk this loop shape introduces that
+// a single cycle() call's own internal scoping can't by itself guarantee.
+test('s14: two sequential per-tenant cycle() calls against one shared board never cross-dispatch', async () => {
+  const tenantACfg = withFixtureLanes({ 'tenant-a-project': ['auriga-dev'] });
+  const tenantBCfg = withFixtureLanes({ 'tenant-b-project': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'tenant-a-project' });
+  const issueB = makeIssue({ project_id: 'tenant-b-project' });
+  const sharedBoard = [issueA, issueB];
+
+  const adaptersA = createMockAdapters(sharedBoard, tenantACfg.AGENTS);
+  const adaptersB = createMockAdapters(sharedBoard, tenantBCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog: adaptersA.backlog, spawn: adaptersA.spawn, cfg: tenantACfg, log, sleep: NOOP_SLEEP });
+  await cycle({ backlog: adaptersB.backlog, spawn: adaptersB.spawn, cfg: tenantBCfg, log, sleep: NOOP_SLEEP });
+
+  assert.deepEqual(adaptersA.calls.assign.map((a) => a.identifier), [issueA.identifier],
+    "tenant A's cycle() must only ever dispatch tenant A's own issue");
+  assert.deepEqual(adaptersB.calls.assign.map((a) => a.identifier), [issueB.identifier],
+    "tenant B's cycle() must only ever dispatch tenant B's own issue");
+  assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
+  assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
+});
