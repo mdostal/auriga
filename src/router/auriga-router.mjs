@@ -411,10 +411,25 @@ export async function cycle(opts = {}) {
       if (assigned >= maxAssign) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
-      let activeRun = false;
-      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, now).active); }
+      let issueRuns = [];
+      try { issueRuns = backlog.getIssueRuns(c.identifier); }
       catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
-      if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      if (issueRuns.some((r) => coreImpl.classifyRun(r, now).active)) {
+        logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue;
+      }
+      // Idempotency 2b: skip a story whose last run completed within the cooldown window
+      // (bounds tight fail-retry loops — PAN-7771). Run age is free from the already-fetched
+      // getIssueRuns result — same bounded-stateless idiom as zombieMaxAttempts.
+      // Add to `cascaded` so selectAssignments also skips it this cycle.
+      const lrForCooldown = coreImpl.latestRun(issueRuns);
+      if (lrForCooldown) {
+        const lrC = coreImpl.classifyRun(lrForCooldown, now);
+        if (!lrC.active && lrC.ageMs < cfgImpl.CAPS.redispatchCooldownMs) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'redispatch-cooldown', ageMs: lrC.ageMs });
+          cascaded.add(c.identifier);
+          continue;
+        }
+      }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses,
       // matched against the per-cycle cached board-wide PR scan (see matchedPrs
