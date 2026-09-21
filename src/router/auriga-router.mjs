@@ -443,6 +443,8 @@ export async function cycle(opts = {}) {
           }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
+          const _crt = cfgImpl.AGENTS[agent]?.runtime;
+          if (_crt) runtimeInflight[_crt] = (runtimeInflight[_crt] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         }
         spawn.rerunIssue(c.identifier);
@@ -666,9 +668,41 @@ export async function cycle(opts = {}) {
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
+            const _zrt = cfgImpl.AGENTS[agent]?.runtime;
+            if (_zrt) runtimeInflight[_zrt] = (runtimeInflight[_zrt] || 0) + 1;
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }
+    }
+  }
+
+  // ---- assigned-idle recovery (PAN-7492 / PAN-8244) ----
+  // Recover assigned `todo` issues that never had a run start (the dead-zone
+  // scenario). Like zombie recovery, dispatches are restricted to
+  // cfgImpl.PROJECT_IDS — never fire into an unscanned/unaligned project.
+  {
+    const agentIds = coreImpl.agentIdSet(cfgImpl.AGENTS);
+    const todoAssigned = issues.filter(
+      (i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO &&
+        i.assignee_id && agentIds.has(i.assignee_id) &&
+        cfgImpl.PROJECT_IDS.includes(i.project_id)
+    );
+    const todoRunsByIssue = {};
+    for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+      inflight,
+      runtimeInflight,
+      blockedRuntimes,
+      maxTotal: Math.min(
+        cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
+        Math.max(0, maxAssign - assigned)
+      ),
+    });
+    for (const a of idleSelected) {
+      if (assigned >= maxAssign) break;
+      logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
+      if (!dryRun) { try { spawn.rerunIssue(a.identifier); assigned++; } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); } }
     }
   }
 
