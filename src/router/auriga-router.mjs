@@ -98,9 +98,11 @@ const PANTHEON_API_URL = process.env.PANTHEON_API_URL || 'http://core-api:3012';
 // (the default) means "no restriction" -- the deliberate, later, full-
 // rollout mode once a tenant's standalone container has actually been
 // retired. Comma-separated tenant_ids, e.g. "dostal-tech,personal".
-const MULTI_TENANT_ALLOWLIST = process.env.AURIGA_MULTI_TENANT_ALLOWLIST
+const _allowlistRaw = process.env.AURIGA_MULTI_TENANT_ALLOWLIST
   ? new Set(process.env.AURIGA_MULTI_TENANT_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean))
   : null;
+// An empty Set (whitespace-only env value) is truthy but blocks every tenant silently — treat it as null (unfiltered).
+const MULTI_TENANT_ALLOWLIST = _allowlistRaw && _allowlistRaw.size > 0 ? _allowlistRaw : null;
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
@@ -131,7 +133,7 @@ function releaseLock() {
 function log(event, data) {
   const rec = { ts: new Date().toISOString(), event, ...data };
   if (INSTANCE_ID) rec.instance_id = INSTANCE_ID;
-  if (TENANT_ID) rec.tenant_id = TENANT_ID;
+  if (TENANT_ID && !('tenant_id' in rec)) rec.tenant_id = TENANT_ID;
   const line = JSON.stringify(rec);
   try { fs.appendFileSync(LOGFILE, line + '\n'); } catch {}
   console.log(line);

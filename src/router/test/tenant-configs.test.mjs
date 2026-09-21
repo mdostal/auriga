@@ -103,6 +103,36 @@ test('loadTenantConfigs: no allowlist (default) returns every tenant the facade 
   assert.equal(result.length, 2);
 });
 
+test('loadTenantConfigs: a tenant with config: null falls back entirely to baseCfg substrate defaults (does not throw TypeError)', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [{ tenant_id: 'broken-tenant', config: null }],
+  }), { status: 200 }));
+
+  const result = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].tenantId, 'broken-tenant');
+  assert.deepEqual(result[0].cfg.PROJECT_IDS, BASE_CFG.PROJECT_IDS);
+  assert.deepEqual(result[0].cfg.AGENTS, BASE_CFG.AGENTS);
+});
+
+test('loadTenantConfigs: an empty allowlist Set (from whitespace-only env) filters out every tenant -- router normalises this to null before calling, but the function itself is correct to filter', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [
+      { tenant_id: 'dostal-tech', config: { PROJECT_IDS: ['p1'] } },
+    ],
+  }), { status: 200 }));
+
+  const result = await loadTenantConfigs({
+    pantheonApiBaseUrl: 'http://core-api:3012',
+    baseCfg: BASE_CFG,
+    fetchImpl,
+    allowlist: new Set([]),
+  });
+
+  assert.equal(result.length, 0);
+});
+
 test('loadTenantConfigs: throws with the real status code on a non-ok response', async () => {
   const fetchImpl = fakeFetch(() => new Response('', { status: 503 }));
   await assert.rejects(

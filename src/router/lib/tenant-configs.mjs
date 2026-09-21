@@ -38,17 +38,20 @@ export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl
   const body = await res.json();
   const allTenants = Array.isArray(body.tenants) ? body.tenants : [];
   const tenants = allowlist ? allTenants.filter((t) => allowlist.has(t.tenant_id)) : allTenants;
-  return tenants.map(({ tenant_id: tenantId, config }) => ({
-    tenantId,
-    cfg: {
-      ...baseCfg,
-      PROJECT_IDS: config.PROJECT_IDS ?? baseCfg.PROJECT_IDS,
-      AGENTS: config.AGENTS ?? baseCfg.AGENTS,
-      HIVE_LANE: config.HIVE_LANE ?? baseCfg.HIVE_LANE,
-      DEFAULT_LANE: config.DEFAULT_LANE ?? baseCfg.DEFAULT_LANE,
-      REVIEW_LANE: config.REVIEW_LANE ?? baseCfg.REVIEW_LANE,
-    },
-  }));
+  return tenants.map(({ tenant_id: tenantId, config }) => {
+    const c = config ?? {};
+    return {
+      tenantId,
+      cfg: {
+        ...baseCfg,
+        PROJECT_IDS: c.PROJECT_IDS ?? baseCfg.PROJECT_IDS,
+        AGENTS: c.AGENTS ?? baseCfg.AGENTS,
+        HIVE_LANE: c.HIVE_LANE ?? baseCfg.HIVE_LANE,
+        DEFAULT_LANE: c.DEFAULT_LANE ?? baseCfg.DEFAULT_LANE,
+        REVIEW_LANE: c.REVIEW_LANE ?? baseCfg.REVIEW_LANE,
+      },
+    };
+  });
 }
 
 /**
