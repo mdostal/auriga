@@ -18,15 +18,26 @@
  *   non-substrate default (CAPS, MODEL_PREFERENCES, etc.) plus fallback
  *   substrate defaults for any tenant that omits a given key.
  * @param {typeof fetch} [opts.fetchImpl]
+ * @param {Set<string> | null} [opts.allowlist] - when set, only tenant_ids in
+ *   this set are returned; every other real tenant the facade reports is
+ *   silently skipped. Real safety gap found live during s14's own first
+ *   deploy (2026-09-21): the facade returns EVERY tenant with
+ *   auriga_project_ids set, including ones an existing standalone
+ *   container is already actively dispatching (firefly-events) -- running
+ *   this loop against one of those risks a genuine double-dispatch race
+ *   with that other process. `null` (the default) means "every tenant the
+ *   facade returns" -- the deliberate, later, full-rollout mode once the
+ *   standalone containers for a given tenant have actually been retired.
  * @returns {Promise<Array<{tenantId: string, cfg: object}>>}
  */
-export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl = fetch }) {
+export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl = fetch, allowlist = null }) {
   const res = await fetchImpl(`${pantheonApiBaseUrl}/api/tenants/auriga-configs`);
   if (!res.ok) {
     throw new Error(`loadTenantConfigs: GET /api/tenants/auriga-configs -> ${res.status}`);
   }
   const body = await res.json();
-  const tenants = Array.isArray(body.tenants) ? body.tenants : [];
+  const allTenants = Array.isArray(body.tenants) ? body.tenants : [];
+  const tenants = allowlist ? allTenants.filter((t) => allowlist.has(t.tenant_id)) : allTenants;
   return tenants.map(({ tenant_id: tenantId, config }) => ({
     tenantId,
     cfg: {
