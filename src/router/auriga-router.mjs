@@ -392,6 +392,11 @@ export async function cycle(opts = {}) {
   // existing PR, caps per cycle (cfgImpl.CAPS.perCycleCascade), and records each handled
   // identifier in `cascaded` so selectAssignments below does not double-dispatch it.
   const cascaded = new Set();
+  // Accumulate per-runtime assignments across cascade AND zombie loops so the
+  // per-runtime cap is enforced within each loop and across both sequentially.
+  // selectAssignments derives its own runtimeInflight from inflight, so it is
+  // unaffected; this only fixes the within-loop gap.
+  const loopRtProjected = {};
   {
     const doneIds = new Set(
       issues
@@ -436,7 +441,7 @@ export async function cycle(opts = {}) {
         // path instead treats rerun as ALWAYS required (assign never enqueues on
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
-        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
+        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
         // If no agent has capacity, skip — dispatching rerun without a
         // valid assignee burns a cascade slot and enqueues on an already-full
         // agent. Try again next cycle when capacity frees up.
@@ -446,6 +451,8 @@ export async function cycle(opts = {}) {
         }
         spawn.assignIssue(c.identifier, agent);
         inflight[agent] = (inflight[agent] || 0) + 1;
+        const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+        if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         spawn.rerunIssue(c.identifier);
         assigned++;
@@ -657,7 +664,7 @@ export async function cycle(opts = {}) {
         if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
@@ -668,6 +675,8 @@ export async function cycle(opts = {}) {
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
+            const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+            if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }

@@ -769,3 +769,32 @@ test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxT
   assert.equal(result.assigned, 0, 'maxAssign:0 must result in zero dispatches');
   assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
 });
+
+test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
+  // Three separate blocked stories that can all cascade (each depends on a different done
+  // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev
+  // is runtime:codex). Before the fix, each chooseAgentForProject call saw
+  // projected.perRuntime={} — empty — so all three passed the runtime cap check and
+  // dispatched. After the fix, the first cascade assignment accumulates in loopRtProjected;
+  // subsequent iterations see runtime=1 >= cap=1 and log cascade_skip(no-capacity).
+  const fixtureCfg = withFixtureLanes({ 'cascade-rt-proj': ['auriga-dev'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+  };
+  const doneA = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  const doneC = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  // 'not-a-seed' prevents isSeed() from routing these through minerva-dev (planning lane);
+  // they must go through chooseAgentForProject so the codex runtime cap is exercised.
+  const childA = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneA.id } });
+  const childB = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneB.id } });
+  const childC = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneC.id } });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, doneC, childA, childB, childC], tightCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.length <= 1,
+    `per-runtime cap 1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
+});
