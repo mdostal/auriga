@@ -723,3 +723,49 @@ test('s14: two sequential per-tenant cycle() calls against one shared board neve
   assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
   assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
 });
+
+// ---- review-sweep findings (2026-09-21, second pass) ----------------------
+test('cascade: skips (does not call rerunIssue) when all agents are at capacity', async () => {
+  // Set up a single-agent lane (maxInflight:1) that is already saturated by
+  // an in_progress issue. A cascade candidate exists (done parent + blocked
+  // child with metadata dep). Before the fix, cycle() would call rerunIssue
+  // on the blocked child even with no available agent — burning a cascade slot
+  // and dispatching on an already-full agent. After the fix, it should log
+  // cascade_skip(reason: no-capacity) and leave calls.rerun empty.
+  const fixtureCfg = withFixtureLanes({ 'cascade-proj': ['auriga-dev'] });
+  // auriga-dev has maxInflight:3 by default. Override to 1 for this test.
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
+  };
+  const saturatingIssue = makeIssue({ project_id: 'cascade-proj', status: 'in_progress', assignee_id: tightCfg.AGENTS['auriga-dev'].id });
+  const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', metadata: { depends_on: doneParent.id } });
+  const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, doneParent, blockedChild], tightCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT rerun a blocked child when no agent has capacity');
+  const skipLog = log.byEvent('cascade_skip').find((e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity');
+  assert.ok(skipLog, 'cascade_skip(no-capacity) must be logged when skipping due to full inflight');
+});
+
+test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxTotal=0 not perCycleTotal)', async () => {
+  // maxAssign:0 means no assignments should happen. Before the fix,
+  // remaining=0 would fall back to perCycleTotal via the || operator, passing
+  // a non-zero maxTotal to selectAssignments. The main picks loop's guard
+  // still caught regular assigns, but the contract violation exists.
+  // This test verifies the direct postcondition: cycle() with maxAssign:0
+  // dispatches nothing and returns assigned:0.
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const issues = Array.from({ length: 3 }, () => makeIssue({ project_id: PANTHEON_CORE, parent_issue_id: 'fake-parent' }));
+  const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, maxAssign: 0 });
+
+  assert.equal(result.assigned, 0, 'maxAssign:0 must result in zero dispatches');
+  assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
+});
