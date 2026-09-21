@@ -54,3 +54,14 @@ test('chooseReviewAgent: null when the whole lane is at capacity', () => {
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 1 }), null);
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 0 }), 'auriga-review');
 });
+
+test('chooseReviewAgent: missing maxInflight field treats cap as Infinity — agent is still eligible regardless of inflight count', () => {
+  // Before the fix: `now < undefined` is false → agent filtered out → review dispatch
+  // never fires even though agentHasCapacity correctly allows the same agent.
+  const cfgNoCap = { REVIEW_LANE: ['rv-no-cap'], AGENTS: { 'rv-no-cap': { id: 'X' } } };
+  assert.equal(
+    chooseReviewAgent(cfgNoCap, { 'rv-no-cap': 999 }),
+    'rv-no-cap',
+    'review agent without maxInflight must never be blocked by the per-agent cap filter',
+  );
+});
