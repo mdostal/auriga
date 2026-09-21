@@ -723,3 +723,38 @@ test('s14: two sequential per-tenant cycle() calls against one shared board neve
   assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
   assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
 });
+
+// ---- PANT-328: --max-assign respected across multi-tenant cycle() calls ----
+// Mirrors the single-tenant main() test shape: a global budget of N is split
+// across tenant cycles by passing remaining = MAX - totalAssigned as maxAssign
+// to each per-tenant cycle(). Two tenants each have one dispatchable issue,
+// but MAX_ASSIGN=1 means only the first tenant gets its issue assigned.
+test('PANT-328: maxAssign budget shared across sequential per-tenant cycle() calls stops after cap is reached', async () => {
+  const tenantACfg = withFixtureLanes({ 'tenant-a-project': ['auriga-dev'] });
+  const tenantBCfg = withFixtureLanes({ 'tenant-b-project': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'tenant-a-project' });
+  const issueB = makeIssue({ project_id: 'tenant-b-project' });
+  const sharedBoard = [issueA, issueB];
+
+  const adaptersA = createMockAdapters(sharedBoard, tenantACfg.AGENTS);
+  const adaptersB = createMockAdapters(sharedBoard, tenantBCfg.AGENTS);
+  const log = createLogSink();
+
+  // Simulate mainMultiTenant()'s accumulator: budget=1, split across tenants.
+  let totalAssigned = 0;
+  const budget = 1;
+
+  const remainingA = Math.max(0, budget - totalAssigned);
+  const resultA = await cycle({ backlog: adaptersA.backlog, spawn: adaptersA.spawn, cfg: tenantACfg, log, sleep: NOOP_SLEEP, maxAssign: remainingA });
+  totalAssigned += resultA.assigned;
+
+  const remainingB = Math.max(0, budget - totalAssigned);
+  const resultB = await cycle({ backlog: adaptersB.backlog, spawn: adaptersB.spawn, cfg: tenantBCfg, log, sleep: NOOP_SLEEP, maxAssign: remainingB });
+  totalAssigned += resultB.assigned;
+
+  assert.equal(totalAssigned, 1, 'total assignments across both tenants must not exceed MAX_ASSIGN=1');
+  assert.equal(adaptersA.calls.assign.length, 1, 'tenant A dispatched its issue');
+  assert.equal(adaptersB.calls.assign.length, 0, 'tenant B was blocked by the exhausted budget');
+  assert.ok(issueA.assignee_id, "tenant A's issue is assigned");
+  assert.equal(issueB.assignee_id, null, "tenant B's issue is unassigned -- cap was hit");
+});
