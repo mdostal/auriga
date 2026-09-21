@@ -824,6 +824,7 @@ async function mainMultiTenant() {
 
   let rotation = 0;
   let iterations = 0;
+  let totalAssigned = 0;
   do {
     let tenants = [];
     try {
@@ -835,9 +836,12 @@ async function mainMultiTenant() {
       log('no_tenants_found', {});
     } else {
       for (const { tenantId, cfg: tenantCfg } of rotate(tenants, rotation)) {
+        if (totalAssigned >= MAX_ASSIGN) break;
+        const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
         try {
           const { backlog, spawn } = buildAdaptersForTenant(tenantId, tenantCfg);
-          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY });
+          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining });
+          totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
         } catch (e) {
           log('tenant_cycle_error', { tenant_id: tenantId, error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -846,10 +850,11 @@ async function mainMultiTenant() {
       rotation += 1;
     }
     iterations += 1;
+    if (totalAssigned >= MAX_ASSIGN) { log('max_assign_reached', { assigned: totalAssigned }); break; }
     if (!ONCE) await sleep(cfg.CAPS.cycleMs);
   } while (!ONCE);
 
-  log('stop_multi_tenant', { iterations });
+  log('stop_multi_tenant', { iterations, assigned: totalAssigned });
   releaseLock();
 }
 
