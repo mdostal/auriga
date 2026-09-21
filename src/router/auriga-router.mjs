@@ -443,6 +443,8 @@ export async function cycle(opts = {}) {
           }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
+          const _crt = cfgImpl.AGENTS[agent]?.runtime;
+          if (_crt) runtimeInflight[_crt] = (runtimeInflight[_crt] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
         }
         spawn.rerunIssue(c.identifier);
@@ -666,6 +668,8 @@ export async function cycle(opts = {}) {
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
+            const _zrt = cfgImpl.AGENTS[agent]?.runtime;
+            if (_zrt) runtimeInflight[_zrt] = (runtimeInflight[_zrt] || 0) + 1;
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }
