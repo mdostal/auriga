@@ -723,3 +723,38 @@ test('s14: two sequential per-tenant cycle() calls against one shared board neve
   assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
   assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
 });
+
+// ---- cascade: no-agent guard (2026-09-21) ----------------------------------
+// When detectCascadeDispatch returns an unassigned blocked/todo issue whose
+// dep is now done, but ALL agents are at capacity, cycle() must log
+// cascade_skip (not cascade_error) and must NOT call rerunIssue — which would
+// hit the server with an unassigned-issue rerun request and log a confusing
+// HTTP error as cascade_error. Mirrors the zombie recovery path's own
+// zombie_skip + continue guard for the same situation.
+test('cascade: when no agent has capacity and the cascaded issue is unassigned, logs cascade_skip and never calls rerunIssue', async () => {
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const done = makeIssue({ project_id: PANTHEON_CORE, status: 'done', parent_issue_id: 'epic-id' });
+  const dep = makeIssue({
+    project_id: PANTHEON_CORE, status: 'blocked', parent_issue_id: 'epic-id', assignee_id: null,
+    metadata: { depends_on: done.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([done, dep], cfg.AGENTS);
+  const log = createLogSink();
+
+  // Pin every agent at its maxInflight so no capacity remains for cascade
+  const saturatedCfg = {
+    ...cfg,
+    AGENTS: Object.fromEntries(
+      Object.entries(cfg.AGENTS).map(([name, a]) => [name, { ...a, maxInflight: 0 }])
+    ),
+  };
+
+  await cycle({ backlog, spawn, cfg: saturatedCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(calls.rerun.filter((r) => r.identifier === dep.identifier).length, 0,
+    'rerunIssue must NOT be called on an unassigned issue when no agent has capacity');
+  const skips = log.byEvent('cascade_skip').filter((e) => e.identifier === dep.identifier);
+  assert.ok(skips.length > 0, 'cascade_skip must be logged for the unassigned issue');
+  assert.equal(log.byEvent('cascade_error').filter((e) => e.identifier === dep.identifier).length, 0,
+    'cascade_error must NOT be logged when the correct skip path fires');
+});

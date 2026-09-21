@@ -437,6 +437,14 @@ export async function cycle(opts = {}) {
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
         const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
+        // No agent AND no existing assignee to re-enqueue: nothing to dispatch.
+        // Mirrors zombie recovery's own pattern (logImpl('zombie_skip', ...) + continue).
+        // Without this guard, rerunIssue on an unassigned issue causes a server error
+        // caught as cascade_error instead of the expected cascade_skip.
+        if (!agent && !issueObj.assignee_id) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-lane-capacity' });
+          continue;
+        }
         if (agent) {
           if (typeof spawn.selectRoute === 'function') {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
