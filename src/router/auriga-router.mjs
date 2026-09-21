@@ -91,6 +91,16 @@ const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
 // existing single-tenant container (standalone mode) when this is unset.
 const MULTI_TENANT = process.env.AURIGA_MULTI_TENANT === '1';
 const PANTHEON_API_URL = process.env.PANTHEON_API_URL || 'http://core-api:3012';
+// Real safety gap found live during s14's own first deploy (2026-09-21): the
+// facade returns EVERY tenant with auriga_project_ids set, including ones a
+// separate, already-live standalone container is actively dispatching --
+// running this loop unfiltered risks a genuine double-dispatch race. Unset
+// (the default) means "no restriction" -- the deliberate, later, full-
+// rollout mode once a tenant's standalone container has actually been
+// retired. Comma-separated tenant_ids, e.g. "dostal-tech,personal".
+const MULTI_TENANT_ALLOWLIST = process.env.AURIGA_MULTI_TENANT_ALLOWLIST
+  ? new Set(process.env.AURIGA_MULTI_TENANT_ALLOWLIST.split(',').map((s) => s.trim()).filter(Boolean))
+  : null;
 
 // Apply env cap overrides.
 if (process.env.AURIGA_PER_CYCLE_TOTAL) cfg.CAPS.perCycleTotal = parseInt(process.env.AURIGA_PER_CYCLE_TOTAL, 10);
@@ -815,7 +825,7 @@ async function mainMultiTenant() {
   do {
     let tenants = [];
     try {
-      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: cfg });
+      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: cfg, allowlist: MULTI_TENANT_ALLOWLIST });
     } catch (e) {
       log('tenant_configs_error', { error: e.message });
     }

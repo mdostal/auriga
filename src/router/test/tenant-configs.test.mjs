@@ -71,6 +71,38 @@ test('loadTenantConfigs: a tenant WITH its own AGENTS/lanes overrides the base c
   assert.deepEqual(cfg.REVIEW_LANE, BASE_CFG.REVIEW_LANE);
 });
 
+test('loadTenantConfigs: with an allowlist set, only returns tenants in it -- everything else the facade reports is silently skipped', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [
+      { tenant_id: 'dostal-tech', config: { PROJECT_IDS: ['p1'] } },
+      { tenant_id: 'personal', config: { PROJECT_IDS: ['p2'] } },
+      { tenant_id: 'firefly-events', config: { PROJECT_IDS: ['p3'] } }, // a real, already-live tenant -- must be excluded
+    ],
+  }), { status: 200 }));
+
+  const result = await loadTenantConfigs({
+    pantheonApiBaseUrl: 'http://core-api:3012',
+    baseCfg: BASE_CFG,
+    fetchImpl,
+    allowlist: new Set(['dostal-tech', 'personal']),
+  });
+
+  assert.deepEqual(result.map((r) => r.tenantId).sort(), ['dostal-tech', 'personal']);
+});
+
+test('loadTenantConfigs: no allowlist (default) returns every tenant the facade reports, unfiltered', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [
+      { tenant_id: 'dostal-tech', config: { PROJECT_IDS: ['p1'] } },
+      { tenant_id: 'firefly-events', config: { PROJECT_IDS: ['p3'] } },
+    ],
+  }), { status: 200 }));
+
+  const result = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.equal(result.length, 2);
+});
+
 test('loadTenantConfigs: throws with the real status code on a non-ok response', async () => {
   const fetchImpl = fakeFetch(() => new Response('', { status: 503 }));
   await assert.rejects(
