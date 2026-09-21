@@ -672,6 +672,36 @@ export async function cycle(opts = {}) {
     }
   }
 
+  // ---- assigned-idle recovery (PAN-7492 / PAN-8244) ----
+  // Recover assigned `todo` issues that never had a run start (the dead-zone
+  // scenario). Like zombie recovery, dispatches are restricted to
+  // cfgImpl.PROJECT_IDS — never fire into an unscanned/unaligned project.
+  {
+    const agentIds = coreImpl.agentIdSet(cfgImpl.AGENTS);
+    const todoAssigned = issues.filter(
+      (i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO &&
+        i.assignee_id && agentIds.has(i.assignee_id) &&
+        cfgImpl.PROJECT_IDS.includes(i.project_id)
+    );
+    const todoRunsByIssue = {};
+    for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+      inflight,
+      runtimeInflight,
+      blockedRuntimes,
+      maxTotal: Math.min(
+        cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
+        Math.max(0, maxAssign - assigned)
+      ),
+    });
+    for (const a of idleSelected) {
+      if (assigned >= maxAssign) break;
+      logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
+      if (!dryRun) { try { spawn.rerunIssue(a.identifier); assigned++; } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); } }
+    }
+  }
+
   // ---- route new todos ----
   const remaining = Math.max(0, maxAssign - assigned);
   const picks = coreImpl.selectAssignments(issues, cfgImpl, inflight, {
