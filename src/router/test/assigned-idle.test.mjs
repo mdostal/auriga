@@ -154,6 +154,42 @@ test('AC4c: per-cycle cap truncation is reported with its own reason so it is di
   assert.equal(result.skipped[0].skipReason, 'per-cycle-cap');
 });
 
+test('PANT-342: stale runtimeInflight must not override inflight-derived cap — omit it so the function recomputes', () => {
+  // Scenario: cascade/zombie added auriga-dev to codex this cycle, bumping inflight to
+  // { 'auriga-dev': 1, 'heimdall-dev-codex': 3 } → codex runtime at cap (4).
+  // The cycle-start runtimeInflight snapshot only saw 3 codex agents.
+  // Passing the stale snapshot would let recovery fire one more codex agent (wrong).
+  // Omitting it causes the function to recompute codex=4 from inflight and block it.
+  const issues = [assignedTodo('PAN-1', 'A')]; // auriga-dev → codex
+  const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+
+  // Stale runtimeInflight (cycle-start snapshot, doesn't know cascade added HC):
+  const staleRuntimeInflight = { codex: 3, opencode: 0, claude: 0 };
+  // Updated inflight (reflects cascade/zombie: HC now running 3):
+  const updatedInflight = { 'auriga-dev': 0, 'heimdall-dev-codex': 3 };
+
+  // Passing stale runtimeInflight would incorrectly allow recovery (codex sees 3 < 4):
+  const withStale = core.limitAssignedIdleRecoveries(actions, CFG, {
+    agents: CFG.AGENTS,
+    inflight: updatedInflight,
+    runtimeInflight: staleRuntimeInflight,
+    now: NOW,
+  });
+  assert.equal(withStale.selected.length, 1, 'stale snapshot incorrectly allows recovery (regression)');
+
+  // Omitting runtimeInflight causes recompute from inflight → codex=3, still under cap,
+  // but auriga-dev has 0 in-flight so it IS eligible. Now add auriga-dev's run to inflight
+  // to make codex hit exactly 4:
+  const atCapInflight = { 'auriga-dev': 1, 'heimdall-dev-codex': 3 };
+  const blocked = core.limitAssignedIdleRecoveries(actions, CFG, {
+    agents: CFG.AGENTS,
+    inflight: atCapInflight,
+    now: NOW,
+  });
+  assert.equal(blocked.selected.length, 0, 'recomputed runtimeInflight correctly blocks recovery at codex cap');
+  assert.equal(blocked.skipped[0].skipReason, 'at-capacity');
+});
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),
