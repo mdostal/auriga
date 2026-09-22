@@ -905,6 +905,41 @@ test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxT
   assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
 });
 
+// PANT-522: review dispatch loop was missing the maxAssign guard — every other
+// dispatch loop in cycle() has `if (assigned >= maxAssign) break;` but the
+// review loop did not, so review dispatches could overrun the hard cap.
+test('PANT-522: review dispatch loop respects maxAssign:0 (no review dispatches when cap is exhausted)', async () => {
+  // One in_review issue in a valid project: selectReviewDispatch will produce one
+  // rerun-review pick. With maxAssign:0, the guard must stop it from firing.
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const inReviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' });
+  const { backlog, spawn, calls } = createMockAdapters([inReviewIssue], cfg.AGENTS);
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, maxAssign: 0 });
+
+  assert.equal(result.assigned, 0, 'maxAssign:0 must block all dispatches including review');
+  assert.equal(calls.rerun.length, 0, 'rerunIssue must not be called when maxAssign:0');
+  assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
+});
+
+test('PANT-522: review dispatch loop respects maxAssign when perCycleReview allows multiple picks', async () => {
+  // Three in_review issues + perCycleReview:3 produces up to 3 review picks.
+  // With maxAssign:1, only the first pick must fire; the guard must stop the rest.
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const reviewCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCycleReview: 3 } };
+  const issues = Array.from({ length: 3 }, () => makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' }));
+  const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: reviewCfg, log, sleep: NOOP_SLEEP, maxAssign: 1 });
+
+  assert.equal(result.assigned, 1, 'maxAssign:1 must cap total dispatches at 1 even with 3 review picks');
+  const reviewReruns = calls.rerun.filter((r) => issues.some((i) => i.identifier === r.identifier));
+  assert.ok(reviewReruns.length <= 1,
+    `review loop must not fire more than 1 rerun when maxAssign:1, got ${reviewReruns.length}`);
+});
+
 test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
   // A cascade candidate exists (done parent + blocked child with metadata dep),
   // but the child's most recent run completed only 30 s ago — well within the
