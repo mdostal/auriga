@@ -667,6 +667,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue; // never auto-unblock an agent-parked issue
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });

@@ -832,6 +832,12 @@ test('detectUnblocks: cancelled dep counts as satisfied (terminal)', () => {
   assert.equal(core.detectUnblocks([b], statusById).length, 1);
 });
 
+test('detectUnblocks: agent-parked issue is never auto-unblocked even when all deps complete', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1', blocked_reason: 'needs human decision on X' } };
+  assert.equal(core.detectUnblocks([b], statusById).length, 0);
+});
+
 // ---- parent roll-up (all children terminal -> parent done) ------------------
 test('detectParentDone: parent rolls up once every child is done', () => {
   const issues = [
