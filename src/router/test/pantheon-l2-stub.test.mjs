@@ -314,6 +314,30 @@ test('createIssue() falls back to cfg.project as the default target when ticket.
   assert.equal(calls[0].body.project, 'default-project-id');
 });
 
+// ---- setIssueMetadata() ----------------------------------------------------------------
+
+test('setIssueMetadata() PUTs to /api/backlog/issues/:id/metadata with the metadata object', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  const result = backlog.setIssueMetadata('PAN-1', { router_assignment_fingerprint: 'abc123', router_assignment_agent: 'codex-dev-1' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'PUT');
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/metadata`);
+  assert.deepEqual(calls[0].body, { router_assignment_fingerprint: 'abc123', router_assignment_agent: 'codex-dev-1' });
+  assert.equal(result, null); // 204 no body
+});
+
+test('setIssueMetadata() degrades gracefully (returns null) on failure — never throws', async (t) => {
+  makeCurlMock(t, () => new Error('HTTP 502'));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  assert.equal(backlog.setIssueMetadata('PAN-1', { key: 'value' }), null);
+});
+
 // ---- SpawnAdapter ----------------------------------------------------------------------
 
 test('describeLanes(): unchanged from the multica-direct adapter -- zero Pantheon dependency', async (t) => {
