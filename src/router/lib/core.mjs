@@ -944,7 +944,6 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isAgentParked(i)) continue;
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
