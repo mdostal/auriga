@@ -479,6 +479,24 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
   assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
 });
 
+test('detectZombies skips explicitly-labeled seed issues (isSeedByLabel guard) — PANT-519', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'sd1', identifier: 'sd1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea', labels: ['idea'], metadata: {} },
+    { id: 'sd2', identifier: 'sd2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'needs plan', labels: ['needs-plan'], metadata: {} },
+    { id: 'sd3', identifier: 'sd3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea obj', labels: [{ name: 'idea' }], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'regular stalled story', labels: [], metadata: {} },
+    { id: 'ag2', identifier: 'ag2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not-a-seed idea', labels: ['idea', 'not-a-seed'], metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { sd1: [], sd2: [], sd3: [], ag1: [], ag2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('sd1'), 'idea-labeled (string) seed must be skipped');
+  assert.ok(!ids.includes('sd2'), 'needs-plan-labeled seed must be skipped');
+  assert.ok(!ids.includes('sd3'), 'idea-labeled (object) seed must be skipped');
+  assert.ok(ids.includes('ag1'), 'unlabeled stale story must still be recovered');
+  assert.ok(ids.includes('ag2'), 'not-a-seed escape hatch must bypass the seed guard');
+});
+
 
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
