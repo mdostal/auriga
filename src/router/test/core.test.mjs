@@ -460,6 +460,25 @@ test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
   assert.ok(ids.includes('zp2'), 'non-parked stale issue must be recovered');
 });
 
+test('detectZombies skips human-todo in_progress issues regardless of staleness or attempt count', () => {
+  const now = Date.now();
+  const staleMs = CFG.CAPS.zombieStaleMs + 1;
+  const inProgress = [
+    { id: 'ht1', identifier: 'ht1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work', labels: ['human-todo'], metadata: {} },
+    { id: 'ht2', identifier: 'ht2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work labeled obj', labels: [{ name: 'human-todo' }], metadata: {} },
+    { id: 'ht3', identifier: 'ht3', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'human work no assignee', labels: ['human-todo'], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'agent work', labels: [], metadata: {} },
+  ];
+  // All human-todo issues have no runs (stale), ensuring the guard fires before the staleness check
+  const runs = { ht1: [], ht2: [], ht3: [], ag1: [] };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('ht1'), 'human-todo (string label) must be skipped');
+  assert.ok(!ids.includes('ht2'), 'human-todo (object label) must be skipped');
+  assert.ok(!ids.includes('ht3'), 'human-todo with no assignee must be skipped');
+  assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
+});
+
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
 test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
