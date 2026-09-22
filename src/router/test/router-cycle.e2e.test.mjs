@@ -787,6 +787,46 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
   assert.ok(skipLog, 'cascade_skip(no-capacity) must be logged when skipping due to full inflight');
 });
 
+test('cascade: calls rerunIssue (without reassigning) for BLOCKED issue with existing assignee when no agent has capacity', async () => {
+  // PANT-341: the blanket !agent guard was over-broad. A previously-assigned
+  // blocked story whose deps cleared should get re-enqueued immediately, not
+  // wait for the assigned-idle recovery pass (~10 min). When !agent but
+  // assignee_id is set, rerunIssue must fire and assignIssue must NOT fire.
+  //
+  // Key setup: the dep is in_review (not done) at cycle start. The unblock
+  // pass sees it as non-terminal and skips blockedChild. detectVerifiedDone
+  // then advances the dep to done (via merged PR), so the CASCADE pass is the
+  // FIRST pass that sees blockedChild with satisfied deps — and blockedChild
+  // still has its original assignee_id intact at that point.
+  const fixtureCfg = withFixtureLanes({ 'cascade-proj-341': ['auriga-dev'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
+  };
+  const existingAgent = tightCfg.AGENTS['auriga-dev'].id;
+  const saturatingIssue = makeIssue({ project_id: 'cascade-proj-341', status: 'in_progress', assignee_id: existingAgent });
+  // The dep starts as in_review so the unblock pass doesn't convert blockedChild.
+  // detectVerifiedDone will advance it to done (via the merged PR below).
+  const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review' });
+  // blocked child already assigned to the agent — this is the PANT-341 case
+  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
+  const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, inReviewParent, blockedChild], tightCfg.AGENTS);
+  // Merged PR for the dep: detectVerifiedDone advances inReviewParent to done,
+  // satisfying blockedChild's dep for the cascade pass.
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade MUST call rerunIssue for a blocked child that already has an assignee, even when no new agent has capacity');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue when re-enqueueing a previously-assigned blocked child');
+  assert.ok(!log.byEvent('cascade_skip').some((e) => e.identifier === blockedChild.identifier),
+    'cascade_skip must NOT be logged for a blocked child with an existing assignee');
+});
+
 test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxTotal=0 not perCycleTotal)', async () => {
   // maxAssign:0 means no assignments should happen. Before the fix,
   // remaining=0 would fall back to perCycleTotal via the || operator, passing
