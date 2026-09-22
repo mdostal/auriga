@@ -346,12 +346,13 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 // (see classifyRun) is the only signal. Only considers issues currently
 // in_progress, so a re-scan after the transition naturally stops re-firing
 // (the issue is no longer in the input set) — idempotent by construction.
-export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}) {
+export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue;
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {

@@ -336,7 +336,7 @@ export async function cycle(opts = {}) {
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
