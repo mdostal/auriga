@@ -664,6 +664,11 @@ export async function cycle(opts = {}) {
         continue;
       }
       if (z.action === 'rerun') {
+        const zombieAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === z.assigneeId)?.[0];
+        const zombieRt = zombieAgentName && cfgImpl.AGENTS[zombieAgentName]?.runtime;
+        if (zombieRt && blockedRuntimes.has(zombieRt)) {
+          logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', runtime: zombieRt }); continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
         if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
