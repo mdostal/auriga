@@ -370,6 +370,7 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
     const prs = prsByIssue[i.identifier] || [];
     const merged = prs.some(isPrMerged);
     if (merged) {

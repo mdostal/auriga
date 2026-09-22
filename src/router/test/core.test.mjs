@@ -338,6 +338,21 @@ test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, cam
   assert.equal(actions[0].action, 'advance-done');
 });
 
+test('detectVerifiedDone: skips agent-parked in_review issues even when PR is merged — PANT-496', () => {
+  const inReview = [
+    { id: 'p1', identifier: 'PANT-X', project_id: 'AURIGA', status: 'in_review', title: 'parked story', metadata: { blocked_reason: 'security regression in PR branch — human must audit before merge' } },
+    { id: 'p2', identifier: 'PANT-Y', project_id: 'AURIGA', status: 'in_review', title: 'normal story', metadata: {} },
+  ];
+  const prs = {
+    'PANT-X': [{ state: 'MERGED', mergedAt: '2026-09-22T00:00:00Z' }],
+    'PANT-Y': [{ state: 'MERGED', mergedAt: '2026-09-22T00:00:00Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PANT-Y');
+  assert.equal(actions[0].action, 'advance-done');
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
