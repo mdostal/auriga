@@ -1067,3 +1067,32 @@ test('cascade: per-cycle-per-agent cap is enforced across multiple cascade itera
   assert.ok(capSkips.length >= 2,
     `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
 });
+
+// ---- PANT-549: blockedRuntimes guard in the build-dispatch picks loop --------
+// Regression for blockedRuntimes being write-only in the picks loop: after a
+// rate-limit 429, all remaining picks for the same runtime were dispatched
+// unconditionally instead of being skipped.
+
+test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks for that runtime in the same cycle', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-codex-project': ['auriga-dev'] });
+  const issues = [
+    makeIssue({ project_id: 'fixture-codex-project', parent_issue_id: 'fake-parent' }),
+    makeIssue({ project_id: 'fixture-codex-project', parent_issue_id: 'fake-parent' }),
+  ];
+  // Fail ALL identifiers — regardless of pick order the first attempt will
+  // trigger the rate-limit error, populate blockedRuntimes, and the guard must
+  // then skip the remaining pick without attempting it.
+  const { backlog, spawn, calls } = createMockAdapters(issues, fixtureCfg.AGENTS, {
+    failAssignFor: new Set(issues.map((i) => i.identifier)),
+  });
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(calls.assign.length, 1,
+    'only the first codex pick must be attempted; the rest must be skipped once the runtime is blocked');
+  assert.equal(result.assigned, 0, 'a failed assign must not count towards assigned');
+  const skipped = log.byEvent('skip_blocked_runtime');
+  assert.equal(skipped.length, 1, 'the second codex pick must log skip_blocked_runtime');
+  assert.equal(skipped[0].runtime, 'codex', 'the skipped pick must name the blocked runtime');
+});
