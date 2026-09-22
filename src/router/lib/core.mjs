@@ -957,6 +957,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 // cap, blocked/rate-limited runtimes) instead of a flat 1-per-agent throttle.
 export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const maxTotal = opts.maxTotal ?? cfg.CAPS.assignedIdlePerCycle ?? cfg.CAPS.perCycleTotal;
+  const maxPerAgent = opts.maxPerAgent ?? cfg.CAPS.perCyclePerAgent ?? Infinity;
   const agents = opts.agents || cfg.AGENTS;
   const agentNameById = opts.agentNameById || Object.fromEntries(
     Object.entries(agents).map(([name, a]) => [a.id, name])
@@ -965,7 +966,7 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const inflight = opts.inflight || {};
   const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
   const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
-  const projected = { perAgent: {}, perRuntime: {} };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
 
   const selected = [];
   const skipped = [];
@@ -986,8 +987,13 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
       skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'at-capacity' });
       continue;
     }
+    if ((projected.perAgentCycle[name] || 0) >= maxPerAgent) {
+      skipped.push({ ...action, agent: name, runtime: agent.runtime, skipReason: 'per-cycle-per-agent-cap' });
+      continue;
+    }
     projected.perAgent[name] = (projected.perAgent[name] || 0) + 1;
     projected.perRuntime[agent.runtime] = (projected.perRuntime[agent.runtime] || 0) + 1;
+    projected.perAgentCycle[name] = (projected.perAgentCycle[name] || 0) + 1;
     selected.push({ ...action, agent: name, runtime: agent.runtime });
   }
   return { selected, skipped };
