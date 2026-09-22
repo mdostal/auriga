@@ -397,6 +397,7 @@ export async function cycle(opts = {}) {
   // selectAssignments derives its own runtimeInflight from inflight, so it is
   // unaffected; this only fixes the within-loop gap.
   const loopRtProjected = {};
+  const priorAgentCycleAssigns = {};
   {
     const doneIds = new Set(
       issues
@@ -469,6 +470,7 @@ export async function cycle(opts = {}) {
           inflight[agent] = (inflight[agent] || 0) + 1;
           const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
+          priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
           assigned++;
         }
@@ -694,6 +696,7 @@ export async function cycle(opts = {}) {
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
+            priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
             const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
@@ -745,6 +748,7 @@ export async function cycle(opts = {}) {
     exclude: cascaded,
     maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining),
     parentBoardConfig,
+    priorAgentCycleAssigns,
   });
 
   for (const p of picks) {

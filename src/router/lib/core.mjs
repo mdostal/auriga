@@ -227,7 +227,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const exclude = opts.exclude || new Set();
 
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
 
   // issueId -> lowercased status, over the WHOLE scanned board (not just candidates) so the
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
