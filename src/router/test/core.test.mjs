@@ -595,6 +595,30 @@ test('routing: seed skipped when minerva-dev has no capacity, never falls back t
   assert.ok(!picks.some((p) => p.agent !== 'minerva-dev')); // never falls back to a build agent
 });
 
+// PANT-427: seed path was missing the assignmentDecision noop check the non-seed path has.
+// A seed already correctly assigned to minerva-dev must not produce a redundant dispatch.
+test('routing: seed already assigned to minerva-dev (router-managed) produces no dispatch — already-assigned-target noop', () => {
+  // assignee_id 'M' resolves to minerva-dev in CFG; router_assignment_agent makes it router-managed.
+  const issue = {
+    ...todo('seed-rma', 'AURIGA', 1, 'M'),
+    labels: ['idea'],
+    metadata: { router_assignment_agent: 'minerva-dev' },
+  };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 0, 'already-assigned-target seed must not re-dispatch');
+});
+
+test('routing: seed with unchanged router-managed fingerprint for minerva-dev produces no dispatch', () => {
+  const base = { ...todo('seed-rfp', 'AURIGA', 1), labels: ['idea'] };
+  const tracked = {
+    ...base,
+    assignee_id: 'M', // minerva-dev
+    metadata: assignmentMetadata(base, 'minerva-dev', CFG, { now: 0 }),
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: 500 });
+  assert.equal(picks.length, 0, 'unchanged fingerprint seed must not re-dispatch');
+});
+
 // ---- BACK-HALF: review / ship dispatch ----------------------------------
 
 const NOW = 1_700_000_000_000;
