@@ -918,6 +918,62 @@ test('cascade: dispatches normally when last run completed beyond redispatchCool
     'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
 });
 
+// PANT-431: detectVerifiedDone + selectReviewDispatch same-cycle stale-snapshot
+// regression. When a merged PR advances an in_review issue to done in the same
+// cycle that its review run has gone stale, selectReviewDispatch must NOT emit
+// a rerun-review dispatch for it — the issue is already done.
+test('an in_review issue advanced to done by a merged PR in the same cycle is never re-dispatched for review (PANT-431)', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const FIXED_NOW = Date.now();
+  const reviewAgentId = cfg.AGENTS['auriga-review'].id;
+  const story = makeIssue({
+    project_id: AURIGA,
+    status: 'in_review',
+    assignee_id: reviewAgentId,
+  });
+  // Stale run: completed well beyond zombieStaleMs ago so selectReviewDispatch
+  // would hit the rerun-review branch if the issue were still present.
+  const staleAge = (cfg.CAPS.zombieStaleMs ?? 20 * 60 * 1000) + 60 * 60 * 1000;
+  const staleAt = new Date(FIXED_NOW - staleAge).toISOString();
+  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS);
+  backlog.listCandidatePullRequests = () => [{
+    number: 99,
+    title: `fix: ${story.identifier} implementation`,
+    headRefName: `fix/${story.identifier.toLowerCase()}-impl`,
+    body: story.identifier,
+    state: 'merged',
+    merged_at: new Date(FIXED_NOW - 5000).toISOString(),
+    url: `https://github.com/acme/repo/pull/99`,
+  }];
+  // Seed the stale run so selectReviewDispatch sees it; it must NOT act on it.
+  backlog.getIssueRuns = (identifier) => {
+    if (identifier === story.identifier) {
+      return [{ status: 'completed', completed_at: staleAt, created_at: staleAt }];
+    }
+    return [];
+  };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  const advanced = log.byEvent('advance').find(
+    (e) => e.identifier === story.identifier && e.to === 'done'
+  );
+  assert.ok(advanced, 'detectVerifiedDone must advance the in_review story to done via the merged PR');
+
+  const reviewEvents = log.byEvent('review').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewEvents.length, 0,
+    'selectReviewDispatch must not emit a review event for an issue already advanced to done this cycle');
+
+  const reviewDispatched = log.byEvent('review_dispatched').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewDispatched.length, 0,
+    'must not fire a review_dispatched log event for a just-done ticket');
+
+  const reruns = calls.rerun.filter((r) => r.identifier === story.identifier);
+  assert.equal(reruns.length, 0,
+    'spawn.rerunIssue must not be called for an issue that was advanced to done in the same cycle');
+});
+
 test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
   // Three separate blocked stories that can all cascade (each depends on a different done
   // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev

@@ -359,6 +359,13 @@ export async function cycle(opts = {}) {
       }
     }
   }
+  // Exclude just-advanced issues from the review-dispatch snapshot so a stale
+  // run on a now-done ticket does not trigger a spurious rerun-review in this
+  // same cycle (mirrors the `cascaded` exclusion in selectAssignments below).
+  const _verifiedThisCycle = new Set(verified.map((v) => v.identifier));
+  const inReviewForDispatch = _verifiedThisCycle.size
+    ? inReview.filter((i) => !_verifiedThisCycle.has(i.identifier))
+    : inReview;
 
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
@@ -556,8 +563,8 @@ export async function cycle(opts = {}) {
   // fix — a firefly-events instance was confirmed live trying to dispatch review
   // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
   // this and the whole board-wide-status-pass audit that followed it).
-  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
+  const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
