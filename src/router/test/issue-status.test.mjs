@@ -25,10 +25,12 @@ test('ISSUE_STATUS carries every value this router has relied on', () => {
   assert.equal(ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, 'in progress');
 });
 
-test('isTerminalIssueStatus: true for done, cancelled, and canceled', () => {
+test('isTerminalIssueStatus: true for done, cancelled, canceled, shipped, and complete', () => {
   assert.equal(isTerminalIssueStatus(ISSUE_STATUS.DONE), true);
   assert.equal(isTerminalIssueStatus(ISSUE_STATUS.CANCELLED), true);
   assert.equal(isTerminalIssueStatus(ISSUE_STATUS.CANCELED), true);
+  assert.equal(isTerminalIssueStatus(ISSUE_STATUS.SHIPPED), true);
+  assert.equal(isTerminalIssueStatus(ISSUE_STATUS.COMPLETE), true);
 });
 
 test('isTerminalIssueStatus: false for every non-terminal status, including empty/undefined', () => {
