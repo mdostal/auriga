@@ -53,6 +53,7 @@ function rawBoardIssue(overrides = {}) {
   return {
     id: 'issue-1',
     identifier: 'PAN-1',
+    number: 1,
     title: 'Some issue',
     description: 'desc',
     status: 'todo',
@@ -79,7 +80,7 @@ test('listIssues() GETs the project-scoped route and maps back to raw, snake_cas
   assert.equal(calls[0].method, 'GET');
   assert.match(calls[0].url, /\/api\/backlog\/issues\?project=proj-1$/);
   assert.deepEqual(issues, [{
-    id: 'issue-1', identifier: 'PAN-1', title: 'Some issue', description: 'desc', status: 'todo',
+    id: 'issue-1', identifier: 'PAN-1', number: 1, title: 'Some issue', description: 'desc', status: 'todo',
     labels: ['a-label'], assignee_id: 'agent-uuid-1', assignee_type: 'agent', project_id: 'proj-1',
     parent_issue_id: null, metadata: { foo: 1 }, created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
