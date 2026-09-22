@@ -12,7 +12,7 @@ function statusMap(issues) {
 
 test('cascade: a completed parent enqueues its blocked dependent (metadata dep)', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', parent_issue_id: 'EPIC', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -23,7 +23,7 @@ test('cascade: a completed parent enqueues its blocked dependent (metadata dep)'
 
 test('cascade: also enqueues a TODO dependent whose deps are now satisfied', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', parent_issue_id: 'EPIC', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -131,4 +131,34 @@ test('cascade: a story already in-flight (assigned+queued) is NOT re-cascade-enq
   const queued = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', assignee_id: 'ag-1', title: 'c', metadata: { depends_on: 'A' } };
   const issues = [parent, queued];
   assert.equal(core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length, 0);
+});
+
+test('cascade: a seed (idea/needs-plan label) is NOT cascade-dispatched even when all deps satisfied', () => {
+  const dep = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'prereq' };
+  const seed = {
+    id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'planning story',
+    labels: [{ name: 'needs-plan' }],
+    metadata: { depends_on: 'A' },
+  };
+  const issues = [dep, seed];
+  assert.equal(
+    core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length,
+    0,
+    'seed must never be routed to a build lane via cascade',
+  );
+});
+
+test('cascade: a top-level childless story (heuristic seed) is NOT cascade-dispatched', () => {
+  const dep = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'prereq' };
+  const seed = {
+    id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'heuristic seed',
+    metadata: { depends_on: 'A' },
+    // no parent_issue_id, no children -> heuristic isSeed = true
+  };
+  const issues = [dep, seed];
+  assert.equal(
+    core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length,
+    0,
+    'heuristic seed must not be cascade-dispatched to a build lane',
+  );
 });
