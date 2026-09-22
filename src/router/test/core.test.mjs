@@ -736,9 +736,10 @@ const inReview = (id, num, assignee = null, extra = {}) => ({
   id, identifier: id, project_id: 'PCORE', number: num, status: 'in_review',
   assignee_id: assignee, title: 'work', description: 'target_repo: mdostal/cron-maker\n', ...extra,
 });
-const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOString() };
-const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString() };
-const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString() };
+// PANT-531: run fixtures include agent_id so the review-phase filter works correctly.
+const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOString(), agent_id: 'RV' };
+const doneFresh = { status: 'completed', completed_at: new Date(NOW - 1000).toISOString(), agent_id: 'RV' };
+const doneStale = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString(), agent_id: 'RV' };
 
 test('reviewEligible: status-only, unconditionally true — Auriga never checks GitHub to gate review dispatch', () => {
   assert.ok(core.hasTargetRepo({ description: 'foo\ntarget_repo: mdostal/cron-maker\nbar' }));
@@ -841,9 +842,10 @@ test('selectReviewDispatch: human-todo label suppresses rerun-review on stale re
 // for over an hour while PANT-255..260 sat completely unreviewed.
 
 test('selectReviewDispatch: a ticket at the fairness threshold is deprioritized behind a fresher in_review ticket', () => {
-  const exhausted = inReview('PANT-208', 1); // many accumulated runs, never resolves
+  const exhausted = inReview('PANT-208', 1); // many accumulated review runs, never resolves
   const fresh = inReview('PANT-255', 2); // brand-new in_review ticket, no runs yet
-  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', completed_at: new Date(NOW - 60_000).toISOString() }));
+  // PANT-531: runs must have agent_id 'RV' to count as review-phase runs.
+  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', completed_at: new Date(NOW - 60_000).toISOString(), agent_id: 'RV' }));
   const picks = core.selectReviewDispatch(
     [exhausted, fresh], { 'PANT-208': manyRuns, 'PANT-255': [] }, CFG, {}, { now: NOW }
   );
@@ -881,8 +883,9 @@ test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopoli
     assert.ok(picks.length <= 1); // perCycleReview cap still respected every cycle
     for (const p of picks) {
       // A real dispatch always leaves a run behind -- feed that back in so the
-      // fairness signal (accumulated run count) grows exactly like production.
-      runsByIssue[p.identifier].push({ status: 'completed', completed_at: new Date(NOW + c * 1000).toISOString() });
+      // fairness signal (accumulated review-run count) grows exactly like production.
+      // PANT-531: agent_id 'RV' marks this as a review-phase run.
+      runsByIssue[p.identifier].push({ status: 'completed', completed_at: new Date(NOW + c * 1000).toISOString(), agent_id: 'RV' });
       if (p.identifier === starver.identifier) continue; // never resolves -- stays in_review
       dispatchedOther.add(p.identifier); // a real ticket resolved -> leaves in_review
     }
@@ -892,6 +895,43 @@ test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopoli
   // Every genuinely different in_review ticket eventually got a real dispatch
   // turn -- not just the starver, forever.
   assert.equal(dispatchedOther.size, others.length);
+});
+
+// ---- PANT-531: build-phase runs must not inflate review thresholds --------
+
+test('selectReviewDispatch: build-phase runs (no review agent_id) do not count toward fairness threshold — PANT-531', () => {
+  // Story had 3 build iterations (total runs = 3) but just entered in_review for the first time.
+  // Before PANT-531 fix: attemptsOf returned 3 >= fairnessMax(3), so it was deprioritized behind fresh.
+  // After fix: only review-phase runs count; attemptsOf = 0, so it competes normally.
+  const heavyBuild = inReview('PANT-531A', 1); // entered review after 3 build runs
+  const fresh = inReview('PANT-531B', 2);
+  const buildRuns = Array.from({ length: 3 }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (3 - k) * 60_000).toISOString(),
+    // no agent_id (or a build-lane agent_id) — these are build-phase runs
+  }));
+  const picks = core.selectReviewDispatch(
+    [heavyBuild, fresh], { 'PANT-531A': buildRuns, 'PANT-531B': [] }, CFG, {}, { now: NOW }
+  );
+  assert.equal(picks.length, 1);
+  // With PANT-531 fix: heavyBuild has 0 review runs, NOT deprioritized — wins its natural caller order.
+  assert.equal(picks[0].identifier, 'PANT-531A');
+});
+
+test('selectReviewDispatch: 5 build-phase runs do not trigger give-up-review on first review dispatch — PANT-531', () => {
+  // Story with 5 build runs just entered in_review (assigned to review agent).
+  // Before fix: runs.length(5) >= reviewMaxAttempts(5) -> immediate give-up-review.
+  // After fix: reviewRunCount = 0 < 5, so it gets rerun-review (the stale path).
+  const heavyBuild = inReview('PANT-531C', 3, 'RV'); // assigned to review agent
+  const buildOnlyRuns = Array.from({ length: 5 }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (5 - k + 1) * 60 * 60_000).toISOString(),
+    // no agent_id — build runs, not review runs
+  }));
+  const picks = core.selectReviewDispatch(
+    [heavyBuild], { 'PANT-531C': buildOnlyRuns }, CFG, { 'auriga-review': 1 }, { now: NOW }
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'rerun-review'); // NOT give-up-review
+  assert.equal(picks[0].identifier, 'PANT-531C');
 });
 
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
