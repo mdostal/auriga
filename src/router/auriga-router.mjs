@@ -701,7 +701,6 @@ export async function cycle(opts = {}) {
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
     const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
       inflight,
-      runtimeInflight,
       blockedRuntimes,
       maxTotal: Math.min(
         cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
@@ -711,7 +710,14 @@ export async function cycle(opts = {}) {
     for (const a of idleSelected) {
       if (assigned >= maxAssign) break;
       logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
-      if (!dryRun) { try { spawn.rerunIssue(a.identifier); assigned++; } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); } }
+      if (!dryRun) {
+        try {
+          spawn.rerunIssue(a.identifier);
+          assigned++;
+          inflight[a.agent] = (inflight[a.agent] || 0) + 1;
+          if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
+        } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+      }
     }
   }
 
