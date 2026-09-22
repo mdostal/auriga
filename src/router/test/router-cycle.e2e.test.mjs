@@ -522,6 +522,28 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
   assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
 });
 
+// ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----
+
+test('zombie assign: an unassigned in_progress zombie gets assignIssue then rerunIssue (PANT-409)', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  // No assignee_id → detectZombies emits action:'assign'
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 1, 'zombie assign must count towards assigned');
+  assert.ok(calls.assign.some((c) => c.identifier === stuckIssue.identifier), 'zombie assign must call assignIssue');
+  assert.ok(calls.rerun.some((c) => c.identifier === stuckIssue.identifier), 'zombie assign must call rerunIssue after assignIssue (PANT-409)');
+  const zombieLogs = log.byEvent('zombie');
+  assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
+});
+
 // ---- t015: orchestrator hand-up (real cycle()-level, not just selectAssignments) ----
 
 function saturateAgent(fixtureCfg, agentName, projectId, n) {
@@ -593,7 +615,7 @@ test('t015: no configured parent -- zero remote calls, ticket falls through to t
   assert.equal(log.byEvent('hand_up').length, 0);
 });
 
-test('t015: a remote create failure logs hand_up_error and applies NONE of the local comment/unassign/status side effects', async () => {
+test('t015: a remote create failure logs hand_up_error, undoes the pre-cancel, and applies no comment/unassign side effects', async () => {
   const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
   const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
   const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
@@ -613,8 +635,46 @@ test('t015: a remote create failure logs hand_up_error and applies NONE of the l
 
   assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'no local unassign on remote failure');
   assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no local comment on remote failure');
-  assert.ok(!calls.status.some((c) => c.identifier === handUpIssue.identifier), 'no local status change on remote failure');
+  // Pre-cancel (→ cancelled) fires before createIssue, then undo (→ todo) fires on failure.
+  const statusCalls = calls.status.filter((c) => c.identifier === handUpIssue.identifier);
+  assert.ok(statusCalls.some((c) => c.status === 'cancelled'), 'pre-cancel must be attempted before remote create');
+  assert.ok(statusCalls.some((c) => c.status === 'todo'), 'undo-cancel must be attempted after remote create failure');
+  assert.equal(handUpIssue.status, 'todo', 'net status must be restored to todo so the issue re-enters the candidate pool');
   assert.equal(log.byEvent('hand_up_error').length, 1);
+  assert.equal(log.byEvent('hand_up_ok').length, 0);
+});
+
+test('t015: if the pre-cancel fails the remote create is skipped entirely — no duplicate and issue retains todo status', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
+  const { backlog, spawn, calls } = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  // Patch backlog to throw on setIssueStatus for this identifier only.
+  const origSetStatus = backlog.setIssueStatus;
+  backlog.setIssueStatus = (id, status) => {
+    if (id === handUpIssue.identifier) throw new Error('transient API error');
+    origSetStatus(id, status);
+  };
+
+  const remoteCreateCalls = [];
+  const createRemoteBacklog = () => ({
+    createIssue: (ticket) => { remoteCreateCalls.push(ticket); return { identifier: 'PARENT-1' }; },
+  });
+
+  await assert.doesNotReject(cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: { id: 'firefly-events' }, children: [] }),
+    loadExternalConfig: () => ({ parentBoard: { baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' } }),
+    createRemoteBacklog,
+  }));
+
+  assert.equal(remoteCreateCalls.length, 0, 'remote create must not be called when pre-cancel fails');
+  assert.equal(handUpIssue.status, 'todo', 'issue must remain todo for retry next cycle');
+  assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'no unassign when pre-cancel fails');
+  assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no comment when pre-cancel fails');
+  assert.equal(log.byEvent('hand_up_pre_cancel_error').length, 1);
   assert.equal(log.byEvent('hand_up_ok').length, 0);
 });
 
@@ -722,4 +782,288 @@ test('s14: two sequential per-tenant cycle() calls against one shared board neve
     "tenant B's cycle() must only ever dispatch tenant B's own issue");
   assert.ok(issueA.assignee_id, "tenant A's issue must have been assigned");
   assert.ok(issueB.assignee_id, "tenant B's issue must have been assigned");
+});
+
+// ---- maxAssign in simulated multi-tenant loop (2026-09-21) ----------------
+// mainMultiTenant() was not threading MAX_ASSIGN into cycle() calls at all,
+// so --max-assign was silently ignored in multi-tenant mode. The fix tracks
+// totalAssigned and passes maxAssign: remaining to each tenant's cycle().
+// This test simulates the mainMultiTenant loop shape: two sequential cycle()
+// calls sharing a totalAssigned budget of 1. After the first dispatch,
+// remaining=0 and the second tenant's cycle must dispatch nothing.
+test('s14: maxAssign budget is shared across sequential per-tenant cycle() calls (simulates mainMultiTenant MAX_ASSIGN threading)', async () => {
+  const tenantACfg = withFixtureLanes({ 'tenant-a-project': ['auriga-dev'] });
+  const tenantBCfg = withFixtureLanes({ 'tenant-b-project': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'tenant-a-project' });
+  const issueB = makeIssue({ project_id: 'tenant-b-project' });
+  const sharedBoard = [issueA, issueB];
+
+  const adaptersA = createMockAdapters(sharedBoard, tenantACfg.AGENTS);
+  const adaptersB = createMockAdapters(sharedBoard, tenantBCfg.AGENTS);
+  const log = createLogSink();
+
+  const MAX_ASSIGN = 1;
+  let totalAssigned = 0;
+
+  // Tenant A's cycle: remaining budget = 1
+  const resultA = await cycle({ backlog: adaptersA.backlog, spawn: adaptersA.spawn, cfg: tenantACfg, log, sleep: NOOP_SLEEP, maxAssign: Math.max(0, MAX_ASSIGN - totalAssigned) });
+  totalAssigned += resultA.assigned;
+
+  // Tenant B's cycle: remaining budget = 0 (A used it all)
+  const remaining = Math.max(0, MAX_ASSIGN - totalAssigned);
+  const resultB = await cycle({ backlog: adaptersB.backlog, spawn: adaptersB.spawn, cfg: tenantBCfg, log, sleep: NOOP_SLEEP, maxAssign: remaining });
+  totalAssigned += resultB.assigned;
+
+  assert.equal(totalAssigned, 1, 'total dispatches must not exceed maxAssign=1');
+  assert.equal(adaptersA.calls.assign.length, 1, "tenant A's cycle must dispatch exactly 1 (within budget)");
+  assert.equal(adaptersB.calls.assign.length, 0, "tenant B's cycle must dispatch 0 (budget exhausted by A)");
+});
+
+// ---- review-sweep findings (2026-09-21, second pass) ----------------------
+test('cascade: skips (does not call rerunIssue) when all agents are at capacity', async () => {
+  // Set up a single-agent lane (maxInflight:1) that is already saturated by
+  // an in_progress issue. A cascade candidate exists (done parent + blocked
+  // child with metadata dep). Before the fix, cycle() would call rerunIssue
+  // on the blocked child even with no available agent — burning a cascade slot
+  // and dispatching on an already-full agent. After the fix, it should log
+  // cascade_skip(reason: no-capacity) and leave calls.rerun empty.
+  const fixtureCfg = withFixtureLanes({ 'cascade-proj': ['auriga-dev'] });
+  // auriga-dev has maxInflight:3 by default. Override to 1 for this test.
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
+  };
+  const saturatingIssue = makeIssue({ project_id: 'cascade-proj', status: 'in_progress', assignee_id: tightCfg.AGENTS['auriga-dev'].id });
+  const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', metadata: { depends_on: doneParent.id } });
+  const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, doneParent, blockedChild], tightCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT rerun a blocked child when no agent has capacity');
+  const skipLog = log.byEvent('cascade_skip').find((e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity');
+  assert.ok(skipLog, 'cascade_skip(no-capacity) must be logged when skipping due to full inflight');
+});
+
+test('cascade: calls rerunIssue (without reassigning) for BLOCKED issue with existing assignee when no agent has capacity', async () => {
+  // PANT-341: the blanket !agent guard was over-broad. A previously-assigned
+  // blocked story whose deps cleared should get re-enqueued immediately, not
+  // wait for the assigned-idle recovery pass (~10 min). When !agent but
+  // assignee_id is set, rerunIssue must fire and assignIssue must NOT fire.
+  //
+  // Key setup: the dep is in_review (not done) at cycle start. The unblock
+  // pass sees it as non-terminal and skips blockedChild. detectVerifiedDone
+  // then advances the dep to done (via merged PR), so the CASCADE pass is the
+  // FIRST pass that sees blockedChild with satisfied deps — and blockedChild
+  // still has its original assignee_id intact at that point.
+  const fixtureCfg = withFixtureLanes({ 'cascade-proj-341': ['auriga-dev'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
+  };
+  const existingAgent = tightCfg.AGENTS['auriga-dev'].id;
+  const saturatingIssue = makeIssue({ project_id: 'cascade-proj-341', status: 'in_progress', assignee_id: existingAgent });
+  // The dep starts as in_review so the unblock pass doesn't convert blockedChild.
+  // detectVerifiedDone will advance it to done (via the merged PR below).
+  const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review' });
+  // blocked child already assigned to the agent — this is the PANT-341 case
+  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
+  const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, inReviewParent, blockedChild], tightCfg.AGENTS);
+  // Merged PR for the dep: detectVerifiedDone advances inReviewParent to done,
+  // satisfying blockedChild's dep for the cascade pass.
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade MUST call rerunIssue for a blocked child that already has an assignee, even when no new agent has capacity');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue when re-enqueueing a previously-assigned blocked child');
+  assert.ok(!log.byEvent('cascade_skip').some((e) => e.identifier === blockedChild.identifier),
+    'cascade_skip must NOT be logged for a blocked child with an existing assignee');
+});
+
+test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxTotal=0 not perCycleTotal)', async () => {
+  // maxAssign:0 means no assignments should happen. Before the fix,
+  // remaining=0 would fall back to perCycleTotal via the || operator, passing
+  // a non-zero maxTotal to selectAssignments. The main picks loop's guard
+  // still caught regular assigns, but the contract violation exists.
+  // This test verifies the direct postcondition: cycle() with maxAssign:0
+  // dispatches nothing and returns assigned:0.
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const issues = Array.from({ length: 3 }, () => makeIssue({ project_id: PANTHEON_CORE, parent_issue_id: 'fake-parent' }));
+  const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, maxAssign: 0 });
+
+  assert.equal(result.assigned, 0, 'maxAssign:0 must result in zero dispatches');
+  assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
+});
+
+test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
+  // A cascade candidate exists (done parent + blocked child with metadata dep),
+  // but the child's most recent run completed only 30 s ago — well within the
+  // 15-min cooldown window. The router must NOT assign/rerun the child and must
+  // log cascade_skip(reason: 'redispatch-cooldown').
+  const fixtureCfg = withFixtureLanes({ 'cooldown-proj': ['auriga-dev'] });
+  const FIXED_NOW = Date.now();
+  const doneParent = makeIssue({ project_id: 'cooldown-proj', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const { backlog, spawn, calls, runsByIdentifier, log } = (() => {
+    const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+    // Seed a completed run that finished 30 s ago — within cooldown
+    const recentCompletedAt = new Date(FIXED_NOW - 30_000).toISOString();
+    adapters.runsByIdentifier[blockedChild.identifier] = [
+      { status: 'completed', completed_at: recentCompletedAt, created_at: recentCompletedAt },
+    ];
+    return { ...adapters, log: createLogSink() };
+  })();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  assert.ok(!calls.assign.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT assign a child whose last run completed within the cooldown window');
+  const skipLog = log.byEvent('cascade_skip').find(
+    (e) => e.identifier === blockedChild.identifier && e.reason === 'redispatch-cooldown'
+  );
+  assert.ok(skipLog, 'cascade_skip(redispatch-cooldown) must be logged for a recently-completed run');
+});
+
+test('cascade: dispatches normally when last run completed beyond redispatchCooldownMs', async () => {
+  // Same setup, but the run completed 20 min ago — outside the 15-min cooldown.
+  // The router must assign and rerun the child as normal.
+  const fixtureCfg = withFixtureLanes({ 'cooldown-proj-2': ['auriga-dev'] });
+  const FIXED_NOW = Date.now();
+  const cooldownMs = cfg.CAPS.redispatchCooldownMs;
+  const doneParent = makeIssue({ project_id: 'cooldown-proj-2', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cooldown-proj-2', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  // Seed a completed run that finished 20 min ago — beyond cooldown
+  const oldCompletedAt = new Date(FIXED_NOW - cooldownMs - 5 * 60_000).toISOString();
+  adapters.runsByIdentifier[blockedChild.identifier] = [
+    { status: 'completed', completed_at: oldCompletedAt, created_at: oldCompletedAt },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog: adapters.backlog, spawn: adapters.spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  assert.ok(adapters.calls.assign.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
+});
+
+// PANT-431: detectVerifiedDone + selectReviewDispatch same-cycle stale-snapshot
+// regression. When a merged PR advances an in_review issue to done in the same
+// cycle that its review run has gone stale, selectReviewDispatch must NOT emit
+// a rerun-review dispatch for it — the issue is already done.
+test('an in_review issue advanced to done by a merged PR in the same cycle is never re-dispatched for review (PANT-431)', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const FIXED_NOW = Date.now();
+  const reviewAgentId = cfg.AGENTS['auriga-review'].id;
+  const story = makeIssue({
+    project_id: AURIGA,
+    status: 'in_review',
+    assignee_id: reviewAgentId,
+  });
+  // Stale run: completed well beyond zombieStaleMs ago so selectReviewDispatch
+  // would hit the rerun-review branch if the issue were still present.
+  const staleAge = (cfg.CAPS.zombieStaleMs ?? 20 * 60 * 1000) + 60 * 60 * 1000;
+  const staleAt = new Date(FIXED_NOW - staleAge).toISOString();
+  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS);
+  backlog.listCandidatePullRequests = () => [{
+    number: 99,
+    title: `fix: ${story.identifier} implementation`,
+    headRefName: `fix/${story.identifier.toLowerCase()}-impl`,
+    body: story.identifier,
+    state: 'merged',
+    merged_at: new Date(FIXED_NOW - 5000).toISOString(),
+    url: `https://github.com/acme/repo/pull/99`,
+  }];
+  // Seed the stale run so selectReviewDispatch sees it; it must NOT act on it.
+  backlog.getIssueRuns = (identifier) => {
+    if (identifier === story.identifier) {
+      return [{ status: 'completed', completed_at: staleAt, created_at: staleAt }];
+    }
+    return [];
+  };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  const advanced = log.byEvent('advance').find(
+    (e) => e.identifier === story.identifier && e.to === 'done'
+  );
+  assert.ok(advanced, 'detectVerifiedDone must advance the in_review story to done via the merged PR');
+
+  const reviewEvents = log.byEvent('review').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewEvents.length, 0,
+    'selectReviewDispatch must not emit a review event for an issue already advanced to done this cycle');
+
+  const reviewDispatched = log.byEvent('review_dispatched').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewDispatched.length, 0,
+    'must not fire a review_dispatched log event for a just-done ticket');
+
+  const reruns = calls.rerun.filter((r) => r.identifier === story.identifier);
+  assert.equal(reruns.length, 0,
+    'spawn.rerunIssue must not be called for an issue that was advanced to done in the same cycle');
+});
+
+test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
+  // Three separate blocked stories that can all cascade (each depends on a different done
+  // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev
+  // is runtime:codex). Before the fix, each chooseAgentForProject call saw
+  // projected.perRuntime={} — empty — so all three passed the runtime cap check and
+  // dispatched. After the fix, the first cascade assignment accumulates in loopRtProjected;
+  // subsequent iterations see runtime=1 >= cap=1 and log cascade_skip(no-capacity).
+  const fixtureCfg = withFixtureLanes({ 'cascade-rt-proj': ['auriga-dev'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+  };
+  const doneA = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  const doneC = makeIssue({ project_id: 'cascade-rt-proj', status: 'done' });
+  // 'not-a-seed' prevents isSeed() from routing these through minerva-dev (planning lane);
+  // they must go through chooseAgentForProject so the codex runtime cap is exercised.
+  const childA = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneA.id } });
+  const childB = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneB.id } });
+  const childC = makeIssue({ project_id: 'cascade-rt-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneC.id } });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, doneC, childA, childB, childC], tightCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.length <= 1,
+    `per-runtime cap 1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
+});
+
+test('cascade: per-cycle-per-agent cap is enforced across multiple cascade iterations (PANT-473)', async () => {
+  // Three blocked stories all unblock simultaneously (each depends on a different done
+  // parent, all routed to the same agent via a single-agent lane). With perCyclePerAgent=1,
+  // only the first cascade assignment should go through; the remaining two must be
+  // skipped with cascade_skip(per-cycle-per-agent-cap).
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'cascade-pca-proj': ['auriga-dev'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+  };
+  const doneA = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const doneC = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const childA = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneB.id } });
+  const childC = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneC.id } });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, doneC, childA, childB, childC], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.length <= 1,
+    `perCyclePerAgent=1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
+  const capSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  assert.ok(capSkips.length >= 2,
+    `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
 });

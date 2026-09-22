@@ -157,6 +157,17 @@ test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
   assert.ok(aurigaCount <= CFG.CAPS.perCyclePerAgent, `auriga got ${aurigaCount}`);
 });
 
+test('selectAssignments: priorAgentCycleAssigns pre-seeds perAgentCycle so cascade/zombie assigns count toward the cap', () => {
+  // auriga-dev already received perCyclePerAgent (2) assigns this cycle via cascade.
+  // selectAssignments must not emit any additional assigns for it.
+  const issues = Array.from({ length: 5 }, (_, i) => story('a' + i, 'AURIGA', i, 'EPIC1'));
+  const picks = core.selectAssignments(issues, CFG, {}, {
+    priorAgentCycleAssigns: { 'auriga-dev': CFG.CAPS.perCyclePerAgent },
+  });
+  const aurigaCount = picks.filter((p) => p.agent === 'auriga-dev').length;
+  assert.equal(aurigaCount, 0, `auriga-dev already at cap but got ${aurigaCount} more assigns`);
+});
+
 test('runtime cap gates the whole codex lane in one cycle', () => {
   // Many default-lane (codex) todos; codex runtime cap 4, both agents empty.
   const issues = Array.from({ length: 10 }, (_, i) => story('j' + i, 'JANUS', i, 'EPIC1'));
@@ -270,11 +281,11 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
 test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
   const now = Date.now();
   const inProgress = [
-    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok' },
-    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running' },
-    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run' },
-    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs' },
-    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me' },
+    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me', parent_issue_id: 'parent-x', labels: [] },
   ];
   const runs = {
     r1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
@@ -286,6 +297,34 @@ test('detectRunCompletions: done+non-failed run -> advance-in-review; active/fai
   const actions = core.detectRunCompletions(inProgress, runs, now);
   assert.deepEqual(actions.map((a) => a.identifier), ['r1']);
   assert.equal(actions[0].action, 'advance-in-review');
+});
+
+test('detectRunCompletions: seed issue with done run is NOT advanced to in_review', () => {
+  const now = Date.now();
+  const seedWithLabel = {
+    id: 'seed1', identifier: 'seed1', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'plan something', parent_issue_id: null,
+    labels: [{ id: 'l1', name: 'idea', color: '#000' }],
+  };
+  const seedChildless = {
+    id: 'seed2', identifier: 'seed2', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'top level childless', parent_issue_id: null, labels: [],
+  };
+  const notSeed = {
+    id: 'impl1', identifier: 'impl1', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'implement the thing', parent_issue_id: 'seed1', labels: [],
+  };
+  const inProgress = [seedWithLabel, seedChildless, notSeed];
+  // allIssues includes notSeed as a child of seed1, so seed1 is NOT childless
+  // but has an explicit label — it's still a seed. seed2 is childless+top-level.
+  const allIssues = [seedWithLabel, seedChildless, notSeed];
+  const runs = {
+    seed1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    seed2: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    impl1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+  };
+  const actions = core.detectRunCompletions(inProgress, runs, now, {}, allIssues);
+  assert.deepEqual(actions.map((a) => a.identifier), ['impl1']);
 });
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
@@ -437,6 +476,38 @@ test('detectZombies flags isHive on the zombie action so re-routing respects HIV
   assert.equal(byId['z6'].isHive, true);
 });
 
+test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'zp1', identifier: 'zp1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'parked', metadata: { blocked_reason: 'waiting for human approval' } },
+    { id: 'zp2', identifier: 'zp2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not parked', metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { zp1: [], zp2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('zp1'), 'parked issue must be skipped');
+  assert.ok(ids.includes('zp2'), 'non-parked stale issue must be recovered');
+});
+
+test('detectZombies skips human-todo in_progress issues regardless of staleness or attempt count', () => {
+  const now = Date.now();
+  const staleMs = CFG.CAPS.zombieStaleMs + 1;
+  const inProgress = [
+    { id: 'ht1', identifier: 'ht1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work', labels: ['human-todo'], metadata: {} },
+    { id: 'ht2', identifier: 'ht2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work labeled obj', labels: [{ name: 'human-todo' }], metadata: {} },
+    { id: 'ht3', identifier: 'ht3', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'human work no assignee', labels: ['human-todo'], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'agent work', labels: [], metadata: {} },
+  ];
+  // All human-todo issues have no runs (stale), ensuring the guard fires before the staleness check
+  const runs = { ht1: [], ht2: [], ht3: [], ag1: [] };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('ht1'), 'human-todo (string label) must be skipped');
+  assert.ok(!ids.includes('ht2'), 'human-todo (object label) must be skipped');
+  assert.ok(!ids.includes('ht3'), 'human-todo with no assignee must be skipped');
+  assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
+});
+
+
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
 test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
@@ -586,6 +657,33 @@ test('routing: selectAssignments withholds a story whose dep isn\'t done, dispat
   assert.deepEqual(picks.map((p) => p.identifier), ['s2id']); // s1 done -> s2 unblocked
 });
 
+test('routing: selectAssignments withholds story with ONLY description-slug deps when dep is not done', () => {
+  // Older stories carry deps ONLY in the description (no metadata.depends_on).
+  // depsSatisfied alone returns true for these (it reads only metadata), so the
+  // pre-fix code incorrectly admitted them into the dispatch pool. allDepsSatisfied
+  // must now gate them. (PANT-412)
+  const parent = 'epicX';
+  const m01 = { ...story('m01id', 'AURIGA', 1, parent, null, '[m-01-setup] setup'), status: 'in_progress' };
+  const s2 = { ...story('s2id', 'AURIGA', 2, parent), description: 'depends_on: [m-01-setup]\n', metadata: {} };
+
+  let picks = core.selectAssignments([m01, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), [], 's2 must not dispatch while m01 is in_progress');
+
+  const m01done = { ...m01, status: 'done' };
+  picks = core.selectAssignments([m01done, s2], CFG, {}, {});
+  assert.ok(picks.some((p) => p.identifier === 's2id'), 's2 should dispatch once m01 is done');
+});
+
+test('routing: selectAssignments still dispatches story when description dep resolves as done', () => {
+  // Confirm the positive: no regression where a satisfied description dep blocks dispatch.
+  const parent = 'epicY';
+  const m01done = { ...story('m01y', 'AURIGA', 1, parent, null, '[m-01-init] init'), status: 'done' };
+  const s2 = { ...story('s2y', 'AURIGA', 2, parent), description: 'depends_on: [m-01-init]\n', metadata: {} };
+
+  const picks = core.selectAssignments([m01done, s2], CFG, {}, {});
+  assert.ok(picks.some((p) => p.identifier === 's2y'), 's2y should dispatch when its description dep is done');
+});
+
 test('routing: seed skipped when minerva-dev has no capacity, never falls back to a build agent', () => {
   const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['idea'] };
   // minerva-dev's maxInflight is 3 in the CFG fixture; exhaust it directly via inflight.
@@ -593,6 +691,41 @@ test('routing: seed skipped when minerva-dev has no capacity, never falls back t
   const picks = core.selectAssignments([issue], CFG, inflight, {});
   assert.equal(picks.length, 0); // skipped this cycle, not routed anywhere
   assert.ok(!picks.some((p) => p.agent !== 'minerva-dev')); // never falls back to a build agent
+});
+
+// PANT-427: seed path was missing the assignmentDecision noop check the non-seed path has.
+// A seed already correctly assigned to minerva-dev must not produce a redundant dispatch.
+test('routing: seed already assigned to minerva-dev (router-managed) produces no dispatch — already-assigned-target noop', () => {
+  // assignee_id 'M' resolves to minerva-dev in CFG; router_assignment_agent makes it router-managed.
+  const issue = {
+    ...todo('seed-rma', 'AURIGA', 1, 'M'),
+    labels: ['idea'],
+    metadata: { router_assignment_agent: 'minerva-dev' },
+  };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 0, 'already-assigned-target seed must not re-dispatch');
+});
+
+test('routing: seed with unchanged router-managed fingerprint for minerva-dev produces no dispatch', () => {
+  const base = { ...todo('seed-rfp', 'AURIGA', 1), labels: ['idea'] };
+  const tracked = {
+    ...base,
+    assignee_id: 'M', // minerva-dev
+    metadata: assignmentMetadata(base, 'minerva-dev', CFG, { now: 0 }),
+  };
+  const picks = core.selectAssignments([tracked], CFG, {}, { now: 500 });
+  assert.equal(picks.length, 0, 'unchanged fingerprint seed must not re-dispatch');
+});
+
+// PANT-465: seed path was missing assignmentFingerprint and assignmentReason.
+// Without the fingerprint, assignmentFingerprintMatches always returns false for seeds,
+// defeating noop detection and causing re-dispatch on every cycle.
+test('routing: seed pick includes assignmentFingerprint and assignmentReason', () => {
+  const issue = { ...todo('seed-fp', 'AURIGA', 1), labels: ['idea'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.match(picks[0].assignmentFingerprint, /^[a-f0-9]{64}$/, 'seed pick must carry a fingerprint');
+  assert.ok(typeof picks[0].assignmentReason === 'string' && picks[0].assignmentReason.length > 0, 'seed pick must carry a reason');
 });
 
 // ---- BACK-HALF: review / ship dispatch ----------------------------------
@@ -677,6 +810,23 @@ test('selectReviewDispatch: does not dispatch to an offline review runtime', () 
   };
   const i = inReview('PAN-RV-OFF', 9);
   const picks = core.selectReviewDispatch([i], { 'PAN-RV-OFF': [] }, cfg, {}, { now: NOW, openPrIds: new Set(['PAN-RV-OFF']) });
+  assert.deepEqual(picks, []);
+});
+
+// ---- PANT-391: isHumanTodo guard in selectReviewDispatch ------------------
+
+test('selectReviewDispatch: human-todo label suppresses dispatch-review — PANT-391', () => {
+  // An unassigned in_review ticket with human-todo label must not be dispatched to a review agent.
+  const i = inReview('PANT-391A', 391, null, { labels: ['human-todo'], metadata: {} });
+  const picks = core.selectReviewDispatch([i], { 'PANT-391A': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: human-todo label suppresses rerun-review on stale review assignment — PANT-391', () => {
+  // An in_review ticket already assigned to the review agent, whose run went stale,
+  // must not be re-fired when it carries a human-todo label.
+  const i = inReview('PANT-391B', 392, 'RV', { labels: ['human-todo'], metadata: {} });
+  const picks = core.selectReviewDispatch([i], { 'PANT-391B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.deepEqual(picks, []);
 });
 
@@ -860,6 +1010,36 @@ test('detectParentDone: an already-done parent is not re-emitted', () => {
     { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
   ];
   assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: child in discovered-only project keeps parent open (cross-project children)', () => {
+  // Epic E in PROJECT_IDS-set A. C1 in set A (done), C2 in discovered-only set B (in_progress).
+  // detectParentDone must receive the full board — C2 must remain visible — so the
+  // rollup does NOT fire while C2 is still active.
+  const issues = [
+    { id: 'E', identifier: 'PAN-E', project_id: 'proj-A', status: 'in_progress', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'proj-A', status: 'done', title: 'task-a', parent_issue_id: 'E' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'proj-B', status: 'in_progress', title: 'task-b', parent_issue_id: 'E' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips agent-parked parent (isAgentParked guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', metadata: { blocked_reason: 'needs human approval before closing' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: ['human-todo'], metadata: {} },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues, CFG).length, 0);
 });
 
 // ============================================================================

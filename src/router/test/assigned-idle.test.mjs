@@ -154,6 +154,91 @@ test('AC4c: per-cycle cap truncation is reported with its own reason so it is di
   assert.equal(result.skipped[0].skipReason, 'per-cycle-cap');
 });
 
+test('PANT-342: stale runtimeInflight must not override inflight-derived cap — omit it so the function recomputes', () => {
+  // Scenario: cascade/zombie added auriga-dev to codex this cycle, bumping inflight to
+  // { 'auriga-dev': 1, 'heimdall-dev-codex': 3 } → codex runtime at cap (4).
+  // The cycle-start runtimeInflight snapshot only saw 3 codex agents.
+  // Passing the stale snapshot would let recovery fire one more codex agent (wrong).
+  // Omitting it causes the function to recompute codex=4 from inflight and block it.
+  const issues = [assignedTodo('PAN-1', 'A')]; // auriga-dev → codex
+  const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+
+  // Stale runtimeInflight (cycle-start snapshot, doesn't know cascade added HC):
+  const staleRuntimeInflight = { codex: 3, opencode: 0, claude: 0 };
+  // Updated inflight (reflects cascade/zombie: HC now running 3):
+  const updatedInflight = { 'auriga-dev': 0, 'heimdall-dev-codex': 3 };
+
+  // Passing stale runtimeInflight would incorrectly allow recovery (codex sees 3 < 4):
+  const withStale = core.limitAssignedIdleRecoveries(actions, CFG, {
+    agents: CFG.AGENTS,
+    inflight: updatedInflight,
+    runtimeInflight: staleRuntimeInflight,
+    now: NOW,
+  });
+  assert.equal(withStale.selected.length, 1, 'stale snapshot incorrectly allows recovery (regression)');
+
+  // Omitting runtimeInflight causes recompute from inflight → codex=3, still under cap,
+  // but auriga-dev has 0 in-flight so it IS eligible. Now add auriga-dev's run to inflight
+  // to make codex hit exactly 4:
+  const atCapInflight = { 'auriga-dev': 1, 'heimdall-dev-codex': 3 };
+  const blocked = core.limitAssignedIdleRecoveries(actions, CFG, {
+    agents: CFG.AGENTS,
+    inflight: atCapInflight,
+    now: NOW,
+  });
+  assert.equal(blocked.selected.length, 0, 'recomputed runtimeInflight correctly blocks recovery at codex cap');
+  assert.equal(blocked.skipped[0].skipReason, 'at-capacity');
+});
+
+test('PANT-462: per-cycle-per-agent cap is enforced within idle-recovery pass — agent with N > cap idle issues gets at most cap dispatches', () => {
+  // 4 idle issues for auriga-dev, but perCyclePerAgent = 2
+  const issues = Array.from({ length: 4 }, (_, i) => assignedTodo('PAN-' + i, 'A'));
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, perCyclePerAgent: 2 } };
+  const actions = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), NOW);
+  const { selected, skipped } = core.limitAssignedIdleRecoveries(actions, cfg, {
+    agents: cfg.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 2, 'per-cycle-per-agent cap of 2 must be respected');
+  assert.equal(skipped.length, 2);
+  assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
+});
+
+test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents each get at most cap dispatches', () => {
+  // 3 idle issues for auriga-dev (id A) and 3 for minerva-dev (id M, opencode runtime)
+  // Using different runtimes avoids runtime-cap interference, so all skips are per-cycle-per-agent-cap.
+  const issues = [
+    assignedTodo('PAN-A1', 'A'), assignedTodo('PAN-A2', 'A'), assignedTodo('PAN-A3', 'A'),
+    assignedTodo('PAN-M1', 'M'), assignedTodo('PAN-M2', 'M'), assignedTodo('PAN-M3', 'M'),
+  ];
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, perCyclePerAgent: 2, assignedIdlePerCycle: 10 } };
+  const actions = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), NOW);
+  const { selected, skipped } = core.limitAssignedIdleRecoveries(actions, cfg, {
+    agents: cfg.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 4, 'two agents × cap 2 = 4 total selected');
+  assert.equal(skipped.length, 2);
+  const aSelected = selected.filter((s) => s.agent === 'auriga-dev').length;
+  const mSelected = selected.filter((s) => s.agent === 'minerva-dev').length;
+  assert.equal(aSelected, 2);
+  assert.equal(mSelected, 2);
+  assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
+});
+
+test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {
+  // A todo+assigned issue with metadata.blocked_reason set must never be re-dispatched.
+  const parked = {
+    ...assignedTodo('PAN-99', 'A'),
+    metadata: { blocked_reason: 'Waiting for human review of edge-case handling' },
+  };
+  const actions = core.detectAssignedIdle([parked], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 0, 'agent-parked issue must be excluded from idle recovery');
+});
+
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),

@@ -280,7 +280,7 @@ export async function cycle(opts = {}) {
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
-    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues);
+    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl);
     for (const u of unblocks) {
       // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
       // means it is already in review, a MERGED PR means it already shipped. A
@@ -311,10 +311,12 @@ export async function cycle(opts = {}) {
     // ---- state-machine: parent/epic -> done when every child is terminal ----
     // Nothing else closes a parent when its last child completes. Fires only when
     // ALL of a parent's visible children are done/cancelled and the parent isn't
-    // already terminal. DISPATCH-scoped (writes setIssueStatus) — see the
-    // blocked->todo pass above for why this can't be board-wide.
-    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)));
+    // already terminal. Observation is board-wide (mirrors detectUnblocks: children
+    // may live in discovered-only projects outside PROJECT_IDS). Mutation is still
+    // gated to PROJECT_IDS parents only — never roll up a cross-tenant parent.
+    const parentDone = coreImpl.detectParentDone(issues, cfgImpl);
     for (const pd of parentDone) {
+      if (!cfgImpl.PROJECT_IDS.includes(pd.projectId)) continue; // never mutate cross-tenant parent
       logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {
         try { backlog.setIssueStatus(pd.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
@@ -334,7 +336,7 @@ export async function cycle(opts = {}) {
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
@@ -347,7 +349,7 @@ export async function cycle(opts = {}) {
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
   for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
-  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
+  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {
@@ -357,6 +359,13 @@ export async function cycle(opts = {}) {
       }
     }
   }
+  // Exclude just-advanced issues from the review-dispatch snapshot so a stale
+  // run on a now-done ticket does not trigger a spurious rerun-review in this
+  // same cycle (mirrors the `cascaded` exclusion in selectAssignments below).
+  const _verifiedThisCycle = new Set(verified.map((v) => v.identifier));
+  const inReviewForDispatch = _verifiedThisCycle.size
+    ? inReview.filter((i) => !_verifiedThisCycle.has(i.identifier))
+    : inReview;
 
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
@@ -367,7 +376,7 @@ export async function cycle(opts = {}) {
   // blocked->todo pass above.
   {
     const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const changeBacks = coreImpl.detectChangesRequested(changesRequested);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -392,6 +401,12 @@ export async function cycle(opts = {}) {
   // existing PR, caps per cycle (cfgImpl.CAPS.perCycleCascade), and records each handled
   // identifier in `cascaded` so selectAssignments below does not double-dispatch it.
   const cascaded = new Set();
+  // Accumulate per-runtime assignments across cascade AND zombie loops so the
+  // per-runtime cap is enforced within each loop and across both sequentially.
+  // selectAssignments derives its own runtimeInflight from inflight, so it is
+  // unaffected; this only fixes the within-loop gap.
+  const loopRtProjected = {};
+  const priorAgentCycleAssigns = {};
   {
     const doneIds = new Set(
       issues
@@ -406,10 +421,25 @@ export async function cycle(opts = {}) {
       if (assigned >= maxAssign) break;
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       // Idempotency 1: never re-fire a story that already has an active run.
-      let activeRun = false;
-      try { activeRun = backlog.getIssueRuns(c.identifier).some((r) => coreImpl.classifyRun(r, Date.now()).active); }
+      let issueRuns = [];
+      try { issueRuns = backlog.getIssueRuns(c.identifier); }
       catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
-      if (activeRun) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue; }
+      if (issueRuns.some((r) => coreImpl.classifyRun(r, now).active)) {
+        logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue;
+      }
+      // Idempotency 2b: skip a story whose last run completed within the cooldown window
+      // (bounds tight fail-retry loops — PAN-7771). Run age is free from the already-fetched
+      // getIssueRuns result — same bounded-stateless idiom as zombieMaxAttempts.
+      // Add to `cascaded` so selectAssignments also skips it this cycle.
+      const lrForCooldown = coreImpl.latestRun(issueRuns);
+      if (lrForCooldown) {
+        const lrC = coreImpl.classifyRun(lrForCooldown, now);
+        if (!lrC.active && lrC.ageMs < (cfgImpl.CAPS.redispatchCooldownMs ?? (15 * 60 * 1000))) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'redispatch-cooldown', ageMs: lrC.ageMs });
+          cascaded.add(c.identifier);
+          continue;
+        }
+      }
       // Idempotency 2: never re-dispatch a story that already produced a PR (open =
       // in review, merged = shipped) — same gh-based guard the unblock pass uses,
       // matched against the per-cycle cached board-wide PR scan (see matchedPrs
@@ -436,20 +466,32 @@ export async function cycle(opts = {}) {
         // path instead treats rerun as ALWAYS required (assign never enqueues on
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
-        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, coreImpl.isHiveStory(issueObj));
+        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
+        // Skip only when no agent has capacity AND the issue has no existing assignee.
+        // If the issue already has an assignee, rerunIssue re-enqueues it without a
+        // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
+        if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+        const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if (agent && (priorAgentCycleAssigns[agent] || 0) >= maxPerAgentCascade) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent });
+          continue;
+        }
         if (agent) {
           if (typeof spawn.selectRoute === 'function') {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
           }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
+          const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+          if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
+          priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+          assigned++;
         }
         spawn.rerunIssue(c.identifier);
-        assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
-        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || null });
+        logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
       } catch (e) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
       }
@@ -509,7 +551,7 @@ export async function cycle(opts = {}) {
         }
       }
     }
-    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs);
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl);
     const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
@@ -526,8 +568,8 @@ export async function cycle(opts = {}) {
   // fix — a firefly-events instance was confirmed live trying to dispatch review
   // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
   // this and the whole board-wide-status-pass audit that followed it).
-  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now });
+  const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
@@ -572,13 +614,15 @@ export async function cycle(opts = {}) {
         // Publish the squad plan onto the ticket so what the squad will do is visible
         // on the board up front and is read by the squad agent (best-effort; a comment
         // failure must never block the dispatch).
-        backlog.commentOnIssue(
-          r.identifier,
-          'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
-          '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
-          (plan.playwright ? ' + Playwright/E2E' : '') +
-          '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
-        );
+        try {
+          backlog.commentOnIssue(
+            r.identifier,
+            'REVIEW SQUAD PLAN — ' + coreImpl.squadPlanSummary(plan) +
+            '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
+            (plan.playwright ? ' + Playwright/E2E' : '') +
+            '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
+          );
+        } catch (e) { logImpl('review_comment_error', { identifier: r.identifier, error: e.message }); }
         // reassign the in_review story to the review agent, then force-enqueue a
         // fresh run for it (assignee-mutation alone does not reliably enqueue —
         // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
@@ -596,6 +640,7 @@ export async function cycle(opts = {}) {
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
       spawn.rerunIssue(r.identifier);
+      assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
@@ -607,14 +652,14 @@ export async function cycle(opts = {}) {
       await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
       const reviewRunStarted = reviewVerifyRuns.some((run) => {
-        const c = coreImpl.classifyRun(run, Date.now());
+        const c = coreImpl.classifyRun(run, now);
         return c.active || c.done || c.failed;
       });
       if (!reviewRunStarted) {
         logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: r.action });
       } else {
         const lr = coreImpl.latestRun(reviewVerifyRuns);
-        const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+        const c = lr ? coreImpl.classifyRun(lr, now) : {};
         logImpl('review_verify_ok', { identifier: r.identifier, agent: r.agent, action: r.action, runStatus: c.status });
       }
     } catch (e) {
@@ -651,12 +696,22 @@ export async function cycle(opts = {}) {
         continue;
       }
       if (z.action === 'rerun') {
+        const zombieAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === z.assigneeId)?.[0];
+        const zombieRt = zombieAgentName && cfgImpl.AGENTS[zombieAgentName]?.runtime;
+        if (zombieRt && blockedRuntimes.has(zombieRt)) {
+          logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', runtime: zombieRt }); continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
         if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
       } else {
         // needs (re)routing — route via its lane
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: {} }, z.isHive);
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if ((priorAgentCycleAssigns[agent] || 0) >= maxPerAgentZombie) {
+          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent });
+          continue;
+        }
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
           try {
@@ -666,8 +721,56 @@ export async function cycle(opts = {}) {
             spawn.assignIssue(z.identifier, agent);
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
+            priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
+            const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+            if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
+            await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+            spawn.rerunIssue(z.identifier);
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
+      }
+    }
+  }
+
+  // ---- assigned-idle recovery (PAN-7492 / PAN-8244) ----
+  // Recover assigned `todo` issues that never had a run start (the dead-zone
+  // scenario). Like zombie recovery, dispatches are restricted to
+  // cfgImpl.PROJECT_IDS — never fire into an unscanned/unaligned project.
+  {
+    const agentIds = coreImpl.agentIdSet(cfgImpl.AGENTS);
+    const todoAssigned = issues.filter(
+      (i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO &&
+        i.assignee_id && agentIds.has(i.assignee_id) &&
+        cfgImpl.PROJECT_IDS.includes(i.project_id)
+    );
+    const todoRunsByIssue = {};
+    for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
+    // additions made this cycle (those update inflight[] directly). Omitting it here
+    // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
+    // the per-runtime cap the correct view. Same fix as PANT-331 bug 2 for the cascade
+    // and zombie passes; see capacity.mjs:computeRuntimeInflight.
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+      inflight,
+      blockedRuntimes,
+      priorAgentCycleAssigns,
+      maxTotal: Math.min(
+        cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
+        Math.max(0, maxAssign - assigned)
+      ),
+    });
+    for (const a of idleSelected) {
+      if (assigned >= maxAssign) break;
+      logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
+      if (!dryRun) {
+        try {
+          spawn.rerunIssue(a.identifier);
+          assigned++;
+          inflight[a.agent] = (inflight[a.agent] || 0) + 1;
+          if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
+          priorAgentCycleAssigns[a.agent] = (priorAgentCycleAssigns[a.agent] || 0) + 1;
+        } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
       }
     }
   }
@@ -677,8 +780,9 @@ export async function cycle(opts = {}) {
   const picks = coreImpl.selectAssignments(issues, cfgImpl, inflight, {
     blockedRuntimes,
     exclude: cascaded,
-    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining || cfgImpl.CAPS.perCycleTotal),
+    maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining),
     parentBoardConfig,
+    priorAgentCycleAssigns,
   });
 
   for (const p of picks) {
@@ -720,7 +824,7 @@ export async function cycle(opts = {}) {
     await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
     const runs = backlog.getIssueRuns(p.identifier);
     const started = runs.some((r) => {
-      const c = coreImpl.classifyRun(r, Date.now());
+      const c = coreImpl.classifyRun(r, now);
       return c.active || c.done || c.failed; // any run row means it dispatched
     });
     if (!started) {
@@ -728,7 +832,7 @@ export async function cycle(opts = {}) {
       try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
     } else {
       const lr = coreImpl.latestRun(runs);
-      const c = lr ? coreImpl.classifyRun(lr, Date.now()) : {};
+      const c = lr ? coreImpl.classifyRun(lr, now) : {};
       logImpl('verify_ok', { identifier: p.identifier, agent: p.agent, runStatus: c.status, runtimeId: lr && lr.runtime_id });
     }
   }
@@ -750,6 +854,19 @@ export async function cycle(opts = {}) {
     if (dryRun) continue;
 
     const issue = issues.find((i) => i.identifier === h.identifier);
+
+    // Cancel locally BEFORE the remote create. Once CANCELLED the issue is
+    // out of the todo candidate pool, so a later cycle cannot create a second
+    // parent-board issue even if the post-create local mutations below fail
+    // (the original duplicate-on-retry bug). If the cancel itself fails we
+    // skip the remote create entirely and let the next cycle retry.
+    try {
+      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
+    } catch (e) {
+      logImpl('hand_up_pre_cancel_error', { identifier: h.identifier, error: e.message });
+      continue;
+    }
+
     let createdIssue;
     try {
       const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
@@ -759,10 +876,10 @@ export async function cycle(opts = {}) {
         metadata: { handed_up_from: h.identifier },
       });
     } catch (e) {
-      // Remote create failed -- NEVER apply the local comment/unassign/
-      // status-change side effects below (would otherwise leave a "handed
-      // up" ticket pointing at nothing).
+      // Remote create failed — undo the pre-cancel so the issue re-enters
+      // the candidate pool next cycle rather than being stranded as cancelled.
       logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
+      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
       continue;
     }
 
@@ -773,9 +890,6 @@ export async function cycle(opts = {}) {
     try {
       spawn.unassignIssue(h.identifier);
     } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
-    try {
-      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
-    } catch (e) { logImpl('hand_up_status_error', { identifier: h.identifier, error: e.message }); }
   }
 
   return { todo: todo.length, picked: picks.length, assigned };
@@ -824,6 +938,7 @@ async function mainMultiTenant() {
 
   let rotation = 0;
   let iterations = 0;
+  let totalAssigned = 0;
   do {
     let tenants = [];
     try {
@@ -835,9 +950,12 @@ async function mainMultiTenant() {
       log('no_tenants_found', {});
     } else {
       for (const { tenantId, cfg: tenantCfg } of rotate(tenants, rotation)) {
+        if (totalAssigned >= MAX_ASSIGN) break;
+        const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
         try {
           const { backlog, spawn } = buildAdaptersForTenant(tenantId, tenantCfg);
-          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY });
+          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining });
+          totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
         } catch (e) {
           log('tenant_cycle_error', { tenant_id: tenantId, error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -846,10 +964,11 @@ async function mainMultiTenant() {
       rotation += 1;
     }
     iterations += 1;
+    if (totalAssigned >= MAX_ASSIGN) { log('max_assign_reached', { assigned: totalAssigned }); break; }
     if (!ONCE) await sleep(cfg.CAPS.cycleMs);
   } while (!ONCE);
 
-  log('stop_multi_tenant', { iterations });
+  log('stop_multi_tenant', { iterations, assigned: totalAssigned });
   releaseLock();
 }
 
