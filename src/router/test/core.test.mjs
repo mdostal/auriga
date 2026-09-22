@@ -438,6 +438,48 @@ test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even fo
   assert.ok(CFG.HIVE_LANE.includes(agent));
 });
 
+// PANT-472: blocked-runtime and perAgentCycle filtering inside chooseAgentForProject
+test('chooseAgentForProject: skips blocked-runtime agents and falls back to next eligible in lane', () => {
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // Block codex -> heimdall-dev-codex filtered out, heimdall-dev returned.
+  const empty = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, empty, false, new Set(['codex']));
+  assert.equal(agent, 'heimdall-dev');
+  // Block both runtimes -> null (all agents filtered).
+  assert.equal(core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, empty, false, new Set(['opencode', 'codex'])), null);
+});
+
+test('chooseAgentForProject: skips agents at perAgentCycle cap and falls back to next eligible in lane', () => {
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // heimdall-dev at cap (2/2) -> returns heimdall-dev-codex.
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 2 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 2);
+  assert.equal(agent, 'heimdall-dev-codex');
+  // Both at cap -> null.
+  projected.perAgentCycle['heimdall-dev-codex'] = 2;
+  assert.equal(core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 2), null);
+});
+
+test('selectAssignments: blocked runtime falls back to next lane agent instead of skipping issue', () => {
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // Blocking codex must not skip the issue — heimdall-dev (opencode) is the fallback.
+  const issues = [story('h1', 'HEIMDALL', 1, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, {}, { blockedRuntimes: new Set(['codex']) });
+  assert.equal(picks.length, 1, 'issue must be routed to fallback agent, not silently skipped');
+  assert.equal(picks[0].agent, 'heimdall-dev');
+});
+
+test('selectAssignments: perAgentCycle cap falls back to next lane agent instead of skipping issue', () => {
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // heimdall-dev pre-capped via priorAgentCycleAssigns -> heimdall-dev-codex is the fallback.
+  const issues = [story('h1', 'HEIMDALL', 1, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, {}, {
+    priorAgentCycleAssigns: { 'heimdall-dev': CFG.CAPS.perCyclePerAgent },
+  });
+  assert.equal(picks.length, 1, 'issue must be routed to fallback agent, not silently skipped');
+  assert.equal(picks[0].agent, 'heimdall-dev-codex');
+});
+
 test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
   const now = Date.now();
   const inProgress = [
