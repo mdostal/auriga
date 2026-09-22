@@ -905,6 +905,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeedByLabel(i)) continue; // seeds belong to the planning lane — never cascade to build
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;
