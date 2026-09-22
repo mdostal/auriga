@@ -487,6 +487,14 @@ export async function cycle(opts = {}) {
           priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
           assigned++;
+        } else if (!agent && issueObj.assignee_id) {
+          const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          const existingRt = existingAgentName && cfgImpl.AGENTS[existingAgentName]?.runtime;
+          if (existingRt && blockedRuntimes.has(existingRt)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-assignee-runtime-blocked', runtime: existingRt });
+            continue;
+          }
+          if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
         }
         spawn.rerunIssue(c.identifier);
         cascadeFired++;
