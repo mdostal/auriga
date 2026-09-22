@@ -713,6 +713,7 @@ export function detectFalseDone(doneIssues, openPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i)) continue; // human closed this deliberately — never demote
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and

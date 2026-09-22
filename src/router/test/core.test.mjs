@@ -1215,6 +1215,22 @@ test('detectFalseDone never demotes a done story whose OWN recorded PR is merged
   assert.equal(acts[0].prUrl, 'https://github.com/mdostal/logic-loops/pull/1');
 });
 
+test('detectFalseDone does NOT demote a human-todo done issue even when a matching open PR exists (PANT-471)', () => {
+  const humanStory = {
+    id: 'ht1', identifier: 'PANT-471', project_id: 'AURIGA',
+    title: '[pant-471-some-human-task] manual close', status: 'done',
+    labels: ['human-todo'],
+  };
+  const openPr = { headRefName: 'feat/pant-471-some-human-task', state: 'open', url: 'u' };
+  assert.equal(core.detectFalseDone([humanStory], [openPr]).length, 0);
+  // label as object shape
+  const humanStory2 = { ...humanStory, id: 'ht2', labels: [{ id: 'l1', name: 'human-todo', color: '#fff' }] };
+  assert.equal(core.detectFalseDone([humanStory2], [openPr]).length, 0);
+  // without the label the story IS demoted (no regression)
+  const regularStory = { ...humanStory, id: 'ht3', labels: [] };
+  assert.equal(core.detectFalseDone([regularStory], [openPr]).length, 1);
+});
+
 test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
   assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
   assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
