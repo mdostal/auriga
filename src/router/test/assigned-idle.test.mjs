@@ -228,6 +228,16 @@ test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents e
   assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
 });
 
+test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {
+  // A todo+assigned issue with metadata.blocked_reason set must never be re-dispatched.
+  const parked = {
+    ...assignedTodo('PAN-99', 'A'),
+    metadata: { blocked_reason: 'Waiting for human review of edge-case handling' },
+  };
+  const actions = core.detectAssignedIdle([parked], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 0, 'agent-parked issue must be excluded from idle recovery');
+});
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),
