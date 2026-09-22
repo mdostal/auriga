@@ -437,6 +437,18 @@ test('detectZombies flags isHive on the zombie action so re-routing respects HIV
   assert.equal(byId['z6'].isHive, true);
 });
 
+test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'zp1', identifier: 'zp1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'parked', metadata: { blocked_reason: 'waiting for human approval' } },
+    { id: 'zp2', identifier: 'zp2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not parked', metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { zp1: [], zp2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('zp1'), 'parked issue must be skipped');
+  assert.ok(ids.includes('zp2'), 'non-parked stale issue must be recovered');
+});
+
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
 test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
@@ -860,6 +872,36 @@ test('detectParentDone: an already-done parent is not re-emitted', () => {
     { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
   ];
   assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: child in discovered-only project keeps parent open (cross-project children)', () => {
+  // Epic E in PROJECT_IDS-set A. C1 in set A (done), C2 in discovered-only set B (in_progress).
+  // detectParentDone must receive the full board — C2 must remain visible — so the
+  // rollup does NOT fire while C2 is still active.
+  const issues = [
+    { id: 'E', identifier: 'PAN-E', project_id: 'proj-A', status: 'in_progress', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'proj-A', status: 'done', title: 'task-a', parent_issue_id: 'E' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'proj-B', status: 'in_progress', title: 'task-b', parent_issue_id: 'E' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips agent-parked parent (isAgentParked guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', metadata: { blocked_reason: 'needs human approval before closing' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: ['human-todo'], metadata: {} },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues, CFG).length, 0);
 });
 
 // ============================================================================

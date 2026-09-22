@@ -311,10 +311,12 @@ export async function cycle(opts = {}) {
     // ---- state-machine: parent/epic -> done when every child is terminal ----
     // Nothing else closes a parent when its last child completes. Fires only when
     // ALL of a parent's visible children are done/cancelled and the parent isn't
-    // already terminal. DISPATCH-scoped (writes setIssueStatus) — see the
-    // blocked->todo pass above for why this can't be board-wide.
-    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)));
+    // already terminal. Observation is board-wide (mirrors detectUnblocks: children
+    // may live in discovered-only projects outside PROJECT_IDS). Mutation is still
+    // gated to PROJECT_IDS parents only — never roll up a cross-tenant parent.
+    const parentDone = coreImpl.detectParentDone(issues, cfgImpl);
     for (const pd of parentDone) {
+      if (!cfgImpl.PROJECT_IDS.includes(pd.projectId)) continue; // never mutate cross-tenant parent
       logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {
         try { backlog.setIssueStatus(pd.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
