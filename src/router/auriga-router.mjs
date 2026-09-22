@@ -829,6 +829,19 @@ export async function cycle(opts = {}) {
     if (dryRun) continue;
 
     const issue = issues.find((i) => i.identifier === h.identifier);
+
+    // Cancel locally BEFORE the remote create. Once CANCELLED the issue is
+    // out of the todo candidate pool, so a later cycle cannot create a second
+    // parent-board issue even if the post-create local mutations below fail
+    // (the original duplicate-on-retry bug). If the cancel itself fails we
+    // skip the remote create entirely and let the next cycle retry.
+    try {
+      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
+    } catch (e) {
+      logImpl('hand_up_pre_cancel_error', { identifier: h.identifier, error: e.message });
+      continue;
+    }
+
     let createdIssue;
     try {
       const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
@@ -838,10 +851,10 @@ export async function cycle(opts = {}) {
         metadata: { handed_up_from: h.identifier },
       });
     } catch (e) {
-      // Remote create failed -- NEVER apply the local comment/unassign/
-      // status-change side effects below (would otherwise leave a "handed
-      // up" ticket pointing at nothing).
+      // Remote create failed — undo the pre-cancel so the issue re-enters
+      // the candidate pool next cycle rather than being stranded as cancelled.
       logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
+      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
       continue;
     }
 
@@ -852,9 +865,6 @@ export async function cycle(opts = {}) {
     try {
       spawn.unassignIssue(h.identifier);
     } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
-    try {
-      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
-    } catch (e) { logImpl('hand_up_status_error', { identifier: h.identifier, error: e.message }); }
   }
 
   return { todo: todo.length, picked: picks.length, assigned };

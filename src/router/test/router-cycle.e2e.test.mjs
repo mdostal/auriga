@@ -615,7 +615,7 @@ test('t015: no configured parent -- zero remote calls, ticket falls through to t
   assert.equal(log.byEvent('hand_up').length, 0);
 });
 
-test('t015: a remote create failure logs hand_up_error and applies NONE of the local comment/unassign/status side effects', async () => {
+test('t015: a remote create failure logs hand_up_error, undoes the pre-cancel, and applies no comment/unassign side effects', async () => {
   const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
   const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
   const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
@@ -635,8 +635,46 @@ test('t015: a remote create failure logs hand_up_error and applies NONE of the l
 
   assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'no local unassign on remote failure');
   assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no local comment on remote failure');
-  assert.ok(!calls.status.some((c) => c.identifier === handUpIssue.identifier), 'no local status change on remote failure');
+  // Pre-cancel (→ cancelled) fires before createIssue, then undo (→ todo) fires on failure.
+  const statusCalls = calls.status.filter((c) => c.identifier === handUpIssue.identifier);
+  assert.ok(statusCalls.some((c) => c.status === 'cancelled'), 'pre-cancel must be attempted before remote create');
+  assert.ok(statusCalls.some((c) => c.status === 'todo'), 'undo-cancel must be attempted after remote create failure');
+  assert.equal(handUpIssue.status, 'todo', 'net status must be restored to todo so the issue re-enters the candidate pool');
   assert.equal(log.byEvent('hand_up_error').length, 1);
+  assert.equal(log.byEvent('hand_up_ok').length, 0);
+});
+
+test('t015: if the pre-cancel fails the remote create is skipped entirely — no duplicate and issue retains todo status', async () => {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({ project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic' });
+  const { backlog, spawn, calls } = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  // Patch backlog to throw on setIssueStatus for this identifier only.
+  const origSetStatus = backlog.setIssueStatus;
+  backlog.setIssueStatus = (id, status) => {
+    if (id === handUpIssue.identifier) throw new Error('transient API error');
+    origSetStatus(id, status);
+  };
+
+  const remoteCreateCalls = [];
+  const createRemoteBacklog = () => ({
+    createIssue: (ticket) => { remoteCreateCalls.push(ticket); return { identifier: 'PARENT-1' }; },
+  });
+
+  await assert.doesNotReject(cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: { id: 'firefly-events' }, children: [] }),
+    loadExternalConfig: () => ({ parentBoard: { baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' } }),
+    createRemoteBacklog,
+  }));
+
+  assert.equal(remoteCreateCalls.length, 0, 'remote create must not be called when pre-cancel fails');
+  assert.equal(handUpIssue.status, 'todo', 'issue must remain todo for retry next cycle');
+  assert.ok(!calls.unassign.some((c) => c.identifier === handUpIssue.identifier), 'no unassign when pre-cancel fails');
+  assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no comment when pre-cancel fails');
+  assert.equal(log.byEvent('hand_up_pre_cancel_error').length, 1);
   assert.equal(log.byEvent('hand_up_ok').length, 0);
 });
 
