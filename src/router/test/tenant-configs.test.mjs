@@ -133,6 +133,32 @@ test('loadTenantConfigs: an empty allowlist Set (from whitespace-only env) filte
   assert.equal(result.length, 0);
 });
 
+test('loadTenantConfigs: a tenant WITH its own PROJECT_LANE overrides the base cfg -- per-project routing is not silently swallowed (PANT-364)', async () => {
+  const tenantProjectLane = { 'project-xyz': ['codex-agent'], 'project-abc': ['hive-agent'] };
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [{
+      tenant_id: 'firefly-events',
+      config: { PROJECT_IDS: ['project-xyz', 'project-abc'], PROJECT_LANE: tenantProjectLane },
+    }],
+  }), { status: 200 }));
+
+  const [{ cfg }] = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.deepEqual(cfg.PROJECT_LANE, tenantProjectLane);
+  // Base cfg PROJECT_LANE (empty {}) must NOT bleed through.
+  assert.notDeepEqual(cfg.PROJECT_LANE, BASE_CFG.PROJECT_LANE);
+});
+
+test('loadTenantConfigs: a tenant WITHOUT PROJECT_LANE falls back to baseCfg.PROJECT_LANE (omission is safe -- DEFAULT_LANE behaviour unchanged)', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [{ tenant_id: 'dostal-tech', config: { PROJECT_IDS: ['p1'] } }],
+  }), { status: 200 }));
+
+  const [{ cfg }] = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.deepEqual(cfg.PROJECT_LANE, BASE_CFG.PROJECT_LANE);
+});
+
 test('loadTenantConfigs: throws with the real status code on a non-ok response', async () => {
   const fetchImpl = fakeFetch(() => new Response('', { status: 503 }));
   await assert.rejects(

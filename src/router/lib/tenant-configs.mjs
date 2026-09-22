@@ -6,7 +6,7 @@
 // Merge semantics mirror config-substrate.mjs's own existing
 // `_ext.<KEY> ?? default` pattern exactly -- a tenant's fetched config only
 // ever overrides the substrate keys it actually returns (PROJECT_IDS/AGENTS/
-// HIVE_LANE/DEFAULT_LANE/REVIEW_LANE); every other key (CAPS,
+// HIVE_LANE/DEFAULT_LANE/REVIEW_LANE/PROJECT_LANE); every other key (CAPS,
 // MODEL_PREFERENCES, HUMAN_NAMES, REVIEW_SQUAD_RULES, ...) is real, shared
 // GLOBAL policy and is never tenant-specific -- taken from the base `cfg`
 // module unchanged, not duplicated per tenant.
@@ -49,6 +49,7 @@ export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl
         HIVE_LANE: c.HIVE_LANE ?? baseCfg.HIVE_LANE,
         DEFAULT_LANE: c.DEFAULT_LANE ?? baseCfg.DEFAULT_LANE,
         REVIEW_LANE: c.REVIEW_LANE ?? baseCfg.REVIEW_LANE,
+        PROJECT_LANE: c.PROJECT_LANE ?? baseCfg.PROJECT_LANE,
       },
     };
   });
