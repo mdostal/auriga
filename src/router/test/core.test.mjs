@@ -390,6 +390,26 @@ test('detectZombies: run count at/above zombieMaxAttempts emits give-up instead 
   assert.equal(byId['g4'].reason, 'max-attempts-exhausted');
 });
 
+test('detectZombies: human-todo labeled issue is skipped even when run is stale (PANT-392)', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  const inProgress = [
+    { id: 'ht1', identifier: 'ht1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stale but human-owned', labels: ['human-todo'], metadata: {} },
+    { id: 'ht2', identifier: 'ht2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stale waiting_on human', labels: [], metadata: { waiting_on: 'Mathew' } },
+    { id: 'ht3', identifier: 'ht3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stale normal', labels: [], metadata: {} },
+  ];
+  const runs = {
+    ht1: [{ status: 'failed', error: 'x', created_at: old }],
+    ht2: [{ status: 'failed', error: 'x', created_at: old }],
+    ht3: [{ status: 'failed', error: 'x', created_at: old }],
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('ht1'), 'human-todo label should suppress zombie recovery');
+  assert.ok(!ids.includes('ht2'), 'waiting_on human should suppress zombie recovery');
+  assert.ok(ids.includes('ht3'), 'normal stale issue should still recover');
+});
+
 test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {
   assert.ok(core.isHiveStory({ description: HIVE_DESCRIPTION }));
   assert.ok(!core.isHiveStory({ description: 'Just fix the login bug, no special format here.' }));

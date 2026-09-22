@@ -396,6 +396,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
