@@ -190,6 +190,55 @@ test('PANT-342: stale runtimeInflight must not override inflight-derived cap —
   assert.equal(blocked.skipped[0].skipReason, 'at-capacity');
 });
 
+test('PANT-462: per-cycle-per-agent cap is enforced within idle-recovery pass — agent with N > cap idle issues gets at most cap dispatches', () => {
+  // 4 idle issues for auriga-dev, but perCyclePerAgent = 2
+  const issues = Array.from({ length: 4 }, (_, i) => assignedTodo('PAN-' + i, 'A'));
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, perCyclePerAgent: 2 } };
+  const actions = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), NOW);
+  const { selected, skipped } = core.limitAssignedIdleRecoveries(actions, cfg, {
+    agents: cfg.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 2, 'per-cycle-per-agent cap of 2 must be respected');
+  assert.equal(skipped.length, 2);
+  assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
+});
+
+test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents each get at most cap dispatches', () => {
+  // 3 idle issues for auriga-dev (id A) and 3 for minerva-dev (id M, opencode runtime)
+  // Using different runtimes avoids runtime-cap interference, so all skips are per-cycle-per-agent-cap.
+  const issues = [
+    assignedTodo('PAN-A1', 'A'), assignedTodo('PAN-A2', 'A'), assignedTodo('PAN-A3', 'A'),
+    assignedTodo('PAN-M1', 'M'), assignedTodo('PAN-M2', 'M'), assignedTodo('PAN-M3', 'M'),
+  ];
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, perCyclePerAgent: 2, assignedIdlePerCycle: 10 } };
+  const actions = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), NOW);
+  const { selected, skipped } = core.limitAssignedIdleRecoveries(actions, cfg, {
+    agents: cfg.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 4, 'two agents × cap 2 = 4 total selected');
+  assert.equal(skipped.length, 2);
+  const aSelected = selected.filter((s) => s.agent === 'auriga-dev').length;
+  const mSelected = selected.filter((s) => s.agent === 'minerva-dev').length;
+  assert.equal(aSelected, 2);
+  assert.equal(mSelected, 2);
+  assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
+});
+
+test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {
+  // A todo+assigned issue with metadata.blocked_reason set must never be re-dispatched.
+  const parked = {
+    ...assignedTodo('PAN-99', 'A'),
+    metadata: { blocked_reason: 'Waiting for human review of edge-case handling' },
+  };
+  const actions = core.detectAssignedIdle([parked], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 0, 'agent-parked issue must be excluded from idle recovery');
+});
+
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),
