@@ -886,6 +886,24 @@ test('detectParentDone: child in discovered-only project keeps parent open (cros
   assert.equal(core.detectParentDone(issues).length, 0);
 });
 
+test('detectParentDone: skips agent-parked parent (isAgentParked guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', metadata: { blocked_reason: 'needs human approval before closing' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: ['human-todo'], metadata: {} },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues, CFG).length, 0);
+});
+
 // ============================================================================
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.

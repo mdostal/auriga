@@ -314,7 +314,7 @@ export async function cycle(opts = {}) {
     // already terminal. Observation is board-wide (mirrors detectUnblocks: children
     // may live in discovered-only projects outside PROJECT_IDS). Mutation is still
     // gated to PROJECT_IDS parents only — never roll up a cross-tenant parent.
-    const parentDone = coreImpl.detectParentDone(issues);
+    const parentDone = coreImpl.detectParentDone(issues, cfgImpl);
     for (const pd of parentDone) {
       if (!cfgImpl.PROJECT_IDS.includes(pd.projectId)) continue; // never mutate cross-tenant parent
       logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
