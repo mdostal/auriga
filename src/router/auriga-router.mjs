@@ -609,6 +609,12 @@ export async function cycle(opts = {}) {
       continue;
     }
 
+    const reviewRt = r.agent && cfgImpl.AGENTS[r.agent]?.runtime;
+    if (reviewRt && blockedRuntimes.has(reviewRt)) {
+      logImpl('review_skip', { identifier: r.identifier, agent: r.agent, reason: 'runtime-blocked', runtime: reviewRt });
+      continue;
+    }
+
     try {
       if (r.action === 'dispatch-review') {
         // Publish the squad plan onto the ticket so what the squad will do is visible
