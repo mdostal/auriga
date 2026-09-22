@@ -679,6 +679,8 @@ export async function cycle(opts = {}) {
             inflight[agent] = (inflight[agent] || 0) + 1;
             const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
+            await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+            spawn.rerunIssue(z.identifier);
           } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
         }
       }
