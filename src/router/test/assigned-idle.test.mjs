@@ -26,8 +26,11 @@ const CFG = {
 const NOW = 1_700_000_000_000;
 const OLD = NOW - 60 * 60 * 1000; // 1h idle — well past the 10-min stale threshold
 
+// parent_issue_id marks these as planned stories under an epic (not top-level seeds),
+// matching real work items that can legitimately get stuck in assigned-idle state.
 const assignedTodo = (id, assigneeId, updatedAt = OLD, title = 'work') => ({
   id, identifier: id, status: 'todo', assignee_id: assigneeId, updated_at: new Date(updatedAt).toISOString(), title,
+  parent_issue_id: 'EPIC-0',
 });
 
 test('AC1: a single assignedQueued item is detected as a recovery action once stale', () => {
@@ -226,6 +229,34 @@ test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents e
   assert.equal(aSelected, 2);
   assert.equal(mSelected, 2);
   assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
+});
+
+const seedTodo = (id, assigneeId) => ({
+  id, identifier: id, status: 'todo', assignee_id: assigneeId,
+  updated_at: new Date(OLD).toISOString(), title: 'do something',
+  parent_issue_id: null, labels: [],
+});
+
+test('PANT-550: detectAssignedIdle skips explicitly-labelled seed (idea label)', () => {
+  const seed = { ...seedTodo('PAN-99', 'M'), labels: [{ id: '1', name: 'idea' }] };
+  const actions = core.detectAssignedIdle([seed], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, [seed]);
+  assert.equal(actions.length, 0, 'explicitly-labelled seed must be excluded from idle recovery');
+});
+
+test('PANT-550: detectAssignedIdle skips childless top-level issue (heuristic seed)', () => {
+  const seed = seedTodo('PAN-10', 'M'); // top-level, no children in allIssues
+  const actions = core.detectAssignedIdle([seed], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, [seed]);
+  assert.equal(actions.length, 0, 'childless top-level issue must be excluded from idle recovery');
+});
+
+test('PANT-550: detectAssignedIdle does NOT skip top-level issue that already has children', () => {
+  // Parent is top-level but has a child in allIssues → isSeed returns false → eligible for recovery.
+  const parent = seedTodo('PAN-10', 'M');
+  const child = { ...seedTodo('PAN-11', 'M'), parent_issue_id: 'PAN-10' };
+  const allIssues = [parent, child];
+  const actions = core.detectAssignedIdle([parent], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
+  assert.equal(actions.length, 1, 'issue with existing children is NOT a seed — must be eligible for idle recovery');
+  assert.equal(actions[0].identifier, 'PAN-10');
 });
 
 test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {

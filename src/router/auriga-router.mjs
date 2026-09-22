@@ -336,7 +336,7 @@ export async function cycle(opts = {}) {
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
@@ -754,7 +754,7 @@ export async function cycle(opts = {}) {
     );
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
-    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
     // additions made this cycle (those update inflight[] directly). Omitting it here
     // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving

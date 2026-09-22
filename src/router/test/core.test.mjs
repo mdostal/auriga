@@ -281,11 +281,11 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
 test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
   const now = Date.now();
   const inProgress = [
-    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok' },
-    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running' },
-    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run' },
-    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs' },
-    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me' },
+    { id: 'r1', identifier: 'r1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'done ok', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r2', identifier: 'r2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'still running', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r3', identifier: 'r3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'failed run', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r4', identifier: 'r4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'no runs', parent_issue_id: 'parent-x', labels: [] },
+    { id: 'r5', identifier: 'r5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'SMOKE: ignore me', parent_issue_id: 'parent-x', labels: [] },
   ];
   const runs = {
     r1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
@@ -297,6 +297,34 @@ test('detectRunCompletions: done+non-failed run -> advance-in-review; active/fai
   const actions = core.detectRunCompletions(inProgress, runs, now);
   assert.deepEqual(actions.map((a) => a.identifier), ['r1']);
   assert.equal(actions[0].action, 'advance-in-review');
+});
+
+test('detectRunCompletions: seed issue with done run is NOT advanced to in_review', () => {
+  const now = Date.now();
+  const seedWithLabel = {
+    id: 'seed1', identifier: 'seed1', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'plan something', parent_issue_id: null,
+    labels: [{ id: 'l1', name: 'idea', color: '#000' }],
+  };
+  const seedChildless = {
+    id: 'seed2', identifier: 'seed2', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'top level childless', parent_issue_id: null, labels: [],
+  };
+  const notSeed = {
+    id: 'impl1', identifier: 'impl1', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: 'A', title: 'implement the thing', parent_issue_id: 'seed1', labels: [],
+  };
+  const inProgress = [seedWithLabel, seedChildless, notSeed];
+  // allIssues includes notSeed as a child of seed1, so seed1 is NOT childless
+  // but has an explicit label — it's still a seed. seed2 is childless+top-level.
+  const allIssues = [seedWithLabel, seedChildless, notSeed];
+  const runs = {
+    seed1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    seed2: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+    impl1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
+  };
+  const actions = core.detectRunCompletions(inProgress, runs, now, {}, allIssues);
+  assert.deepEqual(actions.map((a) => a.identifier), ['impl1']);
 });
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
