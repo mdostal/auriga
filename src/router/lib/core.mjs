@@ -296,6 +296,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
         lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
         agent: PLANNING_AGENT,
         runtime,
+        assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
+        assignmentReason: seedDecision.reason,
       });
       continue;
     }
