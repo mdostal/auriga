@@ -796,6 +796,10 @@ export async function cycle(opts = {}) {
 
   for (const p of picks) {
     if (assigned >= maxAssign) break;
+    if (blockedRuntimes.has(p.runtime)) {
+      logImpl('skip_blocked_runtime', { identifier: p.identifier, agent: p.agent, runtime: p.runtime });
+      continue;
+    }
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
     try {
