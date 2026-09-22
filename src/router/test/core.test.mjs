@@ -1314,6 +1314,19 @@ test('detectFalseDone never demotes a done story whose OWN recorded PR is merged
   assert.equal(acts[0].prUrl, 'https://github.com/mdostal/logic-loops/pull/1');
 });
 
+test('detectFalseDone never demotes an explicitly-labeled seed issue (PANT-553)', () => {
+  const seed = {
+    id: 'seed1', identifier: 'SEED-1', project_id: 'P',
+    title: 'seed: scaffold new project',
+    status: 'done', labels: [{ name: 'idea' }],
+  };
+  const openPr = { headRefName: 'feat/seed-1', title: 'SEED-1 scaffold', state: 'open', _repo: 'mdostal/auriga' };
+  assert.equal(core.detectFalseDone([seed], [openPr]).length, 0);
+  // consus-idea label also skipped
+  const consusIdea = { ...seed, labels: [{ name: 'consus-idea' }] };
+  assert.equal(core.detectFalseDone([consusIdea], [openPr]).length, 0);
+});
+
 test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
   assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
   assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');

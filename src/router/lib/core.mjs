@@ -747,6 +747,7 @@ export function detectFalseDone(doneIssues, openPrs = [], cfg = {}) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isExplicitSeed(i)) continue; // PANT-553: explicitly-labeled seeds are never false-done
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and
