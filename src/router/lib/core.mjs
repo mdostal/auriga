@@ -936,7 +936,7 @@ export function agentIdSet(agents = {}) {
 // Detect assigned `todo` issues that should have dispatched already but are
 // still idle. These do not count as capacity, so recovery is a separate bounded
 // pass instead of part of route selection.
-export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now()) {
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
   const actions = [];
   for (const i of todoIssues) {
@@ -945,7 +945,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isAgentParked(i)) continue;
+    if (isSeed(i, allIssues)) continue;
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;

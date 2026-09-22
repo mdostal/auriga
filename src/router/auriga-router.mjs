@@ -745,7 +745,7 @@ export async function cycle(opts = {}) {
     );
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
-    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
     // additions made this cycle (those update inflight[] directly). Omitting it here
     // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
