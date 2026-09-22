@@ -313,7 +313,7 @@ export async function cycle(opts = {}) {
     // ALL of a parent's visible children are done/cancelled and the parent isn't
     // already terminal. DISPATCH-scoped (writes setIssueStatus) — see the
     // blocked->todo pass above for why this can't be board-wide.
-    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)));
+    const parentDone = coreImpl.detectParentDone(issues.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id)), cfgImpl);
     for (const pd of parentDone) {
       logImpl('advance', { identifier: pd.identifier, to: ISSUE_STATUS.DONE, kind: 'parent-rollup', applied: !dryRun });
       if (!dryRun) {

@@ -862,6 +862,41 @@ test('detectParentDone: an already-done parent is not re-emitted', () => {
   assert.equal(core.detectParentDone(issues).length, 0);
 });
 
+test('detectParentDone: human-todo label on parent blocks auto-close', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: ['human-todo'] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'cancelled', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues, {}).length, 0);
+});
+
+test('detectParentDone: waiting_on a human name blocks auto-close', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: [], metadata: { waiting_on: 'alice' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  const cfg = { HUMAN_NAMES: ['alice'] };
+  assert.equal(core.detectParentDone(issues, cfg).length, 0);
+});
+
+test('detectParentDone: agent-parked parent (blocked_reason set) blocks auto-close', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: [], metadata: { blocked_reason: 'awaiting design review' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues, {}).length, 0);
+});
+
+test('detectParentDone: non-human waiting_on still rolls up', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: [], metadata: { waiting_on: 'ci' } },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  const cfg = { HUMAN_NAMES: ['alice'] };
+  assert.equal(core.detectParentDone(issues, cfg).length, 1);
+});
+
 // ============================================================================
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.

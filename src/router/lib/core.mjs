@@ -771,7 +771,7 @@ export function detectFalseDone(doneIssues, openPrs = []) {
 // board; a parent is any issue that at least one other issue names via parent_issue_id.
 // Only fires when the parent is IN the scanned set, is not already terminal, and ALL of
 // its (visible) children are terminal — so it never rolls up an epic mid-flight.
-export function detectParentDone(issues) {
+export function detectParentDone(issues, cfg = {}) {
   const byId = new Map(issues.map((i) => [i.id, i]));
   const childrenByParent = new Map();
   for (const i of issues) {
@@ -784,6 +784,8 @@ export function detectParentDone(issues) {
     const parent = byId.get(parentId);
     if (!parent) continue; // parent not in scanned set — can't judge
     if (isSmokeScratch(parent.title)) continue;
+    if (isHumanTodo(parent, cfg)) continue; // human must sign off — never auto-close
+    if (isAgentParked(parent)) continue; // PANT-383 — agent explicitly parked for human
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
