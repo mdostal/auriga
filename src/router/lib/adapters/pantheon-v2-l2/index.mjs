@@ -71,8 +71,8 @@ function sleepSync(ms) {
 // snake_case fields lib/core.mjs reads directly (confirmed via direct
 // inspection of core.mjs's own field accesses: id, identifier, title,
 // description, status, assignee_id, project_id, parent_issue_id, labels,
-// metadata — never parentId/createdAt/assignee.type, the BoardQueue port's
-// own vocabulary). Deliberately keeps Auriga's real, existing consumer
+// metadata, number — never parentId/createdAt/assignee.type, the BoardQueue
+// port's own vocabulary). Deliberately keeps Auriga's real, existing consumer
 // code working unchanged rather than "fixing" it as an unplanned side
 // effect of this cutover.
 function toRawIssue(issue) {
@@ -88,6 +88,7 @@ function toRawIssue(issue) {
     assignee_type: issue.assignee ? issue.assignee.type : null,
     project_id: issue.project ?? null,
     parent_issue_id: issue.parentId ?? null,
+    number: issue.number ?? null,
     metadata: issue.metadata,
     created_at: issue.createdAt,
     updated_at: issue.updatedAt,
