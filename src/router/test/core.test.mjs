@@ -862,6 +862,18 @@ test('detectParentDone: an already-done parent is not re-emitted', () => {
   assert.equal(core.detectParentDone(issues).length, 0);
 });
 
+test('detectParentDone: child in discovered-only project keeps parent open (cross-project children)', () => {
+  // Epic E in PROJECT_IDS-set A. C1 in set A (done), C2 in discovered-only set B (in_progress).
+  // detectParentDone must receive the full board — C2 must remain visible — so the
+  // rollup does NOT fire while C2 is still active.
+  const issues = [
+    { id: 'E', identifier: 'PAN-E', project_id: 'proj-A', status: 'in_progress', title: 'epic' },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'proj-A', status: 'done', title: 'task-a', parent_issue_id: 'E' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'proj-B', status: 'in_progress', title: 'task-b', parent_issue_id: 'E' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
 // ============================================================================
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.
