@@ -549,6 +549,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   for (const i of ordered) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue; // human controls this review
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
