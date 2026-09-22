@@ -91,6 +91,7 @@ function toRawIssue(issue) {
     metadata: issue.metadata,
     created_at: issue.createdAt,
     updated_at: issue.updatedAt,
+    number: issue.number,
   };
 }
 

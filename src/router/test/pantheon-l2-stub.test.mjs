@@ -63,6 +63,7 @@ function rawBoardIssue(overrides = {}) {
     metadata: { foo: 1 },
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',
+    number: 1,
     ...overrides,
   };
 }
@@ -82,7 +83,7 @@ test('listIssues() GETs the project-scoped route and maps back to raw, snake_cas
     id: 'issue-1', identifier: 'PAN-1', title: 'Some issue', description: 'desc', status: 'todo',
     labels: ['a-label'], assignee_id: 'agent-uuid-1', assignee_type: 'agent', project_id: 'proj-1',
     parent_issue_id: null, metadata: { foo: 1 }, created_at: '2026-01-01T00:00:00Z',
-    updated_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z', number: 1,
   }]);
 });
 
