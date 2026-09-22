@@ -471,6 +471,11 @@ export async function cycle(opts = {}) {
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
         if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+        const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if (agent && (priorAgentCycleAssigns[agent] || 0) >= maxPerAgentCascade) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent });
+          continue;
+        }
         if (agent) {
           if (typeof spawn.selectRoute === 'function') {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
@@ -696,6 +701,11 @@ export async function cycle(opts = {}) {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if ((priorAgentCycleAssigns[agent] || 0) >= maxPerAgentZombie) {
+          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent });
+          continue;
+        }
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {
           try {

@@ -1040,3 +1040,30 @@ test('cascade: per-runtime cap is enforced across multiple cascade iterations (l
   assert.ok(calls.assign.length <= 1,
     `per-runtime cap 1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
 });
+
+test('cascade: per-cycle-per-agent cap is enforced across multiple cascade iterations (PANT-473)', async () => {
+  // Three blocked stories all unblock simultaneously (each depends on a different done
+  // parent, all routed to the same agent via a single-agent lane). With perCyclePerAgent=1,
+  // only the first cascade assignment should go through; the remaining two must be
+  // skipped with cascade_skip(per-cycle-per-agent-cap).
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'cascade-pca-proj': ['auriga-dev'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+  };
+  const doneA = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const doneC = makeIssue({ project_id: 'cascade-pca-proj', status: 'done' });
+  const childA = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneB.id } });
+  const childC = makeIssue({ project_id: 'cascade-pca-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneC.id } });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, doneC, childA, childB, childC], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.length <= 1,
+    `perCyclePerAgent=1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
+  const capSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  assert.ok(capSkips.length >= 2,
+    `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
+});
