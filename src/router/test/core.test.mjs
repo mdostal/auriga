@@ -157,6 +157,17 @@ test('small-batch: never exceeds per-cycle total or per-agent cap', () => {
   assert.ok(aurigaCount <= CFG.CAPS.perCyclePerAgent, `auriga got ${aurigaCount}`);
 });
 
+test('selectAssignments: priorAgentCycleAssigns pre-seeds perAgentCycle so cascade/zombie assigns count toward the cap', () => {
+  // auriga-dev already received perCyclePerAgent (2) assigns this cycle via cascade.
+  // selectAssignments must not emit any additional assigns for it.
+  const issues = Array.from({ length: 5 }, (_, i) => story('a' + i, 'AURIGA', i, 'EPIC1'));
+  const picks = core.selectAssignments(issues, CFG, {}, {
+    priorAgentCycleAssigns: { 'auriga-dev': CFG.CAPS.perCyclePerAgent },
+  });
+  const aurigaCount = picks.filter((p) => p.agent === 'auriga-dev').length;
+  assert.equal(aurigaCount, 0, `auriga-dev already at cap but got ${aurigaCount} more assigns`);
+});
+
 test('runtime cap gates the whole codex lane in one cycle', () => {
   // Many default-lane (codex) todos; codex runtime cap 4, both agents empty.
   const issues = Array.from({ length: 10 }, (_, i) => story('j' + i, 'JANUS', i, 'EPIC1'));
