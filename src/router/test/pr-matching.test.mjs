@@ -19,6 +19,16 @@ test('prReferencesIssue: matches the identifier anywhere in branch/title/body, c
   assert.equal(prReferencesIssue({}, ''), false);
 });
 
+test('prReferencesIssue: PANT-1 does NOT match branch feat/pant-10-foo (boundary guard)', () => {
+  assert.equal(prReferencesIssue({ headRefName: 'feat/pant-10-foo' }, 'PANT-1'), false);
+  assert.equal(prReferencesIssue({ headRefName: 'feat/pant-100-foo' }, 'PANT-1'), false);
+  assert.equal(prReferencesIssue({ headRefName: 'feat/pant-1234-foo' }, 'PANT-1'), false);
+});
+
+test('prReferencesIssue: PANT-10 still matches branch feat/pant-10-foo', () => {
+  assert.equal(prReferencesIssue({ headRefName: 'feat/pant-10-foo' }, 'PANT-10'), true);
+});
+
 test('prMatchesStory: falls back to the story\'s short key when the raw identifier isn\'t present', () => {
   const pr = { headRefName: 'feat/m-01-service' };
   const issue = { identifier: 'PAN-9999', title: '[m-01-core] service work' };
@@ -36,6 +46,15 @@ test('prIdentityMatchesStory: only checks branch/title, never body (false-positi
   assert.equal(prIdentityMatchesStory(pr, { identifier: 'PAN-6659' }), false);
   const prWithBranch = { headRefName: 'feat/pan-6659-fix' };
   assert.equal(prIdentityMatchesStory(prWithBranch, { identifier: 'PAN-6659' }), true);
+});
+
+test('prIdentityMatchesStory: PANT-1 does NOT match branch feat/pant-10-foo (boundary guard)', () => {
+  assert.equal(prIdentityMatchesStory({ headRefName: 'feat/pant-10-foo' }, { identifier: 'PANT-1' }), false);
+  assert.equal(prIdentityMatchesStory({ headRefName: 'feat/pant-100-bar' }, { identifier: 'PANT-1' }), false);
+});
+
+test('prIdentityMatchesStory: PANT-10 still matches branch feat/pant-10-foo', () => {
+  assert.equal(prIdentityMatchesStory({ headRefName: 'feat/pant-10-foo' }, { identifier: 'PANT-10' }), true);
 });
 
 test('repoFromPrUrl: parses owner/repo from a real github PR url', () => {

@@ -24,7 +24,8 @@ export function prReferencesIssue(pr = {}, identifier = '') {
     .filter((s) => typeof s === 'string')
     .join('\n')
     .toLowerCase();
-  return hay.includes(id);
+  const re = new RegExp('(?<![a-z0-9])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
+  return re.test(hay);
 }
 
 // Broader PR<->STORY matcher: matches on the ticket identifier (prReferencesIssue)
@@ -52,7 +53,10 @@ export function prIdentityMatchesStory(pr = {}, issue = {}) {
   const idHay = [pr.headRefName, pr.head_ref, pr.branch, pr.title]
     .filter((s) => typeof s === 'string').join('\n').toLowerCase();
   const id = String(issue.identifier || '').toLowerCase();
-  if (id && idHay.includes(id)) return true;
+  if (id) {
+    const re = new RegExp('(?<![a-z0-9])' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
+    if (re.test(idHay)) return true;
+  }
   const key = storyKey(issue);
   if (!key) return false;
   const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
