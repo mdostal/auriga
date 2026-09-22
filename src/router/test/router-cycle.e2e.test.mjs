@@ -845,6 +845,57 @@ test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxT
   assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
 });
 
+test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
+  // A cascade candidate exists (done parent + blocked child with metadata dep),
+  // but the child's most recent run completed only 30 s ago — well within the
+  // 15-min cooldown window. The router must NOT assign/rerun the child and must
+  // log cascade_skip(reason: 'redispatch-cooldown').
+  const fixtureCfg = withFixtureLanes({ 'cooldown-proj': ['auriga-dev'] });
+  const FIXED_NOW = Date.now();
+  const doneParent = makeIssue({ project_id: 'cooldown-proj', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const { backlog, spawn, calls, runsByIdentifier, log } = (() => {
+    const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+    // Seed a completed run that finished 30 s ago — within cooldown
+    const recentCompletedAt = new Date(FIXED_NOW - 30_000).toISOString();
+    adapters.runsByIdentifier[blockedChild.identifier] = [
+      { status: 'completed', completed_at: recentCompletedAt, created_at: recentCompletedAt },
+    ];
+    return { ...adapters, log: createLogSink() };
+  })();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  assert.ok(!calls.assign.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT assign a child whose last run completed within the cooldown window');
+  const skipLog = log.byEvent('cascade_skip').find(
+    (e) => e.identifier === blockedChild.identifier && e.reason === 'redispatch-cooldown'
+  );
+  assert.ok(skipLog, 'cascade_skip(redispatch-cooldown) must be logged for a recently-completed run');
+});
+
+test('cascade: dispatches normally when last run completed beyond redispatchCooldownMs', async () => {
+  // Same setup, but the run completed 20 min ago — outside the 15-min cooldown.
+  // The router must assign and rerun the child as normal.
+  const fixtureCfg = withFixtureLanes({ 'cooldown-proj-2': ['auriga-dev'] });
+  const FIXED_NOW = Date.now();
+  const cooldownMs = cfg.CAPS.redispatchCooldownMs;
+  const doneParent = makeIssue({ project_id: 'cooldown-proj-2', status: 'done' });
+  const blockedChild = makeIssue({ project_id: 'cooldown-proj-2', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  // Seed a completed run that finished 20 min ago — beyond cooldown
+  const oldCompletedAt = new Date(FIXED_NOW - cooldownMs - 5 * 60_000).toISOString();
+  adapters.runsByIdentifier[blockedChild.identifier] = [
+    { status: 'completed', completed_at: oldCompletedAt, created_at: oldCompletedAt },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog: adapters.backlog, spawn: adapters.spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  assert.ok(adapters.calls.assign.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
+});
+
 test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
   // Three separate blocked stories that can all cascade (each depends on a different done
   // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev
