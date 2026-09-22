@@ -680,6 +680,23 @@ test('selectReviewDispatch: does not dispatch to an offline review runtime', () 
   assert.deepEqual(picks, []);
 });
 
+// ---- PANT-391: isHumanTodo guard in selectReviewDispatch ------------------
+
+test('selectReviewDispatch: human-todo label suppresses dispatch-review — PANT-391', () => {
+  // An unassigned in_review ticket with human-todo label must not be dispatched to a review agent.
+  const i = inReview('PANT-391A', 391, null, { labels: ['human-todo'], metadata: {} });
+  const picks = core.selectReviewDispatch([i], { 'PANT-391A': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: human-todo label suppresses rerun-review on stale review assignment — PANT-391', () => {
+  // An in_review ticket already assigned to the review agent, whose run went stale,
+  // must not be re-fired when it carries a human-todo label.
+  const i = inReview('PANT-391B', 392, 'RV', { labels: ['human-todo'], metadata: {} });
+  const picks = core.selectReviewDispatch([i], { 'PANT-391B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
