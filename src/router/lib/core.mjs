@@ -547,7 +547,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // starved outright, while every other real in_review ticket gets first
   // crack at the slot.
   const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
-  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).length;
+  // PANT-531: count only review-phase runs (agent_id in reviewAgentIds). Build-phase runs
+  // must not inflate this counter — a story needing 3+ build iterations would otherwise be
+  // deprioritized the moment it enters in_review, before any review run has ever fired.
+  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).filter((r) => reviewAgentIds.has(r.agent_id)).length;
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
@@ -569,15 +572,14 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const lr = latestRun(runs);
       const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
       if (!stale) continue; // finished recently — give the agent time to act
-      // PANT-262: give-up after reviewMaxAttempts accumulated runs, parallel to detectZombies'
-      // own give-up path (zombieMaxAttempts). runs.length counts ALL runs for this issue
-      // (build + review combined); 5 is enough to catch persistent review-startup hangs
-      // (which saw 5 consecutive idle_watchdog kills in the confirmed live incident) without
-      // misfiring on a normal 1-2 build + 1-2 review lifecycle. The give-up action sets the
-      // issue blocked + posts a diagnostic comment so a human can investigate the root cause
-      // (see PANT-262 / GitHub #94: leading hypothesis is a Playwright MCP initialization hang).
+      // PANT-262: give-up after reviewMaxAttempts review-phase runs, parallel to detectZombies'
+      // own give-up path (zombieMaxAttempts). PANT-531: count only review-phase runs
+      // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
+      // give-up-review on its very first review dispatch. The give-up action sets the issue
+      // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
       const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
-      if (runs.length >= reviewMaxAttempts) {
+      const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
+      if (reviewRunCount >= reviewMaxAttempts) {
         actions.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
