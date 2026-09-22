@@ -455,6 +455,7 @@ export async function cycle(opts = {}) {
       }
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
+      let agent; // hoisted so cascade catch can read it for blockedRuntimes
       try {
         if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
@@ -466,7 +467,7 @@ export async function cycle(opts = {}) {
         // path instead treats rerun as ALWAYS required (assign never enqueues on
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
-        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
+        agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
         // Skip only when no agent has capacity AND the issue has no existing assignee.
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
@@ -499,6 +500,11 @@ export async function cycle(opts = {}) {
         logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
       } catch (e) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
+        const msg = e.message || '';
+        if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+          const rt = agent && cfgImpl.AGENTS[agent]?.runtime;
+          if (rt) blockedRuntimes.add(rt);
+        }
       }
     }
   }
@@ -677,6 +683,11 @@ export async function cycle(opts = {}) {
       }
     } catch (e) {
       logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: e.message });
+      const msg = e.message || '';
+      if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+        const rt = r.agent && cfgImpl.AGENTS[r.agent]?.runtime;
+        if (rt) blockedRuntimes.add(rt);
+      }
     }
   }
 
@@ -753,7 +764,14 @@ export async function cycle(opts = {}) {
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
             await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
             spawn.rerunIssue(z.identifier);
-          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) {
+            logImpl('zombie_error', { identifier: z.identifier, error: e.message });
+            const msg = e.message || '';
+            if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+              const rt = cfgImpl.AGENTS[agent]?.runtime;
+              if (rt) blockedRuntimes.add(rt);
+            }
+          }
         }
       }
     }
