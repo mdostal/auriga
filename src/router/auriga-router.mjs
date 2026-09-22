@@ -291,13 +291,10 @@ export async function cycle(opts = {}) {
       const issueObj = blockedIssues.find((b) => b.id === u.issueId) || {};
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
       let hasPr = false;
-      if (slug) {
-        // Matches against the per-cycle cached board-wide PR scan (see
-        // matchedPrs above) via the real prMatchesStory — not a narrower
-        // per-adapter heuristic.
-        try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
-        catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
-      }
+      // PANT-464: always check for PRs, even when no target_repo — skipping the guard is not the safe default.
+      // prMatchesStory matches by identifier regardless of repo, so the board-wide scan still catches them.
+      try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
+      catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
       if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
       logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -445,14 +442,13 @@ export async function cycle(opts = {}) {
       // matched against the per-cycle cached board-wide PR scan (see matchedPrs
       // above).
       const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
-      if (slug) {
-        try {
-          if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
-            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
-            continue;
-          }
-        } catch (e) { logImpl('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
-      }
+      // PANT-464: check PRs regardless of target_repo — silently skipping the guard when slug is empty is not safe
+      try {
+        if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
+          continue;
+        }
+      } catch (e) { logImpl('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
@@ -472,8 +468,13 @@ export async function cycle(opts = {}) {
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
         if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
         const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
-        if (agent && (priorAgentCycleAssigns[agent] || 0) >= maxPerAgentCascade) {
-          logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent });
+        // PANT-545/478: look up existing assignee name for cap check + priorAgentCycleAssigns update
+        const existingAssigneeName = !agent && issueObj.assignee_id
+          ? Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0]
+          : null;
+        const capAgent = agent || existingAssigneeName;
+        if (capAgent && (priorAgentCycleAssigns[capAgent] || 0) >= maxPerAgentCascade) {
+          logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent: capAgent });
           continue;
         }
         if (agent) {
@@ -486,9 +487,11 @@ export async function cycle(opts = {}) {
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
           priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
-          assigned++;
         }
         spawn.rerunIssue(c.identifier);
+        // PANT-478: always count the rerun against maxAssign; PANT-545: always update priorAgentCycleAssigns
+        assigned++;
+        if (existingAssigneeName) priorAgentCycleAssigns[existingAssigneeName] = (priorAgentCycleAssigns[existingAssigneeName] || 0) + 1;
         cascadeFired++;
         cascaded.add(c.identifier);
         logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
@@ -572,6 +575,7 @@ export async function cycle(opts = {}) {
   const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
+    if (assigned >= maxAssign) break; // PANT-516: review loop must respect the per-cycle maxAssign cap
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
     // qa/ux run, and whether QA drives a real browser via Playwright). Auriga stays
     // the THIN router — it computes the plan and fires ONE dispatch carrying it; the
@@ -707,8 +711,19 @@ export async function cycle(opts = {}) {
         if (zombieRt && blockedRuntimes.has(zombieRt)) {
           logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', runtime: zombieRt }); continue;
         }
+        // PANT-556: apply per-cycle-per-agent cap and update the counter, same as the assign path below
+        const maxPerAgentZombieRerun = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if (zombieAgentName && (priorAgentCycleAssigns[zombieAgentName] || 0) >= maxPerAgentZombieRerun) {
+          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent: zombieAgentName }); continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
-        if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        if (!dryRun) {
+          try {
+            spawn.rerunIssue(z.identifier);
+            assigned++;
+            if (zombieAgentName) priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
+          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+        }
       } else {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
@@ -776,6 +791,7 @@ export async function cycle(opts = {}) {
           inflight[a.agent] = (inflight[a.agent] || 0) + 1;
           if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
           priorAgentCycleAssigns[a.agent] = (priorAgentCycleAssigns[a.agent] || 0) + 1;
+          cascaded.add(a.identifier); // PANT-445: exclude from selectAssignments to prevent same-cycle double-dispatch
         } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
       }
     }
@@ -885,7 +901,9 @@ export async function cycle(opts = {}) {
       // Remote create failed — undo the pre-cancel so the issue re-enters
       // the candidate pool next cycle rather than being stranded as cancelled.
       logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
-      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
+      // PANT-474: log undo failures — a silently swallowed catch(_) leaves the issue permanently stranded as CANCELLED
+      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); }
+      catch (undoErr) { logImpl('hand_up_undo_error', { identifier: h.identifier, error: undoErr.message }); }
       continue;
     }
 

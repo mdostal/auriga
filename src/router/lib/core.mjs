@@ -72,7 +72,8 @@ const HIVE_STEP_AGENT_RE = /\bagent:\s*(researcher|developer|tester|reviewer)\b/
 
 export function isHiveStory(issue = {}) {
   const labels = Array.isArray(issue.labels) ? issue.labels : [];
-  if (labels.some((l) => HIVE_LABELS.has(String(l).toLowerCase()))) return true;
+  // PANT-463: API label objects must be normalized to .name before String() — String({id,...}) yields '[object Object]'
+  if (labels.some((l) => HIVE_LABELS.has((typeof l === 'string' ? l : (l && l.name) || '').toLowerCase()))) return true;
   const desc = issue.description || '';
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
@@ -120,11 +121,22 @@ export function isHiveStory(issue = {}) {
 // (see minerva-dev's own live agent instructions), and it's checked FIRST,
 // before the explicit-mark and heuristic legs, so it always wins even if a
 // human later adds 'idea'/'needs-plan' back by mistake.
+// True when an issue carries an explicit planning/ideation label, regardless of
+// board context. Used in detect* functions that don't have the full board available
+// (detectZombies, detectCascadeDispatch, detectAssignedIdle) — those only skip the
+// label-marked seeds since the "top-level childless" structural inference requires
+// the full board to avoid false-positives on ordinary in_progress issues (PANT-519/532/550).
+function isExplicitSeed(issue) {
+  const labelNames = (issue.labels || []).map((l) => ((typeof l === 'string' ? l : (l && l.name) || '')).toLowerCase());
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 export function isSeed(issue, allIssues = []) {
   // `multica issue list`/`get` return labels as an array of label OBJECTS
-  // ({ id, name, color, ... }), not plain strings — normalize to names so
-  // this matches real API data, not just string-array test fixtures.
-  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  // ({ id, name, color, ... }), not plain strings — normalize to lowercase names so
+  // this matches real API data regardless of capitalization (PANT-507).
+  const labelNames = (issue.labels || []).map((l) => ((typeof l === 'string' ? l : (l && l.name) || '')).toLowerCase());
   if (labelNames.includes('not-a-seed')) return false;
   const explicitlyMarked = labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
   if (explicitlyMarked) return true;
@@ -149,7 +161,8 @@ export function isSeed(issue, allIssues = []) {
 // (opts.parentBoardConfig, from orchestrator-topology.mjs's
 // resolveParentBoardConfig()) — see selectAssignments below.
 export function isHandUp(issue) {
-  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  // PANT-507: same lowercase normalization as isSeed — API returns label objects
+  const labelNames = (issue.labels || []).map((l) => ((typeof l === 'string' ? l : (l && l.name) || '')).toLowerCase());
   return labelNames.includes('hand-up');
 }
 
@@ -245,6 +258,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
+    .filter((i) => !isAgentParked(i)) // PANT-535/458: agent-parked issues must not be dispatched
     .filter((i) => !isHumanTodo(i, cfg))
     .filter((i) => allDepsSatisfied(i, statusById, issues));
 
@@ -407,6 +421,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isExplicitSeed(i)) continue; // PANT-519: explicitly-labeled planning seeds must not be zombie-recovered to a build lane
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -434,7 +449,11 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
-    if (runs.length >= cfg.CAPS.zombieMaxAttempts) {
+    // PANT-517: count only build-phase (non-review) runs — review runs inflate the total
+    // and trigger premature give-up for stories with many review iterations.
+    const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
+    const buildRunCount = runs.filter((r) => !reviewAgentIds.has(r.agent_id)).length;
+    if (buildRunCount >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({
         identifier: i.identifier,
         issueId: i.id,
@@ -898,6 +917,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isExplicitSeed(i)) continue; // PANT-532/461: explicitly-labeled planning seeds must not be cascade-dispatched to build lane
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;
@@ -947,6 +967,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isExplicitSeed(i)) continue; // PANT-550: explicitly-labeled planning seeds must not be idle-recovery dispatched to build lane
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;

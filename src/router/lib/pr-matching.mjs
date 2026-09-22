@@ -24,7 +24,12 @@ export function prReferencesIssue(pr = {}, identifier = '') {
     .filter((s) => typeof s === 'string')
     .join('\n')
     .toLowerCase();
-  return hay.includes(id);
+  // PANT-540: word-boundary match — plain includes() lets 'PANT-1' falsely match 'PANT-10'.
+  // Require the identifier is not immediately followed by a digit (e.g. PANT-10 must not match PANT-1).
+  const idx = hay.indexOf(id);
+  if (idx === -1) return false;
+  const after = hay[idx + id.length];
+  return after === undefined || !/[0-9]/.test(after);
 }
 
 // Broader PR<->STORY matcher: matches on the ticket identifier (prReferencesIssue)
@@ -52,7 +57,14 @@ export function prIdentityMatchesStory(pr = {}, issue = {}) {
   const idHay = [pr.headRefName, pr.head_ref, pr.branch, pr.title]
     .filter((s) => typeof s === 'string').join('\n').toLowerCase();
   const id = String(issue.identifier || '').toLowerCase();
-  if (id && idHay.includes(id)) return true;
+  // PANT-540: same word-boundary guard as prReferencesIssue — 'PANT-1' must not match 'PANT-10'
+  if (id) {
+    const idx = idHay.indexOf(id);
+    if (idx !== -1) {
+      const after = idHay[idx + id.length];
+      if (after === undefined || !/[0-9]/.test(after)) return true;
+    }
+  }
   const key = storyKey(issue);
   if (!key) return false;
   const re = new RegExp('(?<![a-z0-9])' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9])', 'i');
