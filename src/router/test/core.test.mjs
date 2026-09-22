@@ -586,6 +586,33 @@ test('routing: selectAssignments withholds a story whose dep isn\'t done, dispat
   assert.deepEqual(picks.map((p) => p.identifier), ['s2id']); // s1 done -> s2 unblocked
 });
 
+test('routing: selectAssignments withholds story with ONLY description-slug deps when dep is not done', () => {
+  // Older stories carry deps ONLY in the description (no metadata.depends_on).
+  // depsSatisfied alone returns true for these (it reads only metadata), so the
+  // pre-fix code incorrectly admitted them into the dispatch pool. allDepsSatisfied
+  // must now gate them. (PANT-412)
+  const parent = 'epicX';
+  const m01 = { ...story('m01id', 'AURIGA', 1, parent, null, '[m-01-setup] setup'), status: 'in_progress' };
+  const s2 = { ...story('s2id', 'AURIGA', 2, parent), description: 'depends_on: [m-01-setup]\n', metadata: {} };
+
+  let picks = core.selectAssignments([m01, s2], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), [], 's2 must not dispatch while m01 is in_progress');
+
+  const m01done = { ...m01, status: 'done' };
+  picks = core.selectAssignments([m01done, s2], CFG, {}, {});
+  assert.ok(picks.some((p) => p.identifier === 's2id'), 's2 should dispatch once m01 is done');
+});
+
+test('routing: selectAssignments still dispatches story when description dep resolves as done', () => {
+  // Confirm the positive: no regression where a satisfied description dep blocks dispatch.
+  const parent = 'epicY';
+  const m01done = { ...story('m01y', 'AURIGA', 1, parent, null, '[m-01-init] init'), status: 'done' };
+  const s2 = { ...story('s2y', 'AURIGA', 2, parent), description: 'depends_on: [m-01-init]\n', metadata: {} };
+
+  const picks = core.selectAssignments([m01done, s2], CFG, {}, {});
+  assert.ok(picks.some((p) => p.identifier === 's2y'), 's2y should dispatch when its description dep is done');
+});
+
 test('routing: seed skipped when minerva-dev has no capacity, never falls back to a build agent', () => {
   const issue = { ...todo('seed4', 'AURIGA', 1), labels: ['idea'] };
   // minerva-dev's maxInflight is 3 in the CFG fixture; exhaust it directly via inflight.
