@@ -771,6 +771,24 @@ test('selectReviewDispatch: human-todo label suppresses rerun-review on stale re
   assert.deepEqual(picks, []);
 });
 
+// ---- PANT-489: isAgentParked guard in selectReviewDispatch -----------------
+
+test('selectReviewDispatch: agent-parked unassigned in_review issue is excluded from dispatch-review — PANT-489', () => {
+  // An in_review issue with metadata.blocked_reason set must never be dispatched to
+  // the review agent regardless of run staleness.
+  const i = inReview('PANT-489A', 489, null, { metadata: { blocked_reason: 'target_repo not found — human must create repo first' } });
+  const picks = core.selectReviewDispatch([i], { 'PANT-489A': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: agent-parked in_review issue already assigned to reviewer is not rerun — PANT-489', () => {
+  // An in_review issue already assigned to the review agent, with a stale run AND
+  // metadata.blocked_reason, must not trigger rerun-review.
+  const i = inReview('PANT-489B', 490, 'RV', { metadata: { blocked_reason: 'target_repo not found — human must create repo first' } });
+  const picks = core.selectReviewDispatch([i], { 'PANT-489B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
