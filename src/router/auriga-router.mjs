@@ -572,6 +572,7 @@ export async function cycle(opts = {}) {
   const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
+    if (assigned >= maxAssign) break;
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
     // qa/ux run, and whether QA drives a real browser via Playwright). Auriga stays
     // the THIN router — it computes the plan and fires ONE dispatch carrying it; the

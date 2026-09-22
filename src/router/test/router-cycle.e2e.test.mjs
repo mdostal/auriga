@@ -905,6 +905,27 @@ test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxT
   assert.equal(calls.assign.length, 0, 'assignIssue must not be called when maxAssign:0');
 });
 
+test('review dispatch loop respects maxAssign cap — PANT-516', async () => {
+  // With perCycleReview=3 and 3 in_review stories, selectReviewDispatch returns up to
+  // 3 picks. With maxAssign=2, only 2 review dispatches must fire — the loop must
+  // break when the cap is reached, never overrun it.
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'review-cap-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, perCycleReview: 3, reviewMaxAttempts: 10, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const issues = Array.from({ length: 3 }, () =>
+    makeIssue({ project_id: 'review-cap-proj', status: 'in_review', parent_issue_id: 'fake-parent' })
+  );
+  const { backlog, spawn, calls } = createMockAdapters(issues, fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, maxAssign: 2 });
+
+  assert.ok(calls.assign.length <= 2,
+    `review dispatch must not exceed maxAssign=2, got ${calls.assign.length}`);
+});
+
 test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
   // A cascade candidate exists (done parent + blocked child with metadata dep),
   // but the child's most recent run completed only 30 s ago — well within the
