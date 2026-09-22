@@ -344,10 +344,12 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 // (see classifyRun) is the only signal. Only considers issues currently
 // in_progress, so a re-scan after the transition naturally stops re-firing
 // (the issue is no longer in the input set) — idempotent by construction.
-export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now()) {
+export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
@@ -366,10 +368,12 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 // pantheon-owns-multica-board-bridge cutover; GH #81 found this function
 // still checking the OLD Multica-native shape's casing (lowercase
 // 'merged'/snake_case merged_at) and never firing on a real one.
-export function detectVerifiedDone(inReviewIssues, prsByIssue) {
+export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     const prs = prsByIssue[i.identifier] || [];
     const merged = prs.some(isPrMerged);
     if (merged) {
@@ -553,6 +557,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   for (const i of ordered) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
     const runs = runsByIssue[i.identifier] || [];
 
@@ -668,10 +673,12 @@ export function allDepsSatisfied(issue, statusById, allIssues = []) {
 // 2026-07-31) lets the pass resolve DESCRIPTION-declared slug deps against siblings,
 // not just metadata ticket-id deps — the m-02-depends-on-m-01 case, where the dep
 // lived only in the description and the child never unblocked though its dep was done.
-export function detectUnblocks(blockedIssues, statusById, allIssues = []) {
+export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = {}) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -710,10 +717,12 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = []) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and
@@ -897,10 +906,12 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 // status as the formal "send back" signal; the router owns the transition to
 // todo + unassign (the router must never rely solely on agent free-text for a
 // status mutation the state machine should handle).
-export function detectChangesRequested(changesRequestedIssues) {
+export function detectChangesRequested(changesRequestedIssues, cfg = {}) {
   const actions = [];
   for (const i of changesRequestedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
@@ -929,6 +940,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if ((i.status || '').toLowerCase() !== 'todo') continue;
     if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isAgentParked(i)) continue;
 
@@ -968,7 +980,7 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const inflight = opts.inflight || {};
   const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
   const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: {} };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
 
   const selected = [];
   const skipped = [];

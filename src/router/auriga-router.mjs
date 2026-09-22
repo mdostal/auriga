@@ -280,7 +280,7 @@ export async function cycle(opts = {}) {
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
-    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues);
+    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl);
     for (const u of unblocks) {
       // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
       // means it is already in review, a MERGED PR means it already shipped. A
@@ -336,7 +336,7 @@ export async function cycle(opts = {}) {
   const runsByIssue = {};
   for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now);
+  const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
@@ -349,7 +349,7 @@ export async function cycle(opts = {}) {
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
   for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
-  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
+  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {
@@ -376,7 +376,7 @@ export async function cycle(opts = {}) {
   // blocked->todo pass above.
   {
     const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const changeBacks = coreImpl.detectChangesRequested(changesRequested);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -551,7 +551,7 @@ export async function cycle(opts = {}) {
         }
       }
     }
-    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs);
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl);
     const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
@@ -640,6 +640,7 @@ export async function cycle(opts = {}) {
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
       spawn.rerunIssue(r.identifier);
+      assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
@@ -748,6 +749,7 @@ export async function cycle(opts = {}) {
     const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
       inflight,
       blockedRuntimes,
+      priorAgentCycleAssigns,
       maxTotal: Math.min(
         cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
         Math.max(0, maxAssign - assigned)
@@ -762,6 +764,7 @@ export async function cycle(opts = {}) {
           assigned++;
           inflight[a.agent] = (inflight[a.agent] || 0) + 1;
           if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
+          priorAgentCycleAssigns[a.agent] = (priorAgentCycleAssigns[a.agent] || 0) + 1;
         } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
       }
     }
