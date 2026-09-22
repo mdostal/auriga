@@ -522,6 +522,28 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
   assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
 });
 
+// ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----
+
+test('zombie assign: an unassigned in_progress zombie gets assignIssue then rerunIssue (PANT-409)', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  // No assignee_id → detectZombies emits action:'assign'
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 1, 'zombie assign must count towards assigned');
+  assert.ok(calls.assign.some((c) => c.identifier === stuckIssue.identifier), 'zombie assign must call assignIssue');
+  assert.ok(calls.rerun.some((c) => c.identifier === stuckIssue.identifier), 'zombie assign must call rerunIssue after assignIssue (PANT-409)');
+  const zombieLogs = log.byEvent('zombie');
+  assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
+});
+
 // ---- t015: orchestrator hand-up (real cycle()-level, not just selectAssignments) ----
 
 function saturateAgent(fixtureCfg, agentName, projectId, n) {

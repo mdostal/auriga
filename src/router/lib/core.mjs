@@ -398,6 +398,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -774,7 +775,7 @@ export function detectFalseDone(doneIssues, openPrs = []) {
 // board; a parent is any issue that at least one other issue names via parent_issue_id.
 // Only fires when the parent is IN the scanned set, is not already terminal, and ALL of
 // its (visible) children are terminal — so it never rolls up an epic mid-flight.
-export function detectParentDone(issues) {
+export function detectParentDone(issues, cfg = {}) {
   const byId = new Map(issues.map((i) => [i.id, i]));
   const childrenByParent = new Map();
   for (const i of issues) {
@@ -787,6 +788,8 @@ export function detectParentDone(issues) {
     const parent = byId.get(parentId);
     if (!parent) continue; // parent not in scanned set — can't judge
     if (isSmokeScratch(parent.title)) continue;
+    if (isAgentParked(parent)) continue; // agent parked: human must close
+    if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;

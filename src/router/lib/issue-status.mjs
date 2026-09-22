@@ -39,12 +39,14 @@ export const ISSUE_STATUS_ALT_SPELLINGS = Object.freeze({
 
 /**
  * Is this a terminal issue status — the story is finished, whether it
- * shipped or was abandoned? done OR cancelled OR canceled.
+ * shipped or was abandoned? done OR cancelled OR canceled OR shipped OR complete.
  * @param {string} status
  * @returns {boolean}
  */
 export function isTerminalIssueStatus(status) {
   return status === ISSUE_STATUS.DONE
     || status === ISSUE_STATUS.CANCELLED
-    || status === ISSUE_STATUS.CANCELED;
+    || status === ISSUE_STATUS.CANCELED
+    || status === ISSUE_STATUS.SHIPPED
+    || status === ISSUE_STATUS.COMPLETE;
 }
