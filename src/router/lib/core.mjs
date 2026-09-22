@@ -537,7 +537,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // starved outright, while every other real in_review ticket gets first
   // crack at the slot.
   const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
-  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).length;
+  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).filter(r => reviewAgentIds.has(r.agent_id)).length;
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;

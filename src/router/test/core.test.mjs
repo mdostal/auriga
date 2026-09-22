@@ -691,9 +691,9 @@ test('selectReviewDispatch: does not dispatch to an offline review runtime', () 
 // for over an hour while PANT-255..260 sat completely unreviewed.
 
 test('selectReviewDispatch: a ticket at the fairness threshold is deprioritized behind a fresher in_review ticket', () => {
-  const exhausted = inReview('PANT-208', 1); // many accumulated runs, never resolves
+  const exhausted = inReview('PANT-208', 1); // many accumulated review runs, never resolves
   const fresh = inReview('PANT-255', 2); // brand-new in_review ticket, no runs yet
-  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', completed_at: new Date(NOW - 60_000).toISOString() }));
+  const manyRuns = Array.from({ length: 3 }, () => ({ status: 'completed', agent_id: 'RV', completed_at: new Date(NOW - 60_000).toISOString() }));
   const picks = core.selectReviewDispatch(
     [exhausted, fresh], { 'PANT-208': manyRuns, 'PANT-255': [] }, CFG, {}, { now: NOW }
   );
@@ -731,8 +731,8 @@ test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopoli
     assert.ok(picks.length <= 1); // perCycleReview cap still respected every cycle
     for (const p of picks) {
       // A real dispatch always leaves a run behind -- feed that back in so the
-      // fairness signal (accumulated run count) grows exactly like production.
-      runsByIssue[p.identifier].push({ status: 'completed', completed_at: new Date(NOW + c * 1000).toISOString() });
+      // fairness signal (review run count) grows exactly like production.
+      runsByIssue[p.identifier].push({ status: 'completed', agent_id: 'RV', completed_at: new Date(NOW + c * 1000).toISOString() });
       if (p.identifier === starver.identifier) continue; // never resolves -- stays in_review
       dispatchedOther.add(p.identifier); // a real ticket resolved -> leaves in_review
     }
@@ -742,6 +742,23 @@ test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopoli
   // Every genuinely different in_review ticket eventually got a real dispatch
   // turn -- not just the starver, forever.
   assert.equal(dispatchedOther.size, others.length);
+});
+
+test('selectReviewDispatch: build runs do not count toward fairness — ticket with many build retries is not deprioritized on first review (PANT-390)', () => {
+  // S1 needed 3 zombie-recovery build runs before completing — total runs = 3 (all build)
+  const buildHeavy = inReview('PANT-390a', 390);
+  // S2 had one clean build run — total runs = 1 (build)
+  const cleanBuild = inReview('PANT-390b', 391);
+  const BUILD_AGENT_ID = 'AB'; // auriga-build in CFG
+  const buildRuns = Array.from({ length: 3 }, () => ({ status: 'completed', agent_id: BUILD_AGENT_ID, completed_at: new Date(NOW - 60_000).toISOString() }));
+  const oneCleanRun = [{ status: 'completed', agent_id: BUILD_AGENT_ID, completed_at: new Date(NOW - 60_000).toISOString() }];
+  // Old bug: attemptsOf(PANT-390a) = 3 (>= fairnessMax=3), wrongly deprioritized behind PANT-390b
+  // Fixed: only review runs (agent_id='RV') count — attemptsOf = 0 for both, stable order preserved
+  const picks = core.selectReviewDispatch(
+    [buildHeavy, cleanBuild], { 'PANT-390a': buildRuns, 'PANT-390b': oneCleanRun }, CFG, {}, { now: NOW }
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-390a'); // caller order preserved — build runs don't count toward fairness
 });
 
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
