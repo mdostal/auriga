@@ -703,9 +703,13 @@ export async function cycle(opts = {}) {
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now);
+    // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
+    // additions made this cycle (those update inflight[] directly). Omitting it here
+    // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
+    // the per-runtime cap the correct view. Same fix as PANT-331 bug 2 for the cascade
+    // and zombie passes; see capacity.mjs:computeRuntimeInflight.
     const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
       inflight,
-      runtimeInflight,
       blockedRuntimes,
       maxTotal: Math.min(
         cfgImpl.CAPS.assignedIdlePerCycle ?? cfgImpl.CAPS.perCycleTotal,
