@@ -669,6 +669,17 @@ test('routing: seed with unchanged router-managed fingerprint for minerva-dev pr
   assert.equal(picks.length, 0, 'unchanged fingerprint seed must not re-dispatch');
 });
 
+// PANT-465: seed path was missing assignmentFingerprint and assignmentReason.
+// Without the fingerprint, assignmentFingerprintMatches always returns false for seeds,
+// defeating noop detection and causing re-dispatch on every cycle.
+test('routing: seed pick includes assignmentFingerprint and assignmentReason', () => {
+  const issue = { ...todo('seed-fp', 'AURIGA', 1), labels: ['idea'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.match(picks[0].assignmentFingerprint, /^[a-f0-9]{64}$/, 'seed pick must carry a fingerprint');
+  assert.ok(typeof picks[0].assignmentReason === 'string' && picks[0].assignmentReason.length > 0, 'seed pick must carry a reason');
+});
+
 // ---- BACK-HALF: review / ship dispatch ----------------------------------
 
 const NOW = 1_700_000_000_000;
