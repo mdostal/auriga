@@ -366,10 +366,11 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 // pantheon-owns-multica-board-bridge cutover; GH #81 found this function
 // still checking the OLD Multica-native shape's casing (lowercase
 // 'merged'/snake_case merged_at) and never firing on a real one.
-export function detectVerifiedDone(inReviewIssues, prsByIssue) {
+export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isHumanTodo(i, cfg)) continue;
     const prs = prsByIssue[i.identifier] || [];
     const merged = prs.some(isPrMerged);
     if (merged) {

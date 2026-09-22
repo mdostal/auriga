@@ -349,7 +349,7 @@ export async function cycle(opts = {}) {
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
   for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
-  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue);
+  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
     if (!dryRun) {

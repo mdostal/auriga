@@ -338,6 +338,22 @@ test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, cam
   assert.equal(actions[0].action, 'advance-done');
 });
 
+// PANT-470: human-todo issues must never be auto-advanced to done even when a
+// linked PR merges — the human controls the terminal state.
+test('detectVerifiedDone: human-todo label suppresses advance-done on merged PR — PANT-470', () => {
+  const inReview = [
+    { id: 'ht1', identifier: 'PANT-470A', project_id: 'AURIGA', status: 'in_review', title: 'human task', labels: ['human-todo'], metadata: {} },
+    { id: 'ht2', identifier: 'PANT-470B', project_id: 'AURIGA', status: 'in_review', title: 'normal task', labels: [], metadata: {} },
+  ];
+  const prs = {
+    'PANT-470A': [{ state: 'MERGED', mergedAt: '2026-09-22T00:00:00Z' }],
+    'PANT-470B': [{ state: 'MERGED', mergedAt: '2026-09-22T00:00:00Z' }],
+  };
+  const actions = core.detectVerifiedDone(inReview, prs, CFG);
+  assert.deepEqual(actions.map((a) => a.identifier), ['PANT-470B']);
+  assert.equal(actions[0].action, 'advance-done');
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
