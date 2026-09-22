@@ -454,7 +454,7 @@ test('route new todos: no run row appearing within the verify wait logs verify_n
 test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIssue, logs zombie_give_up, sets blocked, and gets a best-effort comment', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000); // 1h old, well past zombieStaleMs
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', parent_issue_id: 'epic-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   // Pre-seed run history AT the cap (cfg.CAPS.zombieMaxAttempts) so detectZombies
   // gives up on it instead of recovering it.
@@ -484,7 +484,7 @@ test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIs
 test('zombie give-up: a comment failure is swallowed and never crashes the cycle', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', parent_issue_id: 'epic-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
     status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
@@ -505,7 +505,7 @@ test('zombie give-up: a comment failure is swallowed and never crashes the cycle
 test('zombie give-up: a setIssueStatus failure is swallowed and never crashes the cycle', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', parent_issue_id: 'epic-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
     status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
@@ -528,7 +528,7 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
   // No assignee_id → detectZombies emits action:'assign'
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null, parent_issue_id: 'epic-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = [
     { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },

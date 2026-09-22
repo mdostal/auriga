@@ -401,12 +401,13 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
   return false;
 }
 
-export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now()) {
+export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds must not be zombie-recovered to build agents
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);

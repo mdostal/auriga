@@ -683,7 +683,7 @@ export async function cycle(opts = {}) {
   // never fire a build run into an unscanned/unaligned project.
   if (!noZombie) {
     const inProgressDispatch = inProgress.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
+    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now, issues);
     for (const z of zombies) {
       if (assigned >= maxAssign) break;
       if (z.action === 'give-up') {
