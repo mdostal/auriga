@@ -49,6 +49,8 @@ export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl
         HIVE_LANE: c.HIVE_LANE ?? baseCfg.HIVE_LANE,
         DEFAULT_LANE: c.DEFAULT_LANE ?? baseCfg.DEFAULT_LANE,
         REVIEW_LANE: c.REVIEW_LANE ?? baseCfg.REVIEW_LANE,
+        REVIEW_REPO_OWNER: c.REVIEW_REPO_OWNER ?? baseCfg.REVIEW_REPO_OWNER,
+        REVIEW_SEARCH_REPOS: c.REVIEW_SEARCH_REPOS ?? baseCfg.REVIEW_SEARCH_REPOS,
       },
     };
   });

@@ -20,6 +20,8 @@ const BASE_CFG = {
   REVIEW_LANE: ['default-review'],
   PROJECT_LANE: {},
   RUNTIME_CAP: { codex: 5 },
+  REVIEW_REPO_OWNER: 'mdostal',
+  REVIEW_SEARCH_REPOS: ['mdostal/auriga', 'mdostal/heimdall'],
 };
 
 test('loadTenantConfigs: calls GET /api/tenants/auriga-configs and returns one {tenantId, cfg} per tenant', async () => {
@@ -131,6 +133,35 @@ test('loadTenantConfigs: an empty allowlist Set (from whitespace-only env) filte
   });
 
   assert.equal(result.length, 0);
+});
+
+test('loadTenantConfigs: REVIEW_REPO_OWNER and REVIEW_SEARCH_REPOS fall back to baseCfg when tenant omits them (PANT-356 regression guard)', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [{ tenant_id: 'firefly-events', config: { PROJECT_IDS: ['p1'] } }],
+  }), { status: 200 }));
+
+  const [{ cfg }] = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.equal(cfg.REVIEW_REPO_OWNER, BASE_CFG.REVIEW_REPO_OWNER);
+  assert.deepEqual(cfg.REVIEW_SEARCH_REPOS, BASE_CFG.REVIEW_SEARCH_REPOS);
+});
+
+test('loadTenantConfigs: a tenant with its own REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS overrides the base (PANT-356 regression guard)', async () => {
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [{
+      tenant_id: 'firefly-events',
+      config: {
+        PROJECT_IDS: ['p1'],
+        REVIEW_REPO_OWNER: 'firefly-events',
+        REVIEW_SEARCH_REPOS: ['firefly-events/flayr', 'firefly-events/venues'],
+      },
+    }],
+  }), { status: 200 }));
+
+  const [{ cfg }] = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.equal(cfg.REVIEW_REPO_OWNER, 'firefly-events');
+  assert.deepEqual(cfg.REVIEW_SEARCH_REPOS, ['firefly-events/flayr', 'firefly-events/venues']);
 });
 
 test('loadTenantConfigs: throws with the real status code on a non-ok response', async () => {

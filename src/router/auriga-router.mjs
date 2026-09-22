@@ -145,7 +145,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // merged config -- mirrors defaultBacklog/defaultSpawn's own construction
 // above exactly, just parameterized per tenant instead of module-scope-once.
 function buildAdaptersForTenant(tenantId, tenantCfg) {
-  const backlog = createPantheonV2L2BacklogAdapter({ tenantId });
+  const backlog = createPantheonV2L2BacklogAdapter({
+    tenantId,
+    reviewRepoOwner: tenantCfg.REVIEW_REPO_OWNER,
+    reviewSearchRepos: tenantCfg.REVIEW_SEARCH_REPOS,
+  });
   const spawn = createPantheonV2L2SpawnAdapter({
     tenantId,
     verifyDelayMs: tenantCfg.CAPS.verifyDelayMs,
