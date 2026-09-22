@@ -69,7 +69,7 @@ function sleepSync(ms) {
 
 // Maps Pantheon's clean, camelCase BoardQueue Issue shape back to the raw,
 // snake_case fields lib/core.mjs reads directly (confirmed via direct
-// inspection of core.mjs's own field accesses: id, identifier, title,
+// inspection of core.mjs's own field accesses: id, identifier, number, title,
 // description, status, assignee_id, project_id, parent_issue_id, labels,
 // metadata — never parentId/createdAt/assignee.type, the BoardQueue port's
 // own vocabulary). Deliberately keeps Auriga's real, existing consumer
@@ -80,6 +80,7 @@ function toRawIssue(issue) {
   return {
     id: issue.id,
     identifier: issue.identifier,
+    number: issue.number ?? null,
     title: issue.title,
     description: issue.description,
     status: issue.status,

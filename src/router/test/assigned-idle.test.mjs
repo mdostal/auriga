@@ -238,6 +238,7 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
   assert.equal(actions.length, 0, 'agent-parked issue must be excluded from idle recovery');
 });
 
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),

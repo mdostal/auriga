@@ -479,6 +479,7 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
   assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
 });
 
+
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
 test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
