@@ -722,12 +722,13 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = [], cfg = {}) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (allIssues.length > 0 && isSeed(i, allIssues)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and

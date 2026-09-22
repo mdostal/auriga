@@ -555,7 +555,7 @@ export async function cycle(opts = {}) {
         }
       }
     }
-    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl);
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl, issues);
     const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
