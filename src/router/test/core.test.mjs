@@ -437,6 +437,18 @@ test('detectZombies flags isHive on the zombie action so re-routing respects HIV
   assert.equal(byId['z6'].isHive, true);
 });
 
+test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'zp1', identifier: 'zp1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'parked', metadata: { blocked_reason: 'waiting for human approval' } },
+    { id: 'zp2', identifier: 'zp2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not parked', metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { zp1: [], zp2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('zp1'), 'parked issue must be skipped');
+  assert.ok(ids.includes('zp2'), 'non-parked stale issue must be recovered');
+});
+
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
 test('isSeed: label idea or needs-plan is an explicit seed regardless of parent/children', () => {
