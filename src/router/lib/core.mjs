@@ -282,6 +282,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
       if (blockedRuntimes.has(runtime)) continue;
       if ((projected.perAgentCycle[PLANNING_AGENT] || 0) >= maxPerAgent) continue;
+      const seedDecision = assignmentDecision(issue, PLANNING_AGENT, cfg, opts);
+      if (seedDecision.action === 'noop') continue;
 
       projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
       projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
