@@ -424,7 +424,7 @@ export async function cycle(opts = {}) {
       const lrForCooldown = coreImpl.latestRun(issueRuns);
       if (lrForCooldown) {
         const lrC = coreImpl.classifyRun(lrForCooldown, now);
-        if (!lrC.active && lrC.ageMs < cfgImpl.CAPS.redispatchCooldownMs) {
+        if (!lrC.active && lrC.ageMs < (cfgImpl.CAPS.redispatchCooldownMs ?? (15 * 60 * 1000))) {
           logImpl('cascade_skip', { identifier: c.identifier, reason: 'redispatch-cooldown', ageMs: lrC.ageMs });
           cascaded.add(c.identifier);
           continue;
