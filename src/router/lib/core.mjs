@@ -694,6 +694,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds must not be auto-unblocked into selectAssignments' planning lane re-dispatch
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
