@@ -377,7 +377,7 @@ export async function cycle(opts = {}) {
   // blocked->todo pass above.
   {
     const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl, issues);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -457,6 +457,7 @@ export async function cycle(opts = {}) {
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       let agent; // hoisted so cascade catch can read it for blockedRuntimes
+      let cascadeExistingAgentName; // hoisted so catch can read it for existing-assignee blockedRuntimes (PANT-648)
       try {
         if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
@@ -469,6 +470,14 @@ export async function cycle(opts = {}) {
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
         agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
+        // PANT-647: pre-check blocked runtimes for the new-agent path before assigning.
+        if (agent) {
+          const cAgentRtPreCheck = cfgImpl.AGENTS[agent]?.runtime;
+          if (cAgentRtPreCheck && blockedRuntimes.has(cAgentRtPreCheck)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'agent-runtime-blocked', agent, runtime: cAgentRtPreCheck });
+            continue;
+          }
+        }
         // Skip only when no agent has capacity AND the issue has no existing assignee.
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
@@ -491,7 +500,8 @@ export async function cycle(opts = {}) {
           assigned++;
         }
         if (!agent && issueObj.assignee_id) {
-          const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          cascadeExistingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          const existingAgentName = cascadeExistingAgentName;
           const existingRt = existingAgentName && cfgImpl.AGENTS[existingAgentName]?.runtime;
           if (existingRt && blockedRuntimes.has(existingRt)) {
             logImpl('cascade_skip', { identifier: c.identifier, reason: 'assignee-runtime-blocked', runtime: existingRt });
@@ -514,7 +524,10 @@ export async function cycle(opts = {}) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
         const msg = e.message || '';
         if (/limit|quota|rate|429|exhaust/i.test(msg)) {
-          const rt = agent && cfgImpl.AGENTS[agent]?.runtime;
+          // PANT-648: use cascadeExistingAgentName for existing-assignee path where agent is null
+          const rt = agent
+            ? cfgImpl.AGENTS[agent]?.runtime
+            : (cascadeExistingAgentName ? cfgImpl.AGENTS[cascadeExistingAgentName]?.runtime : null);
           if (rt) blockedRuntimes.add(rt);
         }
       }
@@ -593,7 +606,7 @@ export async function cycle(opts = {}) {
   // this and the whole board-wide-status-pass audit that followed it).
   const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
   const reviewMaxTotal = Math.min((cfgImpl.CAPS && cfgImpl.CAPS.perCycleReview) ?? 1, Math.max(0, maxAssign - assigned));
-  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal, blockedRuntimes });
+  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal, blockedRuntimes, allIssues: issues });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     if (assigned >= maxAssign) break;
@@ -756,7 +769,13 @@ export async function cycle(opts = {}) {
               priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
             }
             if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;
-          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) {
+            logImpl('zombie_error', { identifier: z.identifier, error: e.message });
+            const msg = e.message || '';
+            if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+              if (zombieRt) blockedRuntimes.add(zombieRt);
+            }
+          }
         }
       } else {
         // needs (re)routing — route via its lane

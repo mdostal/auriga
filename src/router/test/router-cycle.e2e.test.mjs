@@ -301,8 +301,8 @@ test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(
 // attempted to dispatch review for a real PANT-* dostal-tech ticket).
 test('selectReviewDispatch is never handed another tenant\'s in_review issue — dispatch stays scoped to cfg.PROJECT_IDS', async () => {
   const OWN_PROJECT = projectId('Pantheon Core');
-  const ownIssue = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
-  const foreignIssue = makeIssue({ project_id: 'foreign-tenant-project', status: 'in_review' });
+  const ownIssue = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const foreignIssue = makeIssue({ project_id: 'foreign-tenant-project', status: 'in_review', parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([ownIssue, foreignIssue], cfg.AGENTS);
   // Simulate the REAL production adapter's board-wide discovery: listAllProjectIds
   // returns every project it knows about, including ones outside this tenant's
@@ -356,8 +356,8 @@ test('unblock / parent-rollup / run-completion / changeback all stay scoped to c
   const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress', labels: ['not-a-seed'] });
 
   // ---- changeback: changes_requested issue, no other precondition ----
-  const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
-  const foreignChangeback = makeIssue({ project_id: FOREIGN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
+  const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone', parent_issue_id: 'fake-parent' });
+  const foreignChangeback = makeIssue({ project_id: FOREIGN_PROJECT, status: 'changes_requested', assignee_id: 'someone', parent_issue_id: 'fake-parent' });
 
   const boardIssues = [
     ownDep, ownBlocked, foreignDep, foreignBlocked,
@@ -1535,8 +1535,8 @@ test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequen
       'auriga-review': { ...cfg.AGENTS['auriga-review'], maxInflight: 2 },
     },
   };
-  const reviewStory1 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
-  const reviewStory2 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
+  const reviewStory1 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const reviewStory2 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters(
     [reviewStory1, reviewStory2], reviewCfg.AGENTS,
     { failAssignFor: new Set([reviewStory1.identifier]) },
@@ -1567,7 +1567,7 @@ test('review dispatch: updates priorAgentCycleAssigns, blocking zombie rerun on 
   const tightCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 } };
   const aurigaReviewId = tightCfg.AGENTS['auriga-review'].id;
   const stale = Date.now() - (60 * 60 * 1000);
-  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' });
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review', parent_issue_id: 'fake-parent' });
   const zombieIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_progress', assignee_id: aurigaReviewId, parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], tightCfg.AGENTS);
   runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
@@ -1597,7 +1597,7 @@ test('review dispatch: updates loopRtProjected, blocking zombie over-dispatch on
   const PANTHEON_CORE = projectId('Pantheon Core');
   const fixtureCfg = withFixtureLanes({ 'review-rt-proj-597': ['auriga-review'] });
   const stale = Date.now() - (60 * 60 * 1000);
-  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' });
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review', parent_issue_id: 'fake-parent' });
   const zombieIssue = makeIssue({ project_id: 'review-rt-proj-597', status: 'in_progress', assignee_id: null, parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], fixtureCfg.AGENTS);
   runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];

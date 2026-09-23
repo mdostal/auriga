@@ -405,6 +405,8 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
 
 export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
   const actions = [];
+  // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
+  const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
@@ -437,7 +439,8 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
-    if (runs.length >= cfg.CAPS.zombieMaxAttempts) {
+    const buildRuns = runs.filter((r) => !reviewAgentIds.has(r.agent_id));
+    if (buildRuns.length >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({
         identifier: i.identifier,
         issueId: i.id,
@@ -525,6 +528,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const blockedRuntimes = opts.blockedRuntimes ?? new Set();
+  const allIssues = opts.allIssues || [];
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -569,6 +573,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
+    if (isSeed(i, allIssues)) continue; // PANT-625: seeds have no PR to review
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -810,6 +815,7 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
+    if (isSeed(parent, issues)) continue; // PANT-627: seed epics with planning labels must not auto-close
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
@@ -917,12 +923,13 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 // status as the formal "send back" signal; the router owns the transition to
 // todo + unassign (the router must never rely solely on agent free-text for a
 // status mutation the state machine should handle).
-export function detectChangesRequested(changesRequestedIssues, cfg = {}) {
+export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of changesRequestedIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // PANT-632: seeds in changes_requested must not re-enter build pool
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
@@ -953,7 +960,9 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    // PANT-643: do NOT guard seeds here — detectAssignedIdle calls rerunIssue (re-enqueues the
+    // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
+    // must be recovered just like any other assigned-idle issue.
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
