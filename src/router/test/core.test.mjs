@@ -1118,6 +1118,23 @@ test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
   assert.equal(core.detectParentDone(issues, CFG).length, 0);
 });
 
+test('detectParentDone: skips idea-labeled parent (isSeed guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'in_progress', title: 'epic', labels: ['idea'] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips needs-plan-labeled parent (isSeed guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'in_progress', title: 'epic', labels: ['needs-plan'] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
 // ============================================================================
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.

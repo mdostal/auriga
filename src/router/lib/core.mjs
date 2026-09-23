@@ -807,6 +807,7 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
+    if (isSeed(parent, issues)) continue; // never auto-close an idea/planning epic
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
