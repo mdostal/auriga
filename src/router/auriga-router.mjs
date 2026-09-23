@@ -376,7 +376,7 @@ export async function cycle(opts = {}) {
   // blocked->todo pass above.
   {
     const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl, issues);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {

@@ -1419,6 +1419,7 @@ test('selectAssignments: a NON-hand-up-labeled issue with no local capacity prod
 const cr = (id, num, assigneeId = 'RV', title = 'work') => ({
   id, identifier: id, project_id: 'PCORE', number: num,
   status: 'changes_requested', assignee_id: assigneeId, title,
+  parent_issue_id: 'PCORE-EPIC', labels: [],
 });
 
 test('detectChangesRequested: a changes_requested issue returns a changeback-to-todo action', () => {
@@ -1446,4 +1447,10 @@ test('detectChangesRequested: smoke/scratch issues are skipped', () => {
 
 test('detectChangesRequested: empty input returns empty array', () => {
   assert.deepEqual(core.detectChangesRequested([]), []);
+});
+
+test('detectChangesRequested: seed issues (idea label) in changes_requested are skipped', () => {
+  const seedIssue = { ...cr('PAN-55', 55), labels: [{ id: 'l1', name: 'idea' }], parent_issue_id: null };
+  const actions = core.detectChangesRequested([seedIssue], {}, [seedIssue]);
+  assert.deepEqual(actions, []);
 });
