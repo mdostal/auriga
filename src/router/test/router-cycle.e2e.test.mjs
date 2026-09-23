@@ -923,8 +923,8 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
     AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
   };
   const saturatingIssue = makeIssue({ project_id: 'cascade-proj', status: 'in_progress', assignee_id: tightCfg.AGENTS['auriga-dev'].id });
-  const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done' });
-  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', metadata: { depends_on: doneParent.id } });
+  const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done', parent_issue_id: 'fake-epic' });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', parent_issue_id: 'fake-epic', metadata: { depends_on: doneParent.id } });
   const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, doneParent, blockedChild], tightCfg.AGENTS);
   const log = createLogSink();
 
@@ -956,9 +956,9 @@ test('cascade: calls rerunIssue (without reassigning) for BLOCKED issue with exi
   const saturatingIssue = makeIssue({ project_id: 'cascade-proj-341', status: 'in_progress', assignee_id: existingAgent });
   // The dep starts as in_review so the unblock pass doesn't convert blockedChild.
   // detectVerifiedDone will advance it to done (via the merged PR below).
-  const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review' });
+  const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review', parent_issue_id: 'fake-epic-341' });
   // blocked child already assigned to the agent — this is the PANT-341 case
-  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', parent_issue_id: 'fake-epic-341', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
   const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, inReviewParent, blockedChild], tightCfg.AGENTS);
   // Merged PR for the dep: detectVerifiedDone advances inReviewParent to done,
   // satisfying blockedChild's dep for the cascade pass.
@@ -1183,10 +1183,10 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
   const saturatingIssue = makeIssue({ project_id: 'cascade-proj-545', status: 'in_progress', assignee_id: aurigaDevId });
   // Dep starts in_review so detectUnblocks skips blockedChild; detectVerifiedDone
   // advances it to done via merged PR (PANT-341 pattern) before the cascade pass.
-  const inReviewParent = makeIssue({ project_id: 'cascade-proj-545', status: 'in_review' });
+  const inReviewParent = makeIssue({ project_id: 'cascade-proj-545', status: 'in_review', parent_issue_id: 'fake-epic-545' });
   // blockedChild: existing assignee auriga-build (claude), codex-only lane is full.
   const blockedChild = makeIssue({
-    project_id: 'cascade-proj-545', status: 'blocked',
+    project_id: 'cascade-proj-545', status: 'blocked', parent_issue_id: 'fake-epic-545',
     assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
   });
   // idleTodo: assigned to auriga-build (claude, not blocked by codex cap), no active runs.

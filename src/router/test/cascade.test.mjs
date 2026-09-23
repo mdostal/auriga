@@ -11,8 +11,8 @@ function statusMap(issues) {
 }
 
 test('cascade: a completed parent enqueues its blocked dependent (metadata dep)', () => {
-  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', metadata: { depends_on: 'A' } };
+  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent', parent_issue_id: 'EPIC' };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', parent_issue_id: 'EPIC', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -22,8 +22,8 @@ test('cascade: a completed parent enqueues its blocked dependent (metadata dep)'
 });
 
 test('cascade: also enqueues a TODO dependent whose deps are now satisfied', () => {
-  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', metadata: { depends_on: 'A' } };
+  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent', parent_issue_id: 'EPIC' };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', parent_issue_id: 'EPIC', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -131,4 +131,15 @@ test('cascade: a story already in-flight (assigned+queued) is NOT re-cascade-enq
   const queued = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', assignee_id: 'ag-1', title: 'c', metadata: { depends_on: 'A' } };
   const issues = [parent, queued];
   assert.equal(core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length, 0);
+});
+
+test('cascade: seed with depends_on metadata is skipped — isSeed guard (PANT-595)', () => {
+  // Top-level childless issue = seed (isSeed returns true). Even if it carries explicit
+  // depends_on metadata and its dep just completed, it must never be cascade-enqueued
+  // (no parent_issue_id, no children in the array -> isSeed = true).
+  const sibling = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'sibling' };
+  const seed = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'planning-seed', metadata: { depends_on: 'A' } };
+  const issues = [sibling, seed];
+  assert.equal(core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length, 0,
+    'seed with a satisfied dep must not be cascade-enqueued');
 });
