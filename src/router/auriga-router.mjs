@@ -502,6 +502,7 @@ export async function cycle(opts = {}) {
             continue;
           }
           if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+          if (existingAgentName) inflight[existingAgentName] = (inflight[existingAgentName] || 0) + 1;
           if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
           assigned++;
         }
