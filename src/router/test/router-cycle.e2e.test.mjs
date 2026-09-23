@@ -1340,6 +1340,68 @@ test('cascade: existing-assignee rerun counts toward assigned — maxAssign bloc
     'unassignedTodo must NOT be dispatched — maxAssign=1 exhausted by cascade rerun');
 });
 
+test('cascade: existing-assignee rerun updates loopRtProjected, blocking over-dispatch on same runtime (PANT-544)', async () => {
+  // Bug: cascade existing-assignee rerun path never incremented loopRtProjected →
+  // a subsequent cascade candidate's chooseAgentForProject saw codex runtime
+  // capacity under-reported and could assign a second codex agent in the same cycle
+  // via cascade (before the picks pass even ran).
+  //
+  // Setup: RUNTIME_CAP.codex=4. 3 in-progress issues on auriga-dev (codex) saturate
+  // it at maxInflight=3, filling runtimeInflight['codex']=3. blockedA has existing
+  // assignee auriga-dev; chooseAgentForProject returns null (auriga-dev at maxInflight).
+  // With fix, the existing-assignee rerun increments loopRtProjected['codex']=1 so
+  // total projected=4=cap. blockedB (no existing assignee, heimdall-dev-codex lane)
+  // then sees cap full → cascade_skip(no-capacity) and is NOT rerun by cascade.
+  // Without fix: loopRtProjected['codex']=0, projected=3 < 4 → blockedB gets cascade-
+  // assigned AND cascade-rerun (both calls visible in calls.assign and calls.rerun).
+  //
+  // Parents start in_review with merged PRs so detectVerifiedDone advances them to
+  // done before the cascade pass.
+  const fixtureCfg = withFixtureLanes({
+    'cascade-rt-544-a': ['auriga-dev'],
+    'cascade-rt-544-b': ['heimdall-dev-codex'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 4 },
+  };
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const saturating = Array.from({ length: 3 }, () =>
+    makeIssue({ project_id: 'cascade-rt-544-a', status: 'in_progress', assignee_id: aurigaDevId }),
+  );
+  const parentA = makeIssue({ project_id: 'cascade-rt-544-a', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const parentB = makeIssue({ project_id: 'cascade-rt-544-b', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const blockedA = makeIssue({
+    project_id: 'cascade-rt-544-a', status: 'blocked',
+    labels: ['not-a-seed'], assignee_id: aurigaDevId, metadata: { depends_on: parentA.id },
+  });
+  const blockedB = makeIssue({
+    project_id: 'cascade-rt-544-b', status: 'blocked',
+    labels: ['not-a-seed'], metadata: { depends_on: parentB.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [...saturating, parentA, parentB, blockedA, blockedB], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    (identifier === parentA.identifier || identifier === parentB.identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedA.identifier),
+    'cascade must rerun blockedA via existing-assignee path (auriga-dev saturated at maxInflight)');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedA.identifier),
+    'cascade must NOT reassign blockedA — it fired via the existing-assignee path');
+  // With fix, loopRtProjected['codex'] = 1 after blockedA's rerun → cascade_skip(no-capacity)
+  // for blockedB. Without fix, cascade would have called both assignIssue AND rerunIssue for
+  // blockedB (cascade dispatch path, not existing-assignee path).
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedB.identifier),
+    'cascade must NOT call rerunIssue for blockedB — the cascade_skip(no-capacity) must fire (PANT-544)');
+  const rtSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'no-capacity' && e.identifier === blockedB.identifier);
+  assert.ok(rtSkips.length >= 1, `cascade_skip(no-capacity) must be logged for blockedB (PANT-544), got ${JSON.stringify(log.byEvent('cascade_skip'))}`);
+});
+
 // ---- PANT-569: blockedRuntimes populated in cascade/zombie/review error paths ----
 // blockedRuntimes was only ever written in the picks loop; cascade/zombie/review
 // catch blocks logged the error but never called blockedRuntimes.add(). Their
