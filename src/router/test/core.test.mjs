@@ -789,7 +789,9 @@ const NOW = 1_700_000_000_000;
 // An in_review issue with a target_repo line (build-lane output shape).
 const inReview = (id, num, assignee = null, extra = {}) => ({
   id, identifier: id, project_id: 'PCORE', number: num, status: 'in_review',
-  assignee_id: assignee, title: 'work', description: 'target_repo: mdostal/cron-maker\n', ...extra,
+  assignee_id: assignee, title: 'work', description: 'target_repo: mdostal/cron-maker\n',
+  parent_issue_id: 'fake-parent', // not-a-seed — real in_review stories are built, not planning seeds
+  ...extra,
 });
 // PANT-531: run fixtures include agent_id so the review-phase filter works correctly.
 const freshRun = { status: 'running', started_at: new Date(NOW - 1000).toISOString(), agent_id: 'RV' };
@@ -820,7 +822,7 @@ test('selectReviewDispatch: any unassigned in_review story dispatches to the rev
 });
 
 test('selectReviewDispatch: even a plain/undecorated in_review story dispatches — Auriga hands off, the review squad decides', () => {
-  const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc' };
+  const doc = { id: 'D1', identifier: 'D1', project_id: 'PCORE', number: 1, status: 'in_review', assignee_id: null, title: 'decision', description: 'a plain doc', parent_issue_id: 'fake-parent' };
   const picks = core.selectReviewDispatch([doc], { D1: [] }, CFG, {}, { now: NOW });
   assert.equal(picks.length, 1);
   assert.equal(picks[0].action, 'dispatch-review');
@@ -1450,6 +1452,7 @@ test('selectAssignments: a NON-hand-up-labeled issue with no local capacity prod
 const cr = (id, num, assigneeId = 'RV', title = 'work') => ({
   id, identifier: id, project_id: 'PCORE', number: num,
   status: 'changes_requested', assignee_id: assigneeId, title,
+  parent_issue_id: 'fake-parent', // not-a-seed — changes_requested issues went through build phase
 });
 
 test('detectChangesRequested: a changes_requested issue returns a changeback-to-todo action', () => {
