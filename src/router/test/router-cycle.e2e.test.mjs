@@ -1619,6 +1619,35 @@ test('review dispatch: updates loopRtProjected, blocking zombie over-dispatch on
 // picks for the same runtime are dispatched anyway — all fail, and each is an
 // unnecessary request to an already-rate-limited endpoint.
 
+// ---- PANT-641: cascade new-agent dispatch missing blockedRuntimes check ----------
+// The if(agent) branch called assignIssue without first checking blockedRuntimes.
+// The sibling if(!agent && issueObj.assignee_id) path (PANT-621) was already fixed;
+// this test covers the new-agent (no existing assignee) path.
+
+test('PANT-641: cascade new-agent dispatch skips when the chosen agent\'s runtime is blocked', async () => {
+  // The cascade loop runs before the picks loop, so blockedRuntimes is pre-seeded via
+  // opts.initialBlockedRuntimes to simulate a runtime blocked earlier in the same cycle
+  // (e.g., by a prior cascade error or a zombie assign error).
+  // chooseAgentForProject selects auriga-dev (codex runtime). Without fix, assignIssue
+  // fires into the blocked runtime. With fix, cascade_skip(runtime-blocked) is logged.
+  const fixtureCfg = withFixtureLanes({ 'pant641-proj': ['auriga-dev'] }); // codex runtime
+  const doneParent = makeIssue({ project_id: 'pant641-proj', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'pant641-proj', status: 'blocked',
+    parent_issue_id: 'fake-parent', metadata: { depends_on: doneParent.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['codex']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue for blockedChild when codex is in blockedRuntimes (PANT-641)');
+  const cascadeSkips = log.byEvent('cascade_skip');
+  assert.ok(cascadeSkips.some((e) => e.identifier === blockedChild.identifier && e.reason === 'runtime-blocked'),
+    'cascade_skip(runtime-blocked) must be logged for blockedChild (PANT-641)');
+});
+
 test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks for that runtime in the same cycle', async () => {
   const fixtureCfg = withFixtureLanes({ 'pant549-proj': ['auriga-dev'] });
   const issueA = makeIssue({ project_id: 'pant549-proj', parent_issue_id: 'fake-parent' });
