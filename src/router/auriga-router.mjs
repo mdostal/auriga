@@ -457,6 +457,7 @@ export async function cycle(opts = {}) {
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       let agent; // hoisted so cascade catch can read it for blockedRuntimes
+      let existingRt = null; // hoisted so cascade catch can read it on existing-assignee path (PANT-637)
       try {
         if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
         // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
@@ -492,7 +493,7 @@ export async function cycle(opts = {}) {
         }
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
-          const existingRt = existingAgentName && cfgImpl.AGENTS[existingAgentName]?.runtime;
+          existingRt = existingAgentName ? (cfgImpl.AGENTS[existingAgentName]?.runtime ?? null) : null;
           if (existingRt && blockedRuntimes.has(existingRt)) {
             logImpl('cascade_skip', { identifier: c.identifier, reason: 'assignee-runtime-blocked', runtime: existingRt });
             continue;
@@ -514,7 +515,7 @@ export async function cycle(opts = {}) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
         const msg = e.message || '';
         if (/limit|quota|rate|429|exhaust/i.test(msg)) {
-          const rt = agent && cfgImpl.AGENTS[agent]?.runtime;
+          const rt = (agent && cfgImpl.AGENTS[agent]?.runtime) || existingRt;
           if (rt) blockedRuntimes.add(rt);
         }
       }

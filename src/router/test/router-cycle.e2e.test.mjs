@@ -1637,3 +1637,48 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
 });
+
+// ---- PANT-637: cascade existing-assignee catch block missing blockedRuntimes.add ----
+// Bug: existingRt was const-scoped inside the !agent&&assignee_id block and unreachable
+// in the outer catch. When rerunIssue threw a rate-limit error on the existing-assignee
+// path (agent===null), blockedRuntimes.add was never called — the second candidate with
+// the same assignee would dispatch again into the still-rate-limited runtime.
+
+test('PANT-637: cascade existing-assignee rate-limit catch populates blockedRuntimes, preventing repeat dispatch to same runtime', async () => {
+  const fixtureCfg = withFixtureLanes({ 'cascade-pant637-proj': ['auriga-dev'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
+  };
+  const existingAgentId = tightCfg.AGENTS['auriga-dev'].id;
+  // Fill auriga-dev's single inflight slot so chooseAgentForProject returns null,
+  // forcing the !agent && issueObj.assignee_id path for both children.
+  const saturatingIssue = makeIssue({ project_id: 'cascade-pant637-proj', status: 'in_progress', assignee_id: existingAgentId });
+  const inReviewParentA = makeIssue({ project_id: 'cascade-pant637-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const inReviewParentB = makeIssue({ project_id: 'cascade-pant637-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const childA = makeIssue({ project_id: 'cascade-pant637-proj', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pant637-proj', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentB.id } });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParentA, inReviewParentB, childA, childB], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    [inReviewParentA.identifier, inReviewParentB.identifier].includes(identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  // rerunIssue throws a rate-limit error for childA; childB must be skipped after.
+  const origRerun = spawn.rerunIssue.bind(spawn);
+  spawn.rerunIssue = (identifier) => {
+    if (identifier === childA.identifier) throw new Error('429 Rate Limit Exceeded');
+    return origRerun(identifier);
+  };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(!calls.rerun.some((r) => r.identifier === childB.identifier),
+    'childB must NOT be rerun — rate-limit on childA must have added its runtime to blockedRuntimes (PANT-637)');
+  const rtSkips = log.byEvent('cascade_skip').filter(
+    (e) => e.identifier === childB.identifier && e.reason === 'assignee-runtime-blocked',
+  );
+  assert.strictEqual(rtSkips.length, 1,
+    'cascade_skip(assignee-runtime-blocked) must be logged for childB after the rate-limit on childA (PANT-637)');
+});
