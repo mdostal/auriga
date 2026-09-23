@@ -1158,6 +1158,52 @@ test('cascade: per-cycle-per-agent cap is enforced across multiple cascade itera
     `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
 });
 
+test('cascade: per-cycle-per-agent cap is enforced on existing-assignee rerun path when multiple cascade candidates share an assignee (PANT-566)', async () => {
+  // Bug: the cap pre-check at line 475 is `if (agent && ...)` — never fires when
+  // agent===null. Two blocked children both have the same existing assignee. With
+  // perCyclePerAgent=1, the second rerun must be skipped (cap already hit by first).
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+    AGENTS: {
+      ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }).AGENTS,
+      'auriga-dev': {
+        ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }).AGENTS['auriga-dev'],
+        maxInflight: 1,
+      },
+    },
+  };
+  const existingAgentId = fixtureCfg.AGENTS['auriga-dev'].id;
+  // saturatingIssue fills auriga-dev's inflight slot so chooseAgentForProject returns null.
+  const saturatingIssue = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_progress', assignee_id: existingAgentId });
+  const inReviewParentA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review' });
+  const inReviewParentB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review' });
+  // Two blocked children with the same existing assignee auriga-dev.
+  const childA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, metadata: { depends_on: inReviewParentA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, metadata: { depends_on: inReviewParentB.id } });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParentA, inReviewParentB, childA, childB], fixtureCfg.AGENTS,
+  );
+  // Both parents have merged PRs so detectVerifiedDone advances them to done,
+  // unblocking both children for the cascade pass.
+  backlog.getIssuePullRequests = (identifier) =>
+    [inReviewParentA.identifier, inReviewParentB.identifier].includes(identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const reruns = calls.rerun.filter((r) => [childA.identifier, childB.identifier].includes(r.identifier));
+  assert.strictEqual(reruns.length, 1,
+    `perCyclePerAgent=1 must cap existing-assignee reruns — exactly 1 of 2 children should be rerun, got ${reruns.length}`);
+  const capSkips = log.byEvent('cascade_skip').filter(
+    (e) => e.reason === 'per-cycle-per-agent-cap' &&
+      [childA.identifier, childB.identifier].includes(e.identifier),
+  );
+  assert.strictEqual(capSkips.length, 1,
+    `expected exactly 1 cascade_skip(per-cycle-per-agent-cap) for the second child, got ${capSkips.length}`);
+});
+
 test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking assigned-idle double-dispatch (PANT-545)', async () => {
   // Bug: cascade fires existing-assignee rerun but priorAgentCycleAssigns not
   // updated → assigned-idle double-dispatches the same agent within the same cycle.
