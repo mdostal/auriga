@@ -524,6 +524,7 @@ export function reviewEligible(_issue = {}) {
 export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const blockedRuntimes = opts.blockedRuntimes ?? new Set();
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -602,7 +603,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected);
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
     actions.push({

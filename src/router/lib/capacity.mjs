@@ -100,12 +100,13 @@ export function computeReviewInflight(inReviewIssues, cfg) {
 
 // Pick the review-lane agent with the most free capacity (lowest current+projected
 // load) that is still under its maxInflight. Returns null when the lane is full.
-export function chooseReviewAgent(cfg, reviewInflight, projected = {}) {
+export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRuntimes = new Set()) {
   const lane = cfg.REVIEW_LANE || [];
   const eligible = lane.filter((name) => {
     const a = cfg.AGENTS[name];
     if (!a) return false;
     if (a.available === false) return false; // PAN-8645: offline runtime
+    if (blockedRuntimes.has(a.runtime)) return false; // PANT-587: skip rate-limited runtimes
     const now = (reviewInflight[name] || 0) + (projected[name] || 0);
     return now < (a.maxInflight ?? Infinity);
   });
