@@ -349,7 +349,7 @@ export async function cycle(opts = {}) {
   // feeds review-dispatch further down) — see the blocked->todo pass above.
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
   const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
+  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prIdentityMatchesStory);
   const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl, issues);
   for (const v of verified) {
     logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
@@ -685,13 +685,13 @@ export async function cycle(opts = {}) {
         spawn.assignIssue(r.identifier, r.agent);
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
-      spawn.rerunIssue(r.identifier);
-      assigned++;
       if (r.agent) {
         inflight[r.agent] = (inflight[r.agent] || 0) + 1;
         priorAgentCycleAssigns[r.agent] = (priorAgentCycleAssigns[r.agent] || 0) + 1;
       }
       if (reviewRt) loopRtProjected[reviewRt] = (loopRtProjected[reviewRt] || 0) + 1;
+      spawn.rerunIssue(r.identifier);
+      assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
@@ -767,7 +767,6 @@ export async function cycle(opts = {}) {
             spawn.rerunIssue(z.identifier);
             assigned++;
             if (zombieAgentName) {
-              inflight[zombieAgentName] = (inflight[zombieAgentName] || 0) + 1;
               priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
             }
             if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;

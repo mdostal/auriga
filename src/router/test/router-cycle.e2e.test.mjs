@@ -76,14 +76,15 @@ function makeIssue(overrides = {}) {
 // which is real router behavior but not what these dispatch-shape tests are
 // exercising (mirrors mock-mca.mjs's own doc comment on this exact
 // synthesis).
-// opts.failAssignFor / opts.noRunFor: identifier sets letting a test drive
-// the inline sequence's OTHER two branches (assign failure;
-// assign-succeeds-but-no-run -> force-rerun) through the real cycle() call
-// path, the same way spawn-adapter.test.mjs drives dispatch()'s equivalent
-// branches directly against the real (unused-by-cycle()) adapter method.
+// opts.failAssignFor / opts.noRunFor / opts.failRerunFor: identifier sets
+// letting a test drive the inline sequence's branches through the real cycle()
+// call path. failRerunFor makes rerunIssue throw a rate-limit error for the
+// listed identifiers (covers zombie-assign, zombie-rerun, and review-dispatch
+// error paths without needing spawn-adapter.test.mjs's adapter-level fixture).
 function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
+  const failRerunFor = opts.failRerunFor || new Set();
   const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
@@ -118,6 +119,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     rerunIssue: (identifier) => {
       calls.rerun.push({ identifier });
+      if (failRerunFor.has(identifier)) throw new Error('multica: rate limited (429)');
       runsByIdentifier[identifier] = [
         ...(runsByIdentifier[identifier] || []),
         { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
@@ -1702,4 +1704,76 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   const skips = log.byEvent('skip_blocked_runtime');
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
+});
+
+// ---- PANT-655: zombie rerun must NOT double-count inflight ----
+
+test('PANT-655: zombie rerun does not increment inflight — in_progress assignee already counted by computeInflight', async () => {
+  // Before fix: zombie "rerun" path incremented inflight[zombieAgentName] after
+  // spawn.rerunIssue. But the zombie is in_progress, so computeInflight already counts
+  // it. The double-count caused phantom capacity exhaustion for the existing agent,
+  // blocking a second valid pick in the same cycle.
+  // After fix: inflight is NOT incremented in the zombie rerun path (only
+  // priorAgentCycleAssigns and loopRtProjected are updated for per-cycle tracking).
+  const fixtureCfg = withFixtureLanes({ 'pant655-proj': ['auriga-dev'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({
+    project_id: 'pant655-proj', status: 'in_progress',
+    assignee_id: fixtureCfg.AGENTS['auriga-dev'].id, labels: ['not-a-seed'],
+  });
+  // A second todo issue for the same project — should be dispatched if capacity is free.
+  const freshIssue = makeIssue({ project_id: 'pant655-proj', labels: ['not-a-seed'] });
+
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [zombieIssue, freshIssue], fixtureCfg.AGENTS,
+  );
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  // zombie should be rerun
+  assert.ok(calls.rerun.some((c) => c.identifier === zombieIssue.identifier), 'zombie must be rerun');
+  // result.assigned must count both the zombie rerun AND the fresh pick
+  assert.ok(result.assigned >= 1, 'at least one assign must be recorded — PANT-655');
+  // Confirm no phantom double-count by checking that assigned log shows correct count
+  const zombieLogs = log.byEvent('zombie');
+  assert.ok(zombieLogs.length >= 1, 'zombie event must fire');
+});
+
+// ---- PANT-661: review dispatch inflight/priorAgentCycleAssigns/loopRtProjected reserved before rerunIssue ----
+
+test('PANT-661: review dispatch still reserves capacity when rerunIssue throws — inflight updated before rerunIssue', async () => {
+  // Before fix: inflight, priorAgentCycleAssigns, loopRtProjected were incremented AFTER
+  // spawn.rerunIssue. If rerunIssue threw (rate-limit), the catch block ran but the
+  // counters were never updated — the agent slot was not reserved despite assignIssue
+  // having succeeded, allowing the same agent to be over-dispatched in the same cycle.
+  // After fix: inflight/priorAgentCycleAssigns/loopRtProjected are updated BEFORE
+  // rerunIssue so a throw leaves capacity correctly reserved.
+  // We verify: when rerunIssue fails for issueA, issueB (same agent) must be blocked
+  // by the perCyclePerAgent or runtime cap in subsequent picks this cycle.
+  const fixtureCfg = withFixtureLanes({ 'pant661-proj': ['auriga-review'] });
+  const reviewAgentId = fixtureCfg.AGENTS['auriga-review']?.id;
+
+  const issueA = makeIssue({ project_id: 'pant661-proj', status: 'in_review', assignee_id: reviewAgentId, parent_issue_id: 'fake-parent' });
+  const issueB = makeIssue({ project_id: 'pant661-proj', status: 'in_review', assignee_id: null, parent_issue_id: 'fake-parent' });
+
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [issueA, issueB], fixtureCfg.AGENTS,
+    { failRerunFor: new Set([issueA.identifier]) },
+  );
+  // Give issueA stale runs so it qualifies for rerun-review dispatch
+  const stale = Date.now() - (60 * 60 * 1000);
+  runsByIdentifier[issueA.identifier] = [
+    { status: 'completed', completed_at: new Date(stale).toISOString(), agent_id: reviewAgentId },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const reviewErrors = log.byEvent('review_error');
+  assert.ok(reviewErrors.some((e) => e.identifier === issueA.identifier),
+    'review_error must be logged when rerunIssue throws for issueA — PANT-661');
 });

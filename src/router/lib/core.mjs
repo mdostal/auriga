@@ -72,7 +72,7 @@ const HIVE_STEP_AGENT_RE = /\bagent:\s*(researcher|developer|tester|reviewer)\b/
 
 export function isHiveStory(issue = {}) {
   const labels = Array.isArray(issue.labels) ? issue.labels : [];
-  if (labels.some((l) => HIVE_LABELS.has(String(l).toLowerCase()))) return true;
+  if (labels.some((l) => HIVE_LABELS.has((typeof l === 'string' ? l : (l && l.name) || '').toLowerCase()))) return true;
   const desc = issue.description || '';
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
@@ -913,7 +913,6 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
     if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
-    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue; // already assigned+queued (inflight)
     if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
