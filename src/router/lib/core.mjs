@@ -597,9 +597,12 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         });
         continue;
       }
+      const rerAgentName = idToName[i.assignee_id];
+      const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
+      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-666: don't re-dispatch into a blocked runtime
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-        agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',
+        agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
       });
       continue;
     }

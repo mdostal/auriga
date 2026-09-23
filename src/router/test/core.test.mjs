@@ -872,6 +872,19 @@ test('selectReviewDispatch: a wedged review (assigned, run stale) self-heals via
   assert.equal(picks[0].agent, 'auriga-review');
 });
 
+test('selectReviewDispatch: rerun-review is skipped when the assigned agent\'s runtime is in blockedRuntimes — PANT-666', () => {
+  // auriga-review uses runtime 'claude-review'; if that runtime is rate-limited the
+  // rerun-review path must not fire, mirroring the dispatch-review path's own guard.
+  const i = inReview('PANT-666A', 666, 'RV');
+  const blocked = new Set(['claude-review']);
+  const picks = core.selectReviewDispatch([i], { 'PANT-666A': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW, blockedRuntimes: blocked });
+  assert.deepEqual(picks, []);
+  // When the runtime is NOT blocked, rerun-review fires as normal.
+  const picks2 = core.selectReviewDispatch([i], { 'PANT-666A': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW, blockedRuntimes: new Set() });
+  assert.equal(picks2.length, 1);
+  assert.equal(picks2[0].action, 'rerun-review');
+});
+
 test('selectReviewDispatch: respects perCycleReview cap and lane maxInflight', () => {
   const a = inReview('PAN-5', 5); const b = inReview('PAN-6', 6);
   // Two unassigned in_review stories, perCycleReview=1 -> only one dispatched this cycle.
