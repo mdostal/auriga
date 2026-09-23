@@ -514,7 +514,11 @@ export async function cycle(opts = {}) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
         const msg = e.message || '';
         if (/limit|quota|rate|429|exhaust/i.test(msg)) {
-          const rt = agent && cfgImpl.AGENTS[agent]?.runtime;
+          let rt = agent && cfgImpl.AGENTS[agent]?.runtime;
+          if (!rt && issueObj.assignee_id) {
+            const existingName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+            rt = existingName && cfgImpl.AGENTS[existingName]?.runtime;
+          }
           if (rt) blockedRuntimes.add(rt);
         }
       }
