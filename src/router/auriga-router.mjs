@@ -797,7 +797,11 @@ export async function cycle(opts = {}) {
           inflight[a.agent] = (inflight[a.agent] || 0) + 1;
           if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
           priorAgentCycleAssigns[a.agent] = (priorAgentCycleAssigns[a.agent] || 0) + 1;
-        } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+        } catch (e) {
+          const msg = e.message || '';
+          logImpl('assigned_idle_error', { identifier: a.identifier, error: msg });
+          if (a.runtime && /limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(a.runtime);
+        }
       }
     }
   }
