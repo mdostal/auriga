@@ -28,6 +28,7 @@ import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
+import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
@@ -481,6 +482,10 @@ export async function cycle(opts = {}) {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
           }
           spawn.assignIssue(c.identifier, agent);
+          if (typeof backlog.setIssueMetadata === 'function') {
+            try { backlog.setIssueMetadata(c.identifier, assignmentMetadata(issueObj, agent, cfgImpl, { now })); }
+            catch (e) { logImpl('assign_metadata_error', { identifier: c.identifier, error: e.message }); }
+          }
           inflight[agent] = (inflight[agent] || 0) + 1;
           const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
@@ -656,6 +661,10 @@ export async function cycle(opts = {}) {
           try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
         }
         spawn.assignIssue(r.identifier, r.agent);
+        if (typeof backlog.setIssueMetadata === 'function') {
+          try { backlog.setIssueMetadata(r.identifier, assignmentMetadata(issueObj, r.agent, cfgImpl, { now })); }
+          catch (e) { logImpl('assign_metadata_error', { identifier: r.identifier, error: e.message }); }
+        }
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
       spawn.rerunIssue(r.identifier);
@@ -737,7 +746,12 @@ export async function cycle(opts = {}) {
             if (typeof spawn.selectRoute === 'function') {
               try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
             }
+            const zombieIssueObj = issues.find((i) => i.identifier === z.identifier) || { identifier: z.identifier };
             spawn.assignIssue(z.identifier, agent);
+            if (typeof backlog.setIssueMetadata === 'function') {
+              try { backlog.setIssueMetadata(z.identifier, assignmentMetadata(zombieIssueObj, agent, cfgImpl, { now })); }
+              catch (e) { logImpl('assign_metadata_error', { identifier: z.identifier, error: e.message }); }
+            }
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
             priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
@@ -824,6 +838,13 @@ export async function cycle(opts = {}) {
       // If a lane errors with a limit/quota, block that runtime for the rest of this cycle.
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
+    }
+    // Write the assignment fingerprint so isRouterManagedAssignment() returns true for this
+    // issue on the next cycle — enabling idempotent re-routing (PAN-8245).
+    if (typeof backlog.setIssueMetadata === 'function') {
+      const pickIssueObj = issues.find((i) => i.identifier === p.identifier) || { identifier: p.identifier };
+      try { backlog.setIssueMetadata(p.identifier, assignmentMetadata(pickIssueObj, p.agent, cfgImpl, { now })); }
+      catch (e) { logImpl('assign_metadata_error', { identifier: p.identifier, error: e.message }); }
     }
     // verify a run started; force-enqueue if not (dead-zone fix).
     //

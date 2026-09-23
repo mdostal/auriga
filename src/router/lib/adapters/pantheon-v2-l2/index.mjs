@@ -217,6 +217,20 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     }
   }
 
+  // Best-effort: merges metadataObj into the issue's existing metadata via
+  // PUT /api/backlog/issues/:id/metadata (Pantheon's own setMetadata, which
+  // does { ...existing, ...kv } — confirmed in core/api/backlog.ts +
+  // contracts/l1/adapters/in-memory-board-queue.ts). Never throws — a
+  // metadata write failure must never abort a dispatch (PAN-8245).
+  function setIssueMetadata(identifier, metadataObj) {
+    try {
+      return run('PUT', `/api/backlog/issues/${encodeURIComponent(identifier)}/metadata`, metadataObj);
+    } catch (e) {
+      process.stderr.write(`pantheon-v2-l2: setIssueMetadata(${identifier}) failed: ${e.message}\n`);
+      return null;
+    }
+  }
+
   // WRITE method: propagates any failure to the caller (no try/catch) —
   // genuinely NEW capability (t015 — orchestrator hand-up): every other
   // method on this adapter acts on an EXISTING issue; this creates one.
@@ -253,6 +267,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     setIssueStatus,
     commentOnIssue,
     createIssue,
+    setIssueMetadata,
 
     // "Ported extra", not part of the BacklogAdapter typedef contract, but
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's
