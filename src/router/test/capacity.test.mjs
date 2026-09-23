@@ -55,6 +55,20 @@ test('chooseReviewAgent: null when the whole lane is at capacity', () => {
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 0 }), 'auriga-review');
 });
 
+test('chooseReviewAgent: returns null when the review agent runtime is in blockedRuntimes (PANT-587)', () => {
+  // Without fix: blockedRuntimes parameter missing → rate-limited review runtime still selected.
+  // With fix: chooseReviewAgent returns null, preventing dispatch to a blocked runtime.
+  const cfgWithRt = {
+    REVIEW_LANE: ['auriga-review'],
+    AGENTS: { 'auriga-review': { id: 'RV', maxInflight: 1, runtime: 'claude-review' } },
+  };
+  const blocked = new Set(['claude-review']);
+  assert.equal(chooseReviewAgent(cfgWithRt, {}, {}, blocked), null,
+    'must return null when the only review agent runtime is blocked');
+  assert.equal(chooseReviewAgent(cfgWithRt, {}, {}, new Set()),
+    'auriga-review', 'must still select agent when runtime is not blocked');
+});
+
 test('chooseReviewAgent: missing maxInflight field treats cap as Infinity — agent is still eligible regardless of inflight count', () => {
   // Before the fix: `now < undefined` is false → agent filtered out → review dispatch
   // never fires even though agentHasCapacity correctly allows the same agent.
