@@ -934,6 +934,35 @@ test('selectReviewDispatch: 5 build-phase runs do not trigger give-up-review on 
   assert.equal(picks[0].identifier, 'PANT-531C');
 });
 
+test('selectReviewDispatch: give-up-review does not consume a perCycleReview slot — PANT-584', () => {
+  // Scenario: perCycleReview=1, two issues both exhausted (reviewRunCount >= reviewMaxAttempts).
+  // Before fix: A's give-up-review pushed to actions[] -> actions.length reaches cap -> break,
+  // B's give-up-review never queued.
+  // After fix: give-ups go to giveUps[] (not actions[]), so both A and B get give-up-review
+  // and the actions[] budget is still free for any real dispatch in the same cycle.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const exhaustedRuns = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
+    status: 'completed',
+    completed_at: new Date(NOW - (k + 2) * 30 * 60_000).toISOString(),
+    created_at: new Date(NOW - (k + 2) * 30 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const issueA = inReview('PANT-584A', 100, 'RV');
+  const issueB = inReview('PANT-584B', 101, 'RV');
+  // Both A and B are exhausted AND above the fairness threshold, so they sort last.
+  // No fresh-unassigned issue ahead of them: both give-ups must fire despite perCycleReview=1.
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB],
+    { 'PANT-584A': exhaustedRuns, 'PANT-584B': exhaustedRuns },
+    CFG, {}, { now: NOW },
+  );
+  const giveUps = picks.filter((p) => p.action === 'give-up-review');
+  // Both exhausted issues must produce give-up-review regardless of perCycleReview cap
+  assert.equal(giveUps.length, 2);
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-584A'));
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-584B'));
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
