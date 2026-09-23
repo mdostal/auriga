@@ -689,6 +689,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
+    if (isSeed(i, allIssues)) continue; // never auto-unblock a planning-phase epic
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
   }
   return actions;
