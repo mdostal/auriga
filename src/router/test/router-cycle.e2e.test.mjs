@@ -1290,6 +1290,56 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
     'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
 });
 
+test('cascade: existing-assignee rerun updates inflight, blocking over-dispatch to the same agent in the picks loop (PANT-596)', async () => {
+  // Bug: cascade existing-assignee rerun path did not update inflight[existingAgentName].
+  // Without fix: inflight['auriga-build']=0 after cascade rerun → picks sees
+  // agentNow=0 < maxInflight=1 and dispatches picksTodo to auriga-build — over-dispatch.
+  // With fix: inflight['auriga-build']=1 → agentHasCapacity returns false → picks
+  // does NOT dispatch picksTodo.
+  //
+  // Setup: cascade-596-proj has codex lane (auriga-dev / heimdall-dev-codex).
+  // saturatingIssue fills runtimeInflight['codex']=1=cap → chooseAgentForProject returns null.
+  // blockedChild has existing assignee auriga-build (claude runtime, maxInflight=1) →
+  // existing-assignee rerun path fires. picksTodo is in picks-596-proj lane ['auriga-build'].
+  const fixtureCfg = withFixtureLanes({
+    'cascade-596-proj': ['auriga-dev', 'heimdall-dev-codex'],
+    'picks-596-proj': ['auriga-build'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+    AGENTS: {
+      ...fixtureCfg.AGENTS,
+      'auriga-build': { ...fixtureCfg.AGENTS['auriga-build'], maxInflight: 1 },
+    },
+  };
+  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const saturatingIssue = makeIssue({ project_id: 'cascade-596-proj', status: 'in_progress', assignee_id: aurigaDevId });
+  const inReviewParent = makeIssue({ project_id: 'cascade-596-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const blockedChild = makeIssue({
+    project_id: 'cascade-596-proj', status: 'blocked',
+    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+    parent_issue_id: 'fake-parent',
+  });
+  const picksTodo = makeIssue({ project_id: 'picks-596-proj', status: 'todo', parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParent, blockedChild, picksTodo], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier
+      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must rerun blockedChild via existing-assignee path (codex lane full)');
+  assert.ok(!calls.assign.some((a) => a.identifier === picksTodo.identifier),
+    'picks must NOT dispatch picksTodo — cascade rerun consumed auriga-build maxInflight=1 slot; ' +
+    'without PANT-596 fix inflight is stale and picks over-dispatches to the same agent');
+});
+
 test('cascade: existing-assignee rerun counts toward assigned — maxAssign blocks a second dispatch in the same cycle (PANT-582)', async () => {
   // Bug: the !agent && issueObj.assignee_id path fired rerunIssue but never
   // incremented `assigned`. With maxAssign=1 a cascade existing-assignee rerun
