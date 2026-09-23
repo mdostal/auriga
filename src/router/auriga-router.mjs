@@ -671,6 +671,11 @@ export async function cycle(opts = {}) {
       }
       spawn.rerunIssue(r.identifier);
       assigned++;
+      if (r.agent) {
+        inflight[r.agent] = (inflight[r.agent] || 0) + 1;
+        priorAgentCycleAssigns[r.agent] = (priorAgentCycleAssigns[r.agent] || 0) + 1;
+      }
+      if (reviewRt) loopRtProjected[reviewRt] = (loopRtProjected[reviewRt] || 0) + 1;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
