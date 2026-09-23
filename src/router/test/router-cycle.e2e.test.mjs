@@ -1260,3 +1260,103 @@ test('cascade: existing-assignee rerun counts toward assigned — maxAssign bloc
   assert.ok(!calls.assign.some((a) => a.identifier === unassignedTodo.identifier),
     'unassignedTodo must NOT be dispatched — maxAssign=1 exhausted by cascade rerun');
 });
+
+// ---- PANT-569: blockedRuntimes populated in cascade/zombie/review error paths ----
+// blockedRuntimes was only ever written in the picks loop; cascade/zombie/review
+// catch blocks logged the error but never called blockedRuntimes.add(). Their
+// blockedRuntimes.has() guards therefore always checked an empty Set, making
+// rate-limit protection inoperative for those loops. The fix adds
+// blockedRuntimes.add(runtime) to each catch block so subsequent loops in the
+// same cycle can observe the blocked runtime.
+
+test('PANT-569: cascade assign rate-limit populates blockedRuntimes — picks loop skips the blocked runtime', async () => {
+  // cascade assigns blockedChild to auriga-dev (codex). assignIssue throws 429.
+  // Without fix: blockedRuntimes stays {}, picks dispatches pickStory to codex.
+  // With fix: blockedRuntimes gets 'codex'; selectAssignments skips pickStory.
+  const fixtureCfg = withFixtureLanes({ 'pant569-cascade-proj': ['auriga-dev'] }); // codex runtime
+  const doneParent = makeIssue({ project_id: 'pant569-cascade-proj', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'pant569-cascade-proj', status: 'blocked',
+    metadata: { depends_on: doneParent.id },
+  });
+  const pickStory = makeIssue({
+    project_id: 'pant569-cascade-proj', status: 'todo',
+    parent_issue_id: 'fake-parent', // avoid seed routing to minerva-dev
+  });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [doneParent, blockedChild, pickStory], fixtureCfg.AGENTS,
+    { failAssignFor: new Set([blockedChild.identifier]) },
+  );
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const cascadeErrors = log.byEvent('cascade_error');
+  assert.ok(cascadeErrors.some((e) => e.identifier === blockedChild.identifier),
+    'cascade_error must be logged for the rate-limited blockedChild');
+  assert.ok(!calls.assign.some((a) => a.identifier === pickStory.identifier),
+    'pickStory must be skipped by selectAssignments once cascade error adds codex to blockedRuntimes (PANT-569)');
+});
+
+test('PANT-569: zombie assign rate-limit populates blockedRuntimes — picks loop skips the blocked runtime', async () => {
+  // zombie assigns zombieIssue to auriga-dev (codex). assignIssue throws 429.
+  // Without fix: blockedRuntimes stays {}, picks dispatches pickStory to codex.
+  // With fix: blockedRuntimes gets 'codex'; selectAssignments skips pickStory.
+  const fixtureCfg = withFixtureLanes({ 'pant569-zombie-proj': ['auriga-dev'] }); // codex runtime
+  const stale = Date.now() - (60 * 60 * 1000); // 1h ago — well past zombieStaleMs (20min)
+  const zombieIssue = makeIssue({
+    project_id: 'pant569-zombie-proj', status: 'in_progress', assignee_id: null,
+    parent_issue_id: 'fake-parent',
+  });
+  const pickStory = makeIssue({
+    project_id: 'pant569-zombie-proj', status: 'todo',
+    parent_issue_id: 'fake-parent',
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [zombieIssue, pickStory], fixtureCfg.AGENTS,
+    { failAssignFor: new Set([zombieIssue.identifier]) },
+  );
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const zombieErrors = log.byEvent('zombie_error');
+  assert.ok(zombieErrors.some((e) => e.identifier === zombieIssue.identifier),
+    'zombie_error must be logged for the rate-limited zombieIssue');
+  assert.ok(!calls.assign.some((a) => a.identifier === pickStory.identifier),
+    'pickStory must be skipped by selectAssignments once zombie error adds codex to blockedRuntimes (PANT-569)');
+});
+
+test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequent review dispatch in same cycle is skipped', async () => {
+  // With maxInflight:2 and perCycleReview:2, two review stories are selected.
+  // reviewStory1's assignIssue throws 429 → blockedRuntimes gets 'claude-review'.
+  // Without fix: reviewStory2 is also dispatched, hitting another rate-limit.
+  // With fix: the review loop's blockedRuntimes.has() guard skips reviewStory2.
+  const OWN_PROJECT = projectId('Pantheon Core');
+  const reviewCfg = {
+    ...cfg,
+    CAPS: { ...cfg.CAPS, perCycleReview: 2 },
+    AGENTS: {
+      ...cfg.AGENTS,
+      'auriga-review': { ...cfg.AGENTS['auriga-review'], maxInflight: 2 },
+    },
+  };
+  const reviewStory1 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
+  const reviewStory2 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [reviewStory1, reviewStory2], reviewCfg.AGENTS,
+    { failAssignFor: new Set([reviewStory1.identifier]) },
+  );
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: reviewCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(log.byEvent('review_error').some((e) => e.identifier === reviewStory1.identifier),
+    'review_error must be logged for the rate-limited reviewStory1');
+  const reviewSkips = log.byEvent('review_skip');
+  assert.ok(reviewSkips.some((e) => e.identifier === reviewStory2.identifier && e.reason === 'runtime-blocked'),
+    'reviewStory2 must be skipped with reason=runtime-blocked once review error adds claude-review to blockedRuntimes (PANT-569)');
+});
