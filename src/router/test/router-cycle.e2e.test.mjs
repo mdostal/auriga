@@ -1562,3 +1562,28 @@ test('review dispatch: updates loopRtProjected, blocking zombie over-dispatch on
   const rtSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'no-lane-capacity');
   assert.ok(rtSkips.length >= 1, 'zombie_skip(no-lane-capacity) must be logged for the over-capacity assign (PANT-597)');
 });
+
+// ---- PANT-549: build-dispatch picks loop must skip blocked runtimes ----------
+// blockedRuntimes is populated in the picks loop itself (when assignIssue throws
+// a rate-limit error). Without a guard at the top of the loop body, subsequent
+// picks for the same runtime are dispatched anyway — all fail, and each is an
+// unnecessary request to an already-rate-limited endpoint.
+
+test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks for that runtime in the same cycle', async () => {
+  const fixtureCfg = withFixtureLanes({ 'pant549-proj': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'pant549-proj', parent_issue_id: 'fake-parent' });
+  const issueB = makeIssue({ project_id: 'pant549-proj', parent_issue_id: 'fake-parent' });
+  // Only issueA fails — without the guard the second call still fires;
+  // with the guard issueB's pick is skipped before assignIssue is called.
+  const { backlog, spawn, calls } = createMockAdapters([issueA, issueB], fixtureCfg.AGENTS, {
+    failAssignFor: new Set([issueA.identifier]),
+  });
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(calls.assign.length, 1, 'only the first (failing) pick should have called assignIssue');
+  const skips = log.byEvent('skip_blocked_runtime');
+  assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
+  assert.equal(skips[0].identifier, issueB.identifier);
+});
