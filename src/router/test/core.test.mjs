@@ -1028,6 +1028,34 @@ test('selectReviewDispatch: 5 build-phase runs do not trigger give-up-review on 
   assert.equal(picks[0].identifier, 'PANT-531C');
 });
 
+// ---- PANT-667: give-up-review must not consume the perCycleReview budget ----
+
+test('selectReviewDispatch: give-up-review does not consume the perCycleReview slot — PANT-667', () => {
+  // perCycleReview=1 (maxTotal=1). Two issues both at reviewMaxAttempts stale runs.
+  // Before fix: A's give-up pushed to actions[], actions.length=1 >= maxTotal=1 → break,
+  // B's give-up was never queued — each cycle drained only one give-up, starving the queue.
+  // After fix: give-ups accumulate in giveUps[] (outside the budget), so both are returned
+  // in a single cycle regardless of perCycleReview.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const staleReviewRuns = (n) => Array.from({ length: n }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (n - k) * 60 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const issueA = inReview('PANT-667A', 100, 'RV'); // assigned, stale, reviewMaxAttempts runs
+  const issueB = inReview('PANT-667B', 101, 'RV'); // same — both need give-up-review
+
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB],
+    { 'PANT-667A': staleReviewRuns(reviewMaxAttempts), 'PANT-667B': staleReviewRuns(reviewMaxAttempts) },
+    CFG, { 'auriga-review': 2 }, { now: NOW },
+  );
+
+  const giveUps = picks.filter((p) => p.action === 'give-up-review');
+  assert.equal(giveUps.length, 2, 'both exhausted issues must get give-up-review in the same cycle — PANT-667');
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-667A'));
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-667B'));
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
