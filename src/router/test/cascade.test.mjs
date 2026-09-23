@@ -12,7 +12,7 @@ function statusMap(issues) {
 
 test('cascade: a completed parent enqueues its blocked dependent (metadata dep)', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', parent_issue_id: 'EPIC-1', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -23,7 +23,7 @@ test('cascade: a completed parent enqueues its blocked dependent (metadata dep)'
 
 test('cascade: also enqueues a TODO dependent whose deps are now satisfied', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', parent_issue_id: 'EPIC-1', metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -124,6 +124,17 @@ test('dependsOnAny: metadata id dep and slug dep both detected against the compl
   assert.equal(core.dependsOnAny(metaChild, new Set(['A']), [dep, metaChild]), true);
   assert.equal(core.dependsOnAny(slugChild, new Set(['A']), [dep, slugChild]), true);
   assert.equal(core.dependsOnAny(metaChild, new Set(['Z']), [dep, metaChild]), false);
+});
+
+test('cascade: a seed issue (idea label) with a satisfied dep produces zero actions', () => {
+  const foundation = { id: 'F', identifier: 'PAN-10', project_id: 'PROJ', status: 'done', title: 'foundation story' };
+  const epic = { id: 'E', identifier: 'PAN-11', project_id: 'PROJ', status: 'blocked', title: 'epic idea', labels: [{ name: 'idea' }], metadata: { depends_on: 'F' } };
+  const issues = [foundation, epic];
+  assert.equal(
+    core.detectCascadeDispatch(issues, new Set(['F']), statusMap(issues), cfg).length,
+    0,
+    'seed with idea label must never be cascade-dispatched to a build lane',
+  );
 });
 
 test('cascade: a story already in-flight (assigned+queued) is NOT re-cascade-enqueued', () => {

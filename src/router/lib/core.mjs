@@ -899,6 +899,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, issues)) continue; // never cascade-dispatch a seed to a build lane
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;
