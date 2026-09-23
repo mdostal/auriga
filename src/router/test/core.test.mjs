@@ -458,6 +458,28 @@ test('detectZombies: run count at/above zombieMaxAttempts emits give-up instead 
   assert.equal(byId['g4'].reason, 'max-attempts-exhausted');
 });
 
+test('detectZombies: review-lane runs excluded from zombieMaxAttempts count (PANT-636)', () => {
+  const now = Date.now();
+  const old = new Date(now - 30 * 60 * 1000).toISOString();
+  // CFG.REVIEW_LANE = ['auriga-review'] with id 'RV'.
+  // 1 build run + 3 review runs = 4 total. zombieMaxAttempts = 3.
+  // buildRuns.length (1) < 3 → must emit rerun, not give-up.
+  const inProgress = [
+    { id: 'grv', identifier: 'grv', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stuck after reviews', parent_issue_id: 'parent-x' },
+  ];
+  const runs = {
+    grv: [
+      { status: 'failed', error: 'x', created_at: old, agent_id: 'A' },
+      { status: 'completed', created_at: old, agent_id: 'RV' },
+      { status: 'completed', created_at: old, agent_id: 'RV' },
+      { status: 'completed', created_at: old, agent_id: 'RV' },
+    ],
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  assert.equal(z.length, 1);
+  assert.notEqual(z[0].action, 'give-up', 'review-lane runs must not count toward zombieMaxAttempts');
+});
+
 test('isHiveStory detects Minerva-shaped descriptions (methodology + steps + hive agents)', () => {
   assert.ok(core.isHiveStory({ description: HIVE_DESCRIPTION }));
   assert.ok(!core.isHiveStory({ description: 'Just fix the login bug, no special format here.' }));
