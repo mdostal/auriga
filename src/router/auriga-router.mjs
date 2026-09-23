@@ -799,12 +799,12 @@ export async function cycle(opts = {}) {
               try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
             }
             spawn.assignIssue(z.identifier, agent);
-            assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
             priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
             await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
             spawn.rerunIssue(z.identifier);
+            assigned++;
           } catch (e) {
             logImpl('zombie_error', { identifier: z.identifier, error: e.message });
             const msg = e.message || '';
