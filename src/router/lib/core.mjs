@@ -521,6 +521,7 @@ export function reviewEligible(_issue = {}) {
 export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const blockedRuntimes = (opts && opts.blockedRuntimes) || new Set();
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -587,6 +588,8 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         });
         continue;
       }
+      const agentRt = cfg.AGENTS[idToName[i.assignee_id]]?.runtime;
+      if (agentRt && blockedRuntimes.has(agentRt)) continue; // PANT-588: don't consume the slot
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',

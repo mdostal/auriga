@@ -934,6 +934,42 @@ test('selectReviewDispatch: 5 build-phase runs do not trigger give-up-review on 
   assert.equal(picks[0].identifier, 'PANT-531C');
 });
 
+// ---- PANT-588: blocked-runtime rerun-review must not starve healthy dispatch-review ----
+
+test('selectReviewDispatch: rerun-review for blocked-runtime agent does not consume the slot — PANT-588', () => {
+  // Issue A: already assigned to auriga-review (runtime: claude-review), run stale.
+  // Issue B: unassigned, eligible for dispatch-review.
+  // blockedRuntimes includes 'claude-review'.
+  // With fix: A's rerun-review is skipped (slot not consumed), B gets dispatch-review.
+  // Without fix: A consumes the sole perCycleReview=1 slot; B is never evaluated.
+  const issueA = inReview('PANT-588A', 588, 'RV'); // assigned to auriga-review
+  const issueB = inReview('PANT-588B', 589);        // unassigned
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB],
+    { 'PANT-588A': [doneStale], 'PANT-588B': [] },
+    CFG,
+    {},
+    { now: NOW, blockedRuntimes: new Set(['claude-review']) },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-588B');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('selectReviewDispatch: rerun-review fires normally when runtime is NOT blocked — PANT-588', () => {
+  // Same setup but blockedRuntimes is empty: A should still get rerun-review.
+  const issueA = inReview('PANT-588C', 590, 'RV');
+  const picks = core.selectReviewDispatch(
+    [issueA],
+    { 'PANT-588C': [doneStale] },
+    CFG,
+    { 'auriga-review': 1 },
+    { now: NOW, blockedRuntimes: new Set() },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'rerun-review');
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
