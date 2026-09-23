@@ -892,6 +892,9 @@ export async function cycle(opts = {}) {
       }
       spawn.assignIssue(p.identifier, p.agent);
       assigned++;
+      inflight[p.agent] = (inflight[p.agent] || 0) + 1;
+      priorAgentCycleAssigns[p.agent] = (priorAgentCycleAssigns[p.agent] || 0) + 1;
+      if (p.runtime) loopRtProjected[p.runtime] = (loopRtProjected[p.runtime] || 0) + 1;
     } catch (e) {
       const msg = e.message || '';
       logImpl('assign_error', { identifier: p.identifier, agent: p.agent, error: msg });
