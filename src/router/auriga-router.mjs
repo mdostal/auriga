@@ -496,6 +496,10 @@ export async function cycle(opts = {}) {
           }
           if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
         }
+        if (!agent && issueObj.assignee_id) {
+          const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+        }
         spawn.rerunIssue(c.identifier);
         cascadeFired++;
         cascaded.add(c.identifier);
@@ -615,6 +619,12 @@ export async function cycle(opts = {}) {
           '4. Once the root cause is fixed, reset this ticket to `in_review` to re-enter the review queue'
         );
       } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'comment', error: e.message }); }
+      continue;
+    }
+
+    const reviewRt = r.agent && cfgImpl.AGENTS[r.agent]?.runtime;
+    if (reviewRt && blockedRuntimes.has(reviewRt)) {
+      logImpl('review_skip', { identifier: r.identifier, agent: r.agent, reason: 'runtime-blocked', runtime: reviewRt });
       continue;
     }
 

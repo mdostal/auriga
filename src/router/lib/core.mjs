@@ -569,6 +569,11 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   });
 
   const actions = [];
+  // PANT-584: give-up-review is an administrative action, not a dispatch — it must
+  // not consume a perCycleReview slot. Collect give-ups separately so they don't
+  // increment actions.length and starve real dispatches. Mirrors how zombie give-ups
+  // bypass the maxAssign counter in the router's zombie loop.
+  const giveUps = [];
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal) break;
@@ -591,7 +596,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
       const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
       if (reviewRunCount >= reviewMaxAttempts) {
-        actions.push({
+        giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
         });
@@ -617,7 +622,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       agent, action: 'dispatch-review', reason: 'needs-review',
     });
   }
-  return actions;
+  return [...giveUps, ...actions];
 }
 
 // ============================================================================

@@ -1148,3 +1148,56 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
 });
+
+test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking assigned-idle double-dispatch (PANT-545)', async () => {
+  // Bug: cascade fires existing-assignee rerun but priorAgentCycleAssigns not
+  // updated → assigned-idle double-dispatches the same agent within the same cycle.
+  //
+  // Setup: RUNTIME_CAP.codex=1, saturatingIssue (auriga-dev / codex) fills
+  // runtimeInflight['codex']=1=cap. blockedChild has existing assignee auriga-build
+  // (claude runtime), in a codex-only lane project — cascade returns agent=null
+  // (codex full) but fires existing-assignee rerun. idleTodo is also assigned to
+  // auriga-build (claude, not blocked by codex cap).
+  //
+  // Without fix: priorAgentCycleAssigns['auriga-build']=0 after cascade → assigned-
+  // idle sees perAgentCycle=0 < perCyclePerAgent=1 and double-dispatches idleTodo.
+  // With fix: priorAgentCycleAssigns['auriga-build']=1 after cascade → assigned-idle
+  // sees perAgentCycle=1 >= 1 and skips idleTodo.
+  const fixtureCfg = withFixtureLanes({ 'cascade-proj-545': ['auriga-dev', 'heimdall-dev-codex'] });
+  const tightCfg = {
+    ...fixtureCfg,
+    CAPS: { ...fixtureCfg.CAPS, perCyclePerAgent: 1 },
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+  };
+  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  // Fills runtimeInflight['codex']=1=runtimeCap.codex so cascade returns agent=null.
+  const saturatingIssue = makeIssue({ project_id: 'cascade-proj-545', status: 'in_progress', assignee_id: aurigaDevId });
+  // Dep starts in_review so detectUnblocks skips blockedChild; detectVerifiedDone
+  // advances it to done via merged PR (PANT-341 pattern) before the cascade pass.
+  const inReviewParent = makeIssue({ project_id: 'cascade-proj-545', status: 'in_review' });
+  // blockedChild: existing assignee auriga-build (claude), codex-only lane is full.
+  const blockedChild = makeIssue({
+    project_id: 'cascade-proj-545', status: 'blocked',
+    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+  });
+  // idleTodo: assigned to auriga-build (claude, not blocked by codex cap), no active runs.
+  const idleTodo = makeIssue({ project_id: 'cascade-proj-545', status: 'todo', assignee_id: aurigaBuildId });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParent, blockedChild, idleTodo], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier
+      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must rerun blockedChild via existing-assignee path (codex lane full, auriga-build already assigned)');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT reassign blockedChild in the existing-assignee path');
+  assert.ok(!calls.rerun.some((r) => r.identifier === idleTodo.identifier),
+    'assigned-idle must NOT dispatch idleTodo — cascade rerun consumed the perCyclePerAgent=1 ' +
+    'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
+});
