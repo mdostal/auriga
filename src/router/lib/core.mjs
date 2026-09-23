@@ -574,7 +574,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const giveUps = [];
   const projected = {};
   for (const i of ordered) {
-    if (actions.length >= maxTotal) break;
+    if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue; // PANT-675: still evaluate already-assigned issues (potential give-ups) after budget is consumed
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
