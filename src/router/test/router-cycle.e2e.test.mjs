@@ -544,6 +544,37 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
 });
 
+// ---- PANT-614: zombie assign path missing blockedRuntimes check ----
+
+test('zombie assign: skips with assignee-runtime-blocked when chooseAgentForProject selects a rate-limited runtime (PANT-614)', async () => {
+  // Bug: zombie assign path (else branch) never checked blockedRuntimes after
+  // chooseAgentForProject — dispatching into a rate-limited runtime.
+  //
+  // blockedRuntimes is populated by the route-new-todos pass (which runs AFTER
+  // zombie recovery in cycle order). opts.initialBlockedRuntimes pre-seeds the
+  // Set so the zombie recovery pass sees it as blocked — the same guard the
+  // zombie-rerun path already applies (PANT-511) and that the issue description
+  // asks the assign path to mirror.
+  const fixtureCfg = withFixtureLanes({ 'zombie-blocked-rt-614': ['auriga-build'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({ project_id: 'zombie-blocked-rt-614', status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['claude']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === zombieIssue.identifier),
+    'zombie assign must NOT call assignIssue when the selected runtime is blocked (PANT-614)');
+  const rtSkips = log.byEvent('zombie_skip').filter(
+    (e) => e.identifier === zombieIssue.identifier && e.reason === 'assignee-runtime-blocked',
+  );
+  assert.equal(rtSkips.length, 1, 'zombie_skip(assignee-runtime-blocked) must be logged for the blocked zombie (PANT-614)');
+  assert.equal(rtSkips[0].runtime, 'claude', 'skipped zombie must report the blocked runtime');
+});
+
 // ---- PANT-576: zombie rerun path missing per-cycle-per-agent cap and counter updates ----
 
 test('zombie rerun: per-cycle-per-agent cap is enforced — second rerun gets zombie_skip (PANT-576)', async () => {
