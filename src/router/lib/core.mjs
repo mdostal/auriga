@@ -692,6 +692,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
