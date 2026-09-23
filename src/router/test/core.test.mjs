@@ -1044,6 +1044,18 @@ test('selectReviewDispatch: dispatches an in_review story regardless of any PR s
   assert.equal(picks[0].agent, 'auriga-review');
 });
 
+test('selectReviewDispatch: labeled seed issue in in_review is not dispatched for review (PANT-625)', () => {
+  const seedIssue = inReview('PANT-S', 88, null, { labels: [{ id: 'l1', name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seedIssue], { 'PANT-S': [] }, CFG, {}, { now: NOW });
+  assert.equal(picks.length, 0, 'labeled seed must not consume the review slot');
+  // needs-plan label also guards
+  const needsPlan = inReview('PANT-T', 89, null, { labels: [{ id: 'l2', name: 'needs-plan' }] });
+  assert.equal(core.selectReviewDispatch([needsPlan], { 'PANT-T': [] }, CFG, {}, { now: NOW }).length, 0);
+  // non-seed (no seed labels) in same state IS dispatched
+  const nonSeed = inReview('PANT-N', 99);
+  assert.equal(core.selectReviewDispatch([nonSeed], { 'PANT-N': [] }, CFG, {}, { now: NOW }).length, 1);
+});
+
 // ---- blocked -> todo auto-unblock (PAN-6662) --------------------------------
 test('detectUnblocks: blocked story with satisfied declared deps -> unblock', () => {
   const statusById = new Map([['dep1', 'done'], ['dep2', 'done']]);
@@ -1135,6 +1147,23 @@ test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
     { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
   ];
   assert.equal(core.detectParentDone(issues, CFG).length, 0);
+});
+
+test('detectParentDone: skips idea-labeled parent (isSeed guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'in_progress', title: 'epic', labels: [{ id: 'l1', name: 'idea' }] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+    { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: skips needs-plan-labeled parent (isSeed guard)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'in_progress', title: 'epic', labels: [{ id: 'l1', name: 'needs-plan' }] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
 });
 
 // ============================================================================
@@ -1477,4 +1506,12 @@ test('detectChangesRequested: smoke/scratch issues are skipped', () => {
 
 test('detectChangesRequested: empty input returns empty array', () => {
   assert.deepEqual(core.detectChangesRequested([]), []);
+});
+
+test('detectChangesRequested: labeled seed in changes_requested is not looped back to todo (PANT-632)', () => {
+  const seedIssue = { id: 's1', identifier: 'PANT-S', project_id: 'AURIGA', status: 'changes_requested', title: 'seed epic', labels: [{ id: 'l1', name: 'idea' }] };
+  assert.equal(core.detectChangesRequested([seedIssue]).length, 0, 'labeled seed must not be looped back');
+  // non-seed (no seed labels) IS looped back
+  const nonSeed = { id: 'n1', identifier: 'PANT-N', project_id: 'AURIGA', status: 'changes_requested', title: 'regular story', labels: [] };
+  assert.equal(core.detectChangesRequested([nonSeed]).length, 1, 'non-seed must be looped back');
 });

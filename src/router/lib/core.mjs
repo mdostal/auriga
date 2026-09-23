@@ -133,6 +133,15 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// True when an issue carries an explicit planning label (idea/needs-plan/consus-idea) without
+// the not-a-seed override. Used by dispatch guards where the childless-top-level heuristic is
+// too broad — only labeled seeds must be filtered, not every childless in-flight story.
+function hasExplicitSeedLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -568,6 +577,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
+    if (hasExplicitSeedLabel(i)) continue; // never dispatch review onto a labeled seed (PANT-625)
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -809,6 +819,7 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
+    if (isSeed(parent, issues)) continue; // never auto-close an idea/planning epic
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
@@ -922,6 +933,7 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (hasExplicitSeedLabel(i)) continue; // never loop a labeled seed back via changes_requested (PANT-632)
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
