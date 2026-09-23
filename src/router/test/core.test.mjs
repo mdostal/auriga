@@ -1010,7 +1010,7 @@ test('selectReviewDispatch: dispatches an in_review story regardless of any PR s
 // ---- blocked -> todo auto-unblock (PAN-6662) --------------------------------
 test('detectUnblocks: blocked story with satisfied declared deps -> unblock', () => {
   const statusById = new Map([['dep1', 'done'], ['dep2', 'done']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'P', metadata: { depends_on: 'dep1,dep2' } };
   const acts = core.detectUnblocks([b], statusById);
   assert.equal(acts.length, 1);
   assert.equal(acts[0].action, 'unblock-to-todo');
@@ -1036,8 +1036,14 @@ test('detectUnblocks: smoke/scratch blocked story ignored even with satisfied de
 
 test('detectUnblocks: cancelled dep counts as satisfied (terminal)', () => {
   const statusById = new Map([['dep1', 'cancelled']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'P', metadata: { depends_on: 'dep1' } };
   assert.equal(core.detectUnblocks([b], statusById).length, 1);
+});
+
+test('detectUnblocks: seed epic with satisfied declared deps is NOT unblocked', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const seed = { id: 'E', identifier: 'PAN-E', project_id: 'PCORE', status: 'blocked', title: 'epic', labels: [{ name: 'idea' }], metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([seed], statusById, [seed]).length, 0);
 });
 
 // ---- parent roll-up (all children terminal -> parent done) ------------------
