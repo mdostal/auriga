@@ -28,6 +28,7 @@ const OLD = NOW - 60 * 60 * 1000; // 1h idle — well past the 10-min stale thre
 
 const assignedTodo = (id, assigneeId, updatedAt = OLD, title = 'work') => ({
   id, identifier: id, status: 'todo', assignee_id: assigneeId, updated_at: new Date(updatedAt).toISOString(), title,
+  parent_issue_id: 'parent-seed', // sub-tasks, not seeds — detectAssignedIdle is for build-agent work
 });
 
 test('AC1: a single assignedQueued item is detected as a recovery action once stale', () => {
@@ -238,6 +239,17 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
   assert.equal(actions.length, 0, 'agent-parked issue must be excluded from idle recovery');
 });
 
+
+test('PANT-577: detectAssignedIdle skips seed issues (isSeed guard)', () => {
+  // An explicitly-labelled seed assigned to an agent must not enter idle recovery —
+  // seeds should only be re-dispatched through the planning lane, not via assigned-idle.
+  const seed = { ...assignedTodo('PAN-seed', 'M'), labels: ['idea'], parent_issue_id: null };
+  const nonSeed = assignedTodo('PAN-child', 'M'); // has parent_issue_id → not a seed
+  const allIssues = [seed, nonSeed];
+  const actions = core.detectAssignedIdle(allIssues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
+  assert.equal(actions.length, 1, 'seed must be excluded; non-seed child must still be detected');
+  assert.equal(actions[0].identifier, 'PAN-child');
+});
 
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
