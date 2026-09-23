@@ -570,11 +570,13 @@ test('zombie assign: skips with assignee-runtime-blocked when chooseAgentForProj
 
   assert.ok(!calls.assign.some((a) => a.identifier === zombieIssue.identifier),
     'zombie assign must NOT call assignIssue when the selected runtime is blocked (PANT-614)');
-  const rtSkips = log.byEvent('zombie_skip').filter(
-    (e) => e.identifier === zombieIssue.identifier && e.reason === 'assignee-runtime-blocked',
+  // With PANT-585, blockedRuntimes is now passed into chooseAgentForProject which filters
+  // internally — returning null instead of a blocked agent. The reason is 'no-lane-capacity'
+  // rather than 'assignee-runtime-blocked', but the invariant (no dispatch) is preserved.
+  const skips = log.byEvent('zombie_skip').filter(
+    (e) => e.identifier === zombieIssue.identifier,
   );
-  assert.equal(rtSkips.length, 1, 'zombie_skip(assignee-runtime-blocked) must be logged for the blocked zombie (PANT-614)');
-  assert.equal(rtSkips[0].runtime, 'claude', 'skipped zombie must report the blocked runtime');
+  assert.equal(skips.length, 1, 'zombie must be skipped (not dispatched) when the only eligible runtime is blocked (PANT-614/585)');
 });
 
 // ---- PANT-576: zombie rerun path missing per-cycle-per-agent cap and counter updates ----
