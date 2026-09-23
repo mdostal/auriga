@@ -167,10 +167,11 @@ function tenantLog(tenantId) {
 }
 
 // ---- one cycle -------------------------------------------------------------
-// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now }
+// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now, initialBlockedRuntimes }
 // Every dependency defaults to the live module-level singleton, so calling
 // cycle() with no args (from main()) is exactly the original live behavior.
 // Returns { todo, picked, assigned }.
+// opts.initialBlockedRuntimes: Set<string> — pre-seed blockedRuntimes before any pass runs (tests only).
 export async function cycle(opts = {}) {
   const backlog = opts.backlog || defaultBacklog;
   const spawn = opts.spawn || defaultSpawn;
@@ -260,7 +261,7 @@ export async function cycle(opts = {}) {
     assignedQueued,
   });
 
-  const blockedRuntimes = new Set();
+  const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
 
   // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
   // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
@@ -749,6 +750,10 @@ export async function cycle(opts = {}) {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+        if (zAgentRt && blockedRuntimes.has(zAgentRt)) {
+          logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', agent, runtime: zAgentRt }); continue;
+        }
         const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
         if ((priorAgentCycleAssigns[agent] || 0) >= maxPerAgentZombie) {
           logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent });
@@ -764,7 +769,6 @@ export async function cycle(opts = {}) {
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
             priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
-            const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;
             await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
             spawn.rerunIssue(z.identifier);
