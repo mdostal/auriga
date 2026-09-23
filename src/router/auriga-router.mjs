@@ -500,7 +500,6 @@ export async function cycle(opts = {}) {
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
           priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
-          assigned++;
         }
         if (!agent && issueObj.assignee_id) {
           cascadeExistingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
@@ -517,9 +516,9 @@ export async function cycle(opts = {}) {
           if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
           if (existingAgentName) inflight[existingAgentName] = (inflight[existingAgentName] || 0) + 1;
           if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
-          assigned++;
         }
         spawn.rerunIssue(c.identifier);
+        assigned++;
         cascadeFired++;
         cascaded.add(c.identifier);
         logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
