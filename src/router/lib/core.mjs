@@ -520,6 +520,7 @@ export function reviewEligible(_issue = {}) {
 // cycle, so this never double-acts on a resolved story.
 export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
   const now = opts.now ?? Date.now();
+  const blockedRuntimes = opts.blockedRuntimes ?? new Set();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
@@ -599,7 +600,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected);
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
     actions.push({

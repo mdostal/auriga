@@ -946,6 +946,41 @@ test('chooseReviewAgent: returns null when the lane is at capacity', () => {
   assert.equal(core.chooseReviewAgent(CFG, { 'auriga-review': 1 }, {}), null);
 });
 
+// ---- PANT-587: blockedRuntimes filter in chooseReviewAgent -----------------
+
+test('chooseReviewAgent: skips agents on blocked runtimes — PANT-587', () => {
+  // With 'claude-review' blocked, the sole review-lane agent is filtered out -> null.
+  assert.equal(core.chooseReviewAgent(CFG, {}, {}, new Set(['claude-review'])), null);
+  // With an unrelated runtime blocked, the review agent is unaffected.
+  assert.equal(core.chooseReviewAgent(CFG, {}, {}, new Set(['codex'])), 'auriga-review');
+});
+
+test('selectReviewDispatch: blocked primary review agent yields slot to next-eligible agent — PANT-587', () => {
+  // Two-agent review lane: rv1 on 'claude-review' (rate-limited), rv2 on 'anthropic' (healthy).
+  // Both have maxInflight=1. Highest-priority issue A must be dispatched to rv2, not dropped.
+  const cfg = {
+    ...CFG,
+    AGENTS: {
+      ...CFG.AGENTS,
+      'auriga-review': { id: 'RV1', runtime: 'claude-review', maxInflight: 1 },
+      'auriga-review-2': { id: 'RV2', runtime: 'anthropic', maxInflight: 1 },
+    },
+    REVIEW_LANE: ['auriga-review', 'auriga-review-2'],
+    RUNTIME_CAP: { ...CFG.RUNTIME_CAP, anthropic: 1 },
+    CAPS: { ...CFG.CAPS, perCycleReview: 2 },
+  };
+  const issueA = inReview('PANT-587A', 1); // highest priority (comes first)
+  const issueB = inReview('PANT-587B', 2);
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB], { 'PANT-587A': [], 'PANT-587B': [] }, cfg, {},
+    { now: NOW, blockedRuntimes: new Set(['claude-review']) },
+  );
+  // Only rv2 ('anthropic') is eligible; it has maxInflight=1, so only one dispatch.
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-587A'); // highest-priority issue wins the slot
+  assert.equal(picks[0].agent, 'auriga-review-2');
+});
+
 // ---- BACK-HALF: PR-eligibility + broad PR matching (2026-07-31 fix) --------
 
 test('prReferencesIssue: matches ticket id in head branch, title, or body (case-insensitive)', () => {
