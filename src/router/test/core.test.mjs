@@ -1056,6 +1056,36 @@ test('selectReviewDispatch: give-up-review does not consume the perCycleReview s
   assert.ok(giveUps.some((p) => p.identifier === 'PANT-667B'));
 });
 
+// ---- PANT-675: give-up-review must still fire when perCycleReview budget is consumed ----
+
+test('selectReviewDispatch: exhausted issue gets give-up-review even after perCycleReview budget consumed — PANT-675', () => {
+  // Before fix: the loop used 'break' when actions.length >= maxTotal (perCycleReview=1),
+  // so an already-assigned-to-review issue past reviewMaxAttempts was silently dropped
+  // whenever a fresh dispatch-review consumed the single slot first.
+  // After fix: 'continue' is used (only skip issues NOT assigned to a review agent);
+  // already-assigned issues are still evaluated and emit give-up-review.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const staleReviewRuns = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (reviewMaxAttempts - k) * 60 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const freshIssue = inReview('PANT-675-FRESH', 200);      // unassigned — will consume budget
+  const exhaustedIssue = inReview('PANT-675-EXHA', 201, 'RV'); // assigned, past attempt cap
+
+  const picks = core.selectReviewDispatch(
+    [freshIssue, exhaustedIssue],
+    { 'PANT-675-FRESH': [], 'PANT-675-EXHA': staleReviewRuns },
+    CFG, {}, { now: NOW },
+  );
+
+  const dispatch = picks.filter((p) => p.action === 'dispatch-review');
+  const giveUp = picks.filter((p) => p.action === 'give-up-review');
+  assert.equal(dispatch.length, 1, 'fresh issue must get dispatch-review');
+  assert.equal(dispatch[0].identifier, 'PANT-675-FRESH');
+  assert.equal(giveUp.length, 1, 'exhausted issue must get give-up-review even after budget consumed — PANT-675');
+  assert.equal(giveUp[0].identifier, 'PANT-675-EXHA');
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
