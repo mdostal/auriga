@@ -405,6 +405,8 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
 
 export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
   const actions = [];
+  // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
+  const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
@@ -437,9 +439,6 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
-    // PANT-636: count only build-phase runs for the give-up threshold — review-lane
-    // runs inflate the counter and cause premature give-up on legitimately retried stories.
-    const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
     const buildRuns = runs.filter((r) => !reviewAgentIds.has(r.agent_id));
     if (buildRuns.length >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({

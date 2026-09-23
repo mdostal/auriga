@@ -769,7 +769,13 @@ export async function cycle(opts = {}) {
               priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
             }
             if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;
-          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+          } catch (e) {
+            logImpl('zombie_error', { identifier: z.identifier, error: e.message });
+            const msg = e.message || '';
+            if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+              if (zombieRt) blockedRuntimes.add(zombieRt);
+            }
+          }
         }
       } else {
         // needs (re)routing — route via its lane
