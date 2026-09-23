@@ -574,7 +574,11 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const giveUps = [];
   const projected = {};
   for (const i of ordered) {
-    if (actions.length >= maxTotal) break;
+    // PANT-675: do NOT break on budget exhaustion — give-up-review candidates always
+    // sort last (fairness bucket-1) and must be evaluated even after the dispatch budget
+    // is consumed. Skip dispatch-eligible (non-assigned) issues only; already-assigned
+    // issues that need give-up-review are not dispatch actions and do not consume a slot.
+    if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue;
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
@@ -601,6 +605,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         });
         continue;
       }
+      if (actions.length >= maxTotal) continue; // PANT-675: budget full — skip rerun-review (only give-ups bypass the budget)
       const rerAgentName = idToName[i.assignee_id];
       const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
       if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-666: don't re-dispatch into a blocked runtime

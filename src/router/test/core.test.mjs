@@ -1056,6 +1056,63 @@ test('selectReviewDispatch: give-up-review does not consume the perCycleReview s
   assert.ok(giveUps.some((p) => p.identifier === 'PANT-667B'));
 });
 
+// ---- PANT-675: give-up-review must fire even when dispatch budget consumed by a lower-attempt issue ----
+
+test('selectReviewDispatch: give-up-review fires even when perCycleReview slot consumed by a fresh dispatch — PANT-675', () => {
+  // Bug: `break` at `actions.length >= maxTotal` terminates the loop before reaching
+  // give-up candidates, which the fairness sort places LAST (attemptsOf >= fairnessMax).
+  // Scenario: perCycleReview=1. Fresh issue (0 review runs) sorts first and fills the
+  // dispatch slot. Exhausted issue (>= reviewMaxAttempts stale review runs) sorts last
+  // and must STILL produce give-up-review in the same cycle even though the slot is full.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const staleReviewRuns = (n) => Array.from({ length: n }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (n - k) * 60 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const freshIssue = inReview('PANT-675A', 100);           // 0 review runs, no assignee → dispatch-review (fills budget)
+  const exhaustedIssue = inReview('PANT-675B', 101, 'RV'); // reviewMaxAttempts stale runs → give-up-review
+
+  const picks = core.selectReviewDispatch(
+    [freshIssue, exhaustedIssue],
+    { 'PANT-675A': [], 'PANT-675B': staleReviewRuns(reviewMaxAttempts) },
+    { ...CFG, CAPS: { ...CFG.CAPS, perCycleReview: 1 } }, {}, { now: NOW },
+  );
+
+  const dispatch = picks.filter((p) => p.action === 'dispatch-review');
+  const giveUps = picks.filter((p) => p.action === 'give-up-review');
+  assert.equal(dispatch.length, 1, 'fresh issue must get dispatch-review — PANT-675');
+  assert.equal(dispatch[0].identifier, 'PANT-675A');
+  assert.equal(giveUps.length, 1, 'exhausted issue must get give-up-review even though dispatch budget consumed — PANT-675');
+  assert.equal(giveUps[0].identifier, 'PANT-675B');
+});
+
+test('selectReviewDispatch: rerun-review is suppressed (not over-dispatched) when budget is full — PANT-675', () => {
+  // Corollary: a high-attempt (>= fairnessMax, < reviewMaxAttempts) stale rerun-review
+  // candidate that sorts into bucket-1 must NOT be dispatched when the budget is full —
+  // only give-up-review bypasses the budget cap.
+  const fairnessMax = CFG.CAPS.reviewFairnessMaxAttempts ?? 3;
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const staleReviewRuns = (n) => Array.from({ length: n }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (n - k) * 60 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  // freshIssue: 0 runs, sorts first, fills the dispatch slot (dispatch-review)
+  const freshIssue = inReview('PANT-675C', 100);
+  // highAttemptStale: >= fairnessMax runs so it sorts last (bucket-1); < reviewMaxAttempts
+  // so it would be a rerun-review candidate — but budget is full, so it must be skipped.
+  const highAttemptStale = inReview('PANT-675D', 101, 'RV');
+
+  const picks = core.selectReviewDispatch(
+    [freshIssue, highAttemptStale],
+    { 'PANT-675C': [], 'PANT-675D': staleReviewRuns(fairnessMax) },
+    { ...CFG, CAPS: { ...CFG.CAPS, perCycleReview: 1 } }, {}, { now: NOW },
+  );
+
+  assert.equal(picks.filter((p) => p.action === 'dispatch-review').length, 1, 'fresh issue gets dispatch-review');
+  assert.equal(picks.filter((p) => p.action === 'rerun-review').length, 0, 'high-attempt stale rerun-review must not over-dispatch when budget full — PANT-675');
+  assert.equal(picks.filter((p) => p.action === 'give-up-review').length, 0, 'no give-up (not at reviewMaxAttempts yet)');
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
