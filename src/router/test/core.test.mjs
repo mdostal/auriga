@@ -1073,12 +1073,12 @@ test('detectUnblocks: blocked story with satisfied declared deps -> unblock', ()
 
 test('detectUnblocks: an unsatisfied declared dep keeps the story blocked', () => {
   const statusById = new Map([['dep1', 'done'], ['dep2', 'in_progress']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'EPIC', metadata: { depends_on: 'dep1,dep2' } };
   assert.equal(core.detectUnblocks([b], statusById).length, 0);
 });
 
 test('detectUnblocks: blocked story with NO declared deps is left untouched', () => {
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', metadata: {} };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', parent_issue_id: 'EPIC', metadata: {} };
   assert.equal(core.detectUnblocks([b], new Map()).length, 0);
 });
 
