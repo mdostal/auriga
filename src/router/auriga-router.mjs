@@ -477,12 +477,16 @@ export async function cycle(opts = {}) {
           continue;
         }
         if (agent) {
+          const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
+          if (cAgentRt && blockedRuntimes.has(cAgentRt)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'runtime-blocked', agent, runtime: cAgentRt });
+            continue;
+          }
           if (typeof spawn.selectRoute === 'function') {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
           }
           spawn.assignIssue(c.identifier, agent);
           inflight[agent] = (inflight[agent] || 0) + 1;
-          const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
           priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
@@ -490,7 +494,11 @@ export async function cycle(opts = {}) {
         }
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
-          if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+          if (existingAgentName) {
+            priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+            const existingAgentRt = cfgImpl.AGENTS[existingAgentName]?.runtime;
+            if (existingAgentRt) loopRtProjected[existingAgentRt] = (loopRtProjected[existingAgentRt] || 0) + 1;
+          }
         }
         spawn.rerunIssue(c.identifier);
         cascadeFired++;

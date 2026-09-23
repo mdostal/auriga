@@ -258,6 +258,17 @@ test('selectAssignments: priority-1 rule excludes human-todos from the dispatch 
   assert.deepEqual(picks.map((p) => p.identifier), ['a1']);
 });
 
+test('selectAssignments: agent-parked issues excluded from dispatch candidate pool (PANT-378/603)', () => {
+  // An agent-parked issue (metadata.blocked_reason set) must never enter the
+  // dispatch pool — a build lane agent explicitly parked it for human review,
+  // and re-dispatching it defeats that signal and creates an infinite retry loop.
+  const parked = { ...story('p1', 'AURIGA', 10, 'epic-1'), metadata: { blocked_reason: 'needs API key from ops' } };
+  const normal = story('n1', 'AURIGA', 11, 'epic-1');
+  const picks = core.selectAssignments([parked, normal], CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['n1'],
+    'agent-parked issue must be excluded from selectAssignments candidates');
+});
+
 test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (assignee)', () => {
   const now = Date.now();
   const inProgress = [
