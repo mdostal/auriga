@@ -258,6 +258,16 @@ test('selectAssignments: priority-1 rule excludes human-todos from the dispatch 
   assert.deepEqual(picks.map((p) => p.identifier), ['a1']);
 });
 
+test('selectAssignments: excludes agent-parked issues (blocked_reason set) from the dispatch candidate pool', () => {
+  const issues = [
+    { ...todo('p1', 'AURIGA', 1), metadata: { blocked_reason: 'needs API key from ops' } },
+    { ...todo('p2', 'AURIGA', 2), metadata: { blocked_reason: 'waiting for external dep' } },
+    todo('a1', 'AURIGA', 3), // ordinary todo, still dispatched
+  ];
+  const picks = core.selectAssignments(issues, CFG, core.computeInflight(issues, CFG.AGENTS), {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['a1']);
+});
+
 test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (assignee)', () => {
   const now = Date.now();
   const inProgress = [
