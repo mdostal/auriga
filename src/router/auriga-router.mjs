@@ -474,6 +474,13 @@ export async function cycle(opts = {}) {
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
         if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+        if (agent) {
+          const cAgentRtCheck = cfgImpl.AGENTS[agent]?.runtime;
+          if (cAgentRtCheck && blockedRuntimes.has(cAgentRtCheck)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'agent-runtime-blocked', agent, runtime: cAgentRtCheck });
+            continue;
+          }
+        }
         const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
         if (agent && (priorAgentCycleAssigns[agent] || 0) >= maxPerAgentCascade) {
           logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent });

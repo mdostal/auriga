@@ -1454,6 +1454,38 @@ test('cascade: existing-assignee rerun updates loopRtProjected, blocking over-di
   assert.ok(rtSkips.length >= 1, `cascade_skip(no-capacity) must be logged for blockedB (PANT-544), got ${JSON.stringify(log.byEvent('cascade_skip'))}`);
 });
 
+// ---- PANT-647: cascade new-agent path missing blockedRuntimes pre-check ----
+
+test('cascade new-agent: skips with agent-runtime-blocked when chooseAgentForProject selects a rate-limited runtime (PANT-647)', async () => {
+  // Bug: cascade new-agent path called chooseAgentForProject then immediately
+  // called spawn.assignIssue without checking blockedRuntimes — dispatching into
+  // a rate-limited runtime. The zombie new-reroute path (lines 763–768) correctly
+  // checks blockedRuntimes after chooseAgentForProject; this mirrors that pattern.
+  //
+  // opts.initialBlockedRuntimes pre-seeds the Set so the cascade pass sees it as
+  // blocked from the start — same mechanism as the PANT-614 zombie test.
+  const fixtureCfg = withFixtureLanes({ 'cascade-blocked-rt-647': ['auriga-build'] }); // claude runtime
+  const doneParent = makeIssue({ project_id: 'cascade-blocked-rt-647', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'cascade-blocked-rt-647', status: 'blocked',
+    labels: ['not-a-seed'], metadata: { depends_on: doneParent.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['claude']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue when the selected runtime is blocked (PANT-647)');
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT call rerunIssue when the selected runtime is blocked (PANT-647)');
+  const rtSkips = log.byEvent('cascade_skip').filter(
+    (e) => e.identifier === blockedChild.identifier && e.reason === 'agent-runtime-blocked',
+  );
+  assert.equal(rtSkips.length, 1, 'cascade_skip(agent-runtime-blocked) must be logged for the blocked cascade candidate (PANT-647)');
+  assert.equal(rtSkips[0].runtime, 'claude', 'skipped cascade candidate must report the blocked runtime');
+});
+
 // ---- PANT-569: blockedRuntimes populated in cascade/zombie/review error paths ----
 // blockedRuntimes was only ever written in the picks loop; cascade/zombie/review
 // catch blocks logged the error but never called blockedRuntimes.add(). Their
