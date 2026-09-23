@@ -1120,3 +1120,81 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
     'assigned-idle must NOT dispatch idleTodo — cascade rerun consumed the perCyclePerAgent=1 ' +
     'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
 });
+
+test('cascade: existing-assignee rerun updates loopRtProjected, preventing over-dispatch on the same runtime (PANT-544)', async () => {
+  // Bug: cascade fires an existing-assignee rerun (auriga-dev/codex) but
+  // loopRtProjected['codex'] is not incremented. A subsequent chooseAgentForProject
+  // call for a different project on the same codex runtime sees loopRtProjected=0,
+  // thinks the runtime has capacity, and dispatches heimdall-dev-codex — bypassing
+  // RUNTIME_CAP.codex and firing two codex runs in one cycle.
+  //
+  // Key: deps must be in_review (not done) at cycle start so detectUnblocks does NOT
+  // unblock+unassign blockedA. detectVerifiedDone (merged-PR gate) advances them to
+  // done inside the cycle, after the unblock pass. This preserves blockedA.assignee_id
+  // so the cascade existing-assignee path is exercised.
+  //
+  // Setup: maxInflight=1 for auriga-dev (overridden) with 1 saturating in_progress
+  // issue. inflight['auriga-dev']=1=maxInflight → chooseAgentForProject returns null
+  // for proj-A (auriga-dev-only lane). blockedA has assignee_id=auriga-dev → fires
+  // via existing-assignee path. runtimeInflight['codex']=1, RUNTIME_CAP.codex=2 →
+  // one codex slot remains open.
+  //
+  // Without fix: loopRtProjected['codex'] stays 0 → for proj-B,
+  // rtNow=1+0=1 < cap=2 → heimdall-dev-codex assigned → 2 codex dispatches.
+  // With fix: loopRtProjected['codex']=1 after blockedA rerun →
+  // rtNow=1+1=2 >= cap=2 → null → blockedB skipped.
+  const fixtureCfg = withFixtureLanes({
+    'cascade-proj-544-a': ['auriga-dev'],
+    'cascade-proj-544-b': ['heimdall-dev-codex'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    AGENTS: {
+      ...fixtureCfg.AGENTS,
+      'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 },
+    },
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 2 },
+  };
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  // Fills inflight['auriga-dev']=1=maxInflight, runtimeInflight['codex']=1.
+  const saturating = makeIssue({ project_id: 'cascade-proj-544-a', status: 'in_progress', assignee_id: aurigaDevId });
+  // in_review deps: detectUnblocks sees these as not-done → no unblock/unassign.
+  // detectVerifiedDone advances them to done (MERGED PR) before the cascade pass.
+  const inReviewA = makeIssue({ project_id: 'cascade-proj-544-a', status: 'in_review' });
+  const inReviewB = makeIssue({ project_id: 'cascade-proj-544-b', status: 'in_review' });
+  // blockedA: existing assignee auriga-dev; proj-A lane returns null (auriga-dev at maxInflight).
+  // assignee_id is preserved because detectUnblocks skips this (dep is in_review).
+  const blockedA = makeIssue({
+    project_id: 'cascade-proj-544-a', status: 'blocked',
+    assignee_id: aurigaDevId, metadata: { depends_on: inReviewA.id },
+  });
+  // blockedB: no assignee; proj-B lane (heimdall-dev-codex). Should be skipped once
+  // loopRtProjected['codex']=1 raises rtNow to the cap.
+  const blockedB = makeIssue({ project_id: 'cascade-proj-544-b', status: 'blocked', metadata: { depends_on: inReviewB.id } });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturating, inReviewA, inReviewB, blockedA, blockedB], tightCfg.AGENTS,
+  );
+  // MERGED PRs on in_review parents → detectVerifiedDone advances them to done.
+  backlog.getIssuePullRequests = (identifier) =>
+    (identifier === inReviewA.identifier || identifier === inReviewB.identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedA.identifier),
+    'cascade must rerun blockedA via existing-assignee path (auriga-dev at maxInflight)');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedA.identifier),
+    'cascade must NOT reassign blockedA in the existing-assignee path');
+  // Key PANT-544 assertion: blockedB must NOT be rerun by the cascade new-agent path.
+  // Without fix: loopRtProjected['codex'] stays 0 → rtNow=1+0=1 < cap=2 → cascade
+  // assigns heimdall-dev-codex AND calls rerunIssue(blockedB) inside the cascade loop.
+  // With fix: rtNow=1+1=2 >= cap=2 → cascade_skip(no-capacity) → blockedB goes to
+  // selectAssignments instead (assignIssue only, run starts, no rerun needed).
+  // selectAssignments dispatches blockedB without a rerun (run already active from assign);
+  // cascade's rerunIssue is the discriminator: it fires only in the unfixed path.
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedB.identifier),
+    'cascade must NOT rerun blockedB — existing-assignee rerun updated loopRtProjected["codex"]=1; ' +
+    'rtNow=1+1=2 >= cap=2 blocks the new-agent path; without PANT-544 fix ' +
+    'cascade assigns and reruns heimdall-dev-codex bypassing the runtime cap');
+});
