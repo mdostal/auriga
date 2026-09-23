@@ -546,6 +546,35 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
 });
 
+// ---- PANT-677: zombie assign assigned++ must fire AFTER rerunIssue, not before ----
+
+test('zombie assign: assigned is NOT counted when rerunIssue throws after a successful assignIssue (PANT-677)', async () => {
+  // Bug: assigned++ fired before spawn.rerunIssue in the zombie "assign" branch, so a
+  // rate-limit error on rerunIssue would still consume an assigned slot — starving
+  // subsequent passes when maxAssign is finite.
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  // Override rerunIssue to throw for this specific issue, simulating a rate-limit hit
+  const origRerunIssue = spawn.rerunIssue;
+  spawn.rerunIssue = (identifier) => {
+    if (identifier === stuckIssue.identifier) throw new Error('multica: rate limited (429)');
+    return origRerunIssue(identifier);
+  };
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, maxAssign: 1 });
+
+  assert.equal(result.assigned, 0, 'assigned must not be incremented when rerunIssue throws (PANT-677)');
+  assert.ok(calls.assign.some((c) => c.identifier === stuckIssue.identifier), 'assignIssue must still have been called');
+  const errLogs = log.byEvent('zombie_error');
+  assert.ok(errLogs.some((e) => e.identifier === stuckIssue.identifier), 'zombie_error must be logged on rerunIssue failure');
+});
+
 // ---- PANT-614: zombie assign path missing blockedRuntimes check ----
 
 test('zombie assign: skips with assignee-runtime-blocked when chooseAgentForProject selects a rate-limited runtime (PANT-614)', async () => {
