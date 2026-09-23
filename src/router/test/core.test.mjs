@@ -466,6 +466,30 @@ test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even fo
   assert.ok(CFG.HIVE_LANE.includes(agent));
 });
 
+// PANT-585: when the lowest-load agent is on a blocked runtime, chooseAgentForProject
+// must skip it and return the next eligible agent rather than returning a blocked one.
+test('chooseAgentForProject: skips agents on blockedRuntimes, returns next eligible (PANT-585)', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // heimdall-dev has load 0 (lowest), heimdall-dev-codex has load 1.
+  // Block the opencode runtime — heimdall-dev must be excluded.
+  const blocked = new Set(['opencode']);
+  const inflight = { 'heimdall-dev-codex': 1 };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, inflight, {}, empty, false, blocked);
+  assert.equal(agent, 'heimdall-dev-codex', 'must pick the unblocked codex agent, not the lower-load blocked one');
+});
+
+// PANT-585: selectAssignments must not skip the issue when the lowest-load agent
+// is on a blocked runtime — it should fall back to an unblocked agent instead.
+test('selectAssignments: issue gets assigned to unblocked agent when lowest-load agent runtime is blocked (PANT-585)', () => {
+  // HEIMDALL lane: heimdall-dev (opencode, load 0), heimdall-dev-codex (codex, load 1).
+  // Block opencode — heimdall-dev is the preferred pick but must be skipped.
+  const issues = [story('b1', 'HEIMDALL', 1, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, { 'heimdall-dev-codex': 1 }, { blockedRuntimes: new Set(['opencode']) });
+  assert.equal(picks.length, 1, 'issue must be assigned, not dropped');
+  assert.equal(picks[0].agent, 'heimdall-dev-codex', 'must fall back to the unblocked codex agent');
+});
+
 test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
   const now = Date.now();
   const inProgress = [
