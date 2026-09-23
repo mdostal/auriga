@@ -568,6 +568,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   });
 
   const actions = [];
+  // PANT-667: give-up-review is an administrative no-op (sets blocked + posts comment),
+  // not a real dispatch — collect separately so exhausted issues never consume a
+  // perCycleReview budget slot and starve legitimately reviewable issues behind them.
+  const giveUps = [];
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal) break;
@@ -591,7 +595,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
       const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
       if (reviewRunCount >= reviewMaxAttempts) {
-        actions.push({
+        giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
         });
@@ -617,7 +621,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       agent, action: 'dispatch-review', reason: 'needs-review',
     });
   }
-  return actions;
+  return [...giveUps, ...actions];
 }
 
 // ============================================================================
