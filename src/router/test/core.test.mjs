@@ -1350,6 +1350,18 @@ test('detectFalseDone never demotes a done story whose OWN recorded PR is merged
   assert.equal(acts[0].prUrl, 'https://github.com/mdostal/logic-loops/pull/1');
 });
 
+test('detectFalseDone does not demote a seed issue (PANT-567)', () => {
+  // top-level, childless -> isSeed() returns true -> no demotion regardless of open PR
+  const seed = { id: 'seed1', identifier: 'PANT-X', project_id: 'AURIGA', title: 'top-level planning ticket', status: 'done', parent_issue_id: null };
+  const openPr = { headRefName: 'feat/pant-x-planning', state: 'open', url: 'https://github.com/mdostal/auriga/pull/42' };
+  const allIssues = [seed]; // no children -> isChildless=true -> isSeed=true
+  assert.equal(core.detectFalseDone([seed], [openPr], {}, allIssues).length, 0);
+  // a non-seed (has a child) with the same open PR should still be demoted
+  const child = { id: 'child1', identifier: 'PANT-X-1', project_id: 'AURIGA', title: 'child task', status: 'todo', parent_issue_id: 'seed1' };
+  const allWithChild = [seed, child];
+  assert.equal(core.detectFalseDone([seed], [openPr], {}, allWithChild).length, 1);
+});
+
 test('ownPrUrl reads metadata.pr_url then a description pr_url line', () => {
   assert.equal(core.ownPrUrl({ metadata: { pr_url: 'https://github.com/o/r/pull/3' } }), 'https://github.com/o/r/pull/3');
   assert.equal(core.ownPrUrl({ description: 'x\npr_url: https://github.com/o/r/pull/4\ny' }), 'https://github.com/o/r/pull/4');
