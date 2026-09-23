@@ -340,7 +340,7 @@ test('unblock / parent-rollup / run-completion / changeback all stay scoped to c
 
   // ---- unblock: blocked issue whose declared dep is already done ----
   const ownDep = makeIssue({ project_id: OWN_PROJECT, status: 'done' });
-  const ownBlocked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', metadata: { depends_on: ownDep.id } });
+  const ownBlocked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: ownDep.id } });
   const foreignDep = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done' });
   const foreignBlocked = makeIssue({ project_id: FOREIGN_PROJECT, status: 'blocked', metadata: { depends_on: foreignDep.id } });
 
@@ -957,7 +957,7 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
   };
   const saturatingIssue = makeIssue({ project_id: 'cascade-proj', status: 'in_progress', assignee_id: tightCfg.AGENTS['auriga-dev'].id });
   const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done' });
-  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', metadata: { depends_on: doneParent.id } });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
   const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, doneParent, blockedChild], tightCfg.AGENTS);
   const log = createLogSink();
 
@@ -991,7 +991,7 @@ test('cascade: calls rerunIssue (without reassigning) for BLOCKED issue with exi
   // detectVerifiedDone will advance it to done (via the merged PR below).
   const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review', parent_issue_id: 'fake-parent' });
   // blocked child already assigned to the agent — this is the PANT-341 case
-  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParent.id } });
   const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, inReviewParent, blockedChild], tightCfg.AGENTS);
   // Merged PR for the dep: detectVerifiedDone advances inReviewParent to done,
   // satisfying blockedChild's dep for the cascade pass.
@@ -1212,8 +1212,8 @@ test('cascade: per-cycle-per-agent cap is enforced on existing-assignee rerun pa
   const inReviewParentA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review', parent_issue_id: 'fake-parent' });
   const inReviewParentB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review', parent_issue_id: 'fake-parent' });
   // Two blocked children with the same existing assignee auriga-dev.
-  const childA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, metadata: { depends_on: inReviewParentA.id } });
-  const childB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, metadata: { depends_on: inReviewParentB.id } });
+  const childA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentB.id } });
   const { backlog, spawn, calls } = createMockAdapters(
     [saturatingIssue, inReviewParentA, inReviewParentB, childA, childB], fixtureCfg.AGENTS,
   );
@@ -1267,7 +1267,7 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
   // blockedChild: existing assignee auriga-build (claude), codex-only lane is full.
   const blockedChild = makeIssue({
     project_id: 'cascade-proj-545', status: 'blocked',
-    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+    assignee_id: aurigaBuildId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParent.id },
   });
   // idleTodo: assigned to auriga-build (claude, not blocked by codex cap), no active runs.
   const idleTodo = makeIssue({ project_id: 'cascade-proj-545', status: 'todo', assignee_id: aurigaBuildId });
@@ -1319,7 +1319,7 @@ test('cascade: existing-assignee rerun counts toward assigned — maxAssign bloc
   const inReviewParent = makeIssue({ project_id: 'cascade-582-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
   const blockedChild = makeIssue({
     project_id: 'cascade-582-proj', status: 'blocked',
-    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+    assignee_id: aurigaBuildId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParent.id },
   });
   const unassignedTodo = makeIssue({ project_id: 'todo-582-proj', status: 'todo' });
   const { backlog, spawn, calls } = createMockAdapters(
@@ -1356,7 +1356,7 @@ test('PANT-569: cascade assign rate-limit populates blockedRuntimes — picks lo
   const doneParent = makeIssue({ project_id: 'pant569-cascade-proj', status: 'done' });
   const blockedChild = makeIssue({
     project_id: 'pant569-cascade-proj', status: 'blocked',
-    metadata: { depends_on: doneParent.id },
+    parent_issue_id: 'fake-parent', metadata: { depends_on: doneParent.id },
   });
   const pickStory = makeIssue({
     project_id: 'pant569-cascade-proj', status: 'todo',
