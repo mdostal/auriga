@@ -711,8 +711,22 @@ export async function cycle(opts = {}) {
         if (zombieRt && blockedRuntimes.has(zombieRt)) {
           logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', runtime: zombieRt }); continue;
         }
+        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if (zombieAgentName && (priorAgentCycleAssigns[zombieAgentName] || 0) >= maxPerAgentZombie) {
+          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent: zombieAgentName }); continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
-        if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        if (!dryRun) {
+          try {
+            spawn.rerunIssue(z.identifier);
+            assigned++;
+            if (zombieAgentName) {
+              inflight[zombieAgentName] = (inflight[zombieAgentName] || 0) + 1;
+              priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
+            }
+            if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;
+          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+        }
       } else {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
