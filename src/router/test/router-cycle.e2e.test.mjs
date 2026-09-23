@@ -350,8 +350,9 @@ test('unblock / parent-rollup / run-completion / changeback all stay scoped to c
   const foreignChild = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done', parent_issue_id: foreignParent.id });
 
   // ---- run-completion: in_progress issue whose latest run already completed ----
-  const ownInProgress = makeIssue({ project_id: OWN_PROJECT, status: 'in_progress' });
-  const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress' });
+  // must carry not-a-seed so detectRunCompletions (PANT-542 guard) doesn't skip it
+  const ownInProgress = makeIssue({ project_id: OWN_PROJECT, status: 'in_progress', labels: ['not-a-seed'] });
+  const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress', labels: ['not-a-seed'] });
 
   // ---- changeback: changes_requested issue, no other precondition ----
   const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
