@@ -1439,3 +1439,64 @@ test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequen
   assert.ok(reviewSkips.some((e) => e.identifier === reviewStory2.identifier && e.reason === 'runtime-blocked'),
     'reviewStory2 must be skipped with reason=runtime-blocked once review error adds claude-review to blockedRuntimes (PANT-569)');
 });
+
+// ---- PANT-597: review dispatch path missing inflight/loopRtProjected/priorAgentCycleAssigns updates ----
+
+test('review dispatch: updates priorAgentCycleAssigns, blocking zombie rerun on same agent (PANT-597)', async () => {
+  // Bug: review dispatch never incremented priorAgentCycleAssigns → the zombie
+  // rerun path saw count=0 and could dispatch the same agent again in the same
+  // cycle, busting the perCyclePerAgent=1 cap.
+  //
+  // Setup: perCyclePerAgent=1, one in_review issue → dispatch-review to auriga-review,
+  // one in_progress zombie assigned to auriga-review with a stale run → action:'rerun'.
+  // With fix: review dispatch increments priorAgentCycleAssigns['auriga-review']=1
+  // → zombie rerun path sees count=1 >= 1 and logs zombie_skip(per-cycle-per-agent-cap).
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const tightCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 } };
+  const aurigaReviewId = tightCfg.AGENTS['auriga-review'].id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' });
+  const zombieIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_progress', assignee_id: aurigaReviewId, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], tightCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.some((a) => a.identifier === reviewIssue.identifier),
+    'review dispatch must fire for the in_review issue');
+  assert.ok(!calls.rerun.some((r) => r.identifier === zombieIssue.identifier),
+    'zombie rerun must NOT fire — review dispatch consumed the perCyclePerAgent=1 slot (PANT-597)');
+  const capSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  assert.equal(capSkips.length, 1, 'zombie must be skipped with per-cycle-per-agent-cap (PANT-597)');
+});
+
+test('review dispatch: updates loopRtProjected, blocking zombie over-dispatch on claude-review runtime (PANT-597)', async () => {
+  // Bug: review dispatch never incremented loopRtProjected → chooseAgentForProject
+  // for a subsequent unassigned zombie saw claude-review=0 (free) and could dispatch
+  // auriga-review again, exceeding RUNTIME_CAP['claude-review']=1.
+  //
+  // Setup: RUNTIME_CAP['claude-review']=1 (default). One in_review issue in
+  // Pantheon Core → dispatch-review to auriga-review (runtime: claude-review).
+  // A fixture project with only auriga-review in its lane has an unassigned
+  // in_progress zombie → action:'assign' → chooseAgentForProject.
+  // With fix: loopRtProjected['claude-review']=1; agentHasCapacity('auriga-review',...)
+  // sees runtimeInflight+loopRtProjected=1 >= cap=1 → false → zombie_skip(no-lane-capacity).
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const fixtureCfg = withFixtureLanes({ 'review-rt-proj-597': ['auriga-review'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' });
+  const zombieIssue = makeIssue({ project_id: 'review-rt-proj-597', status: 'in_progress', assignee_id: null, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.some((a) => a.identifier === reviewIssue.identifier),
+    'review dispatch must fire for the in_review issue');
+  assert.ok(!calls.assign.some((a) => a.identifier === zombieIssue.identifier),
+    'zombie assign must NOT fire — review dispatch filled the claude-review runtime cap (PANT-597)');
+  const rtSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'no-lane-capacity');
+  assert.ok(rtSkips.length >= 1, 'zombie_skip(no-lane-capacity) must be logged for the over-capacity assign (PANT-597)');
+});
