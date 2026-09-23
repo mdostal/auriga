@@ -926,7 +926,16 @@ export async function cycle(opts = {}) {
     });
     if (!started) {
       logImpl('verify_no_run', { identifier: p.identifier, agent: p.agent, action: 'rerun' });
-      try { spawn.rerunIssue(p.identifier); } catch (e) { logImpl('rerun_error', { identifier: p.identifier, error: e.message }); }
+      try {
+        spawn.rerunIssue(p.identifier);
+      } catch (e) {
+        logImpl('rerun_error', { identifier: p.identifier, error: e.message });
+        const msg = e.message || '';
+        if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+          const rt = p.runtime ?? (p.agent && cfgImpl.AGENTS[p.agent]?.runtime);
+          if (rt) blockedRuntimes.add(rt);
+        }
+      }
     } else {
       const lr = coreImpl.latestRun(runs);
       const c = lr ? coreImpl.classifyRun(lr, now) : {};
