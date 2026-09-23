@@ -1209,3 +1209,53 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
     'assigned-idle must NOT dispatch idleTodo — cascade rerun consumed the perCyclePerAgent=1 ' +
     'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
 });
+
+test('cascade: existing-assignee rerun counts toward assigned — maxAssign blocks a second dispatch in the same cycle (PANT-582)', async () => {
+  // Bug: the !agent && issueObj.assignee_id path fired rerunIssue but never
+  // incremented `assigned`. With maxAssign=1 a cascade existing-assignee rerun
+  // should exhaust the budget and prevent a subsequent todo dispatch.
+  //
+  // Setup: runtimeCap.codex=1, saturatingIssue (auriga-dev / codex) fills the
+  // codex lane so cascade returns agent=null. blockedChild has existing assignee
+  // auriga-build (claude runtime) — triggers the existing-assignee path.
+  // unassignedTodo is a plain todo in a claude lane with capacity.
+  //
+  // Without fix: assigned stays 0 after cascade rerun → maxAssign=1 still
+  // allows unassignedTodo to be dispatched → result.assigned=1 is wrong (2 real
+  // dispatches: 1 rerun + 1 assign).
+  // With fix: assigned=1 after cascade rerun → maxAssign guard blocks
+  // unassignedTodo → result.assigned=1 (only the cascade rerun).
+  const fixtureCfg = withFixtureLanes({
+    'cascade-582-proj': ['auriga-build', 'heimdall-dev-codex'],
+    'todo-582-proj': ['auriga-build'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+  };
+  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const saturatingIssue = makeIssue({ project_id: 'cascade-582-proj', status: 'in_progress', assignee_id: aurigaDevId });
+  const inReviewParent = makeIssue({ project_id: 'cascade-582-proj', status: 'in_review' });
+  const blockedChild = makeIssue({
+    project_id: 'cascade-582-proj', status: 'blocked',
+    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+  });
+  const unassignedTodo = makeIssue({ project_id: 'todo-582-proj', status: 'todo' });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParent, blockedChild, unassignedTodo], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier
+      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP, maxAssign: 1 });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must rerun blockedChild via existing-assignee path');
+  assert.equal(result.assigned, 1,
+    'result.assigned must be 1 — existing-assignee rerun counts toward the budget (PANT-582)');
+  assert.ok(!calls.assign.some((a) => a.identifier === unassignedTodo.identifier),
+    'unassignedTodo must NOT be dispatched — maxAssign=1 exhausted by cascade rerun');
+});
