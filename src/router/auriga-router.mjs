@@ -573,9 +573,11 @@ export async function cycle(opts = {}) {
   // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
   // this and the whole board-wide-status-pass audit that followed it).
   const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
-  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now });
+  const reviewMaxTotal = Math.min((cfgImpl.CAPS && cfgImpl.CAPS.perCycleReview) ?? 1, Math.max(0, maxAssign - assigned));
+  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
+    if (assigned >= maxAssign) break;
     // SCALE-BY-TICKET: size the SQUAD for THIS ticket (which of product/technical/
     // qa/ux run, and whether QA drives a real browser via Playwright). Auriga stays
     // the THIN router — it computes the plan and fires ONE dispatch carrying it; the
