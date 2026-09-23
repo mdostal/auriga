@@ -491,6 +491,7 @@ export async function cycle(opts = {}) {
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
           if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+          assigned++;
         }
         spawn.rerunIssue(c.identifier);
         cascadeFired++;
