@@ -339,11 +339,11 @@ test('detectRunCompletions: seed issue with done run is NOT advanced to in_revie
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
   const inReview = [
-    { id: 'v1', identifier: 'v1', project_id: 'AURIGA', status: 'in_review', title: 'merged via state' },
-    { id: 'v2', identifier: 'v2', project_id: 'AURIGA', status: 'in_review', title: 'merged via merged_at' },
-    { id: 'v3', identifier: 'v3', project_id: 'AURIGA', status: 'in_review', title: 'still open' },
-    { id: 'v4', identifier: 'v4', project_id: 'AURIGA', status: 'in_review', title: 'no PRs' },
-    { id: 'v5', identifier: 'v5', project_id: 'AURIGA', status: 'in_review', title: 'SMOKE: ignore me' },
+    { id: 'v1', identifier: 'v1', project_id: 'AURIGA', status: 'in_review', title: 'merged via state', parent_issue_id: 'fake-parent' },
+    { id: 'v2', identifier: 'v2', project_id: 'AURIGA', status: 'in_review', title: 'merged via merged_at', parent_issue_id: 'fake-parent' },
+    { id: 'v3', identifier: 'v3', project_id: 'AURIGA', status: 'in_review', title: 'still open', parent_issue_id: 'fake-parent' },
+    { id: 'v4', identifier: 'v4', project_id: 'AURIGA', status: 'in_review', title: 'no PRs', parent_issue_id: 'fake-parent' },
+    { id: 'v5', identifier: 'v5', project_id: 'AURIGA', status: 'in_review', title: 'SMOKE: ignore me', parent_issue_id: 'fake-parent' },
   ];
   const prs = {
     v1: [{ state: 'merged', merged_at: null }],
@@ -365,7 +365,7 @@ test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to
 // satisfy the old broken check.
 test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, camelCase mergedAt) — GH #81', () => {
   const inReview = [
-    { id: 'g1', identifier: 'PANT-59', project_id: 'AURIGA', status: 'in_review', title: 'real gh PR shape' },
+    { id: 'g1', identifier: 'PANT-59', project_id: 'AURIGA', status: 'in_review', title: 'real gh PR shape', parent_issue_id: 'fake-parent' },
   ];
   const prs = {
     'PANT-59': [{ number: 112, state: 'MERGED', mergedAt: '2026-09-01T00:06:57Z' }],
@@ -374,6 +374,25 @@ test('detectVerifiedDone: fires on a real gh-CLI-shaped PR (uppercase state, cam
   assert.equal(actions.length, 1);
   assert.equal(actions[0].identifier, 'PANT-59');
   assert.equal(actions[0].action, 'advance-done');
+});
+
+// PANT-578: seed issues must not be advanced to done by detectVerifiedDone
+// even when they have a merged planning PR.
+test('detectVerifiedDone: seed issue with merged planning PR is not advanced to done', () => {
+  const seedIssue = { id: 's1', identifier: 'PANT-100', project_id: 'AURIGA', status: 'in_review', title: 'My seed', parent_issue_id: null, labels: [] };
+  const childIssue = { id: 'c1', identifier: 'PANT-101', project_id: 'AURIGA', status: 'todo', title: 'child story', parent_issue_id: 's1', labels: [] };
+  const allIssues = [seedIssue, childIssue];
+  const prs = { 'PANT-100': [{ state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z' }] };
+  // seedIssue has a child so isSeed returns false via the heuristic — use an explicit label to force seed classification
+  const labeledSeed = { ...seedIssue, labels: [{ id: 'l1', name: 'idea' }] };
+  const actionsLabeled = core.detectVerifiedDone([labeledSeed], prs, {}, allIssues);
+  assert.equal(actionsLabeled.length, 0, 'labeled seed with merged PR must not be advanced to done');
+
+  // childless top-level issue also classifies as seed via heuristic
+  const heuristicSeed = { id: 'h1', identifier: 'PANT-200', project_id: 'AURIGA', status: 'in_review', title: 'heuristic seed', parent_issue_id: null, labels: [] };
+  const prs2 = { 'PANT-200': [{ state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z' }] };
+  const actionsHeuristic = core.detectVerifiedDone([heuristicSeed], prs2, {}, [heuristicSeed]);
+  assert.equal(actionsHeuristic.length, 0, 'heuristic seed (childless top-level) with merged PR must not be advanced to done');
 });
 
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
