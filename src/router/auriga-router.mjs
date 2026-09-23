@@ -492,6 +492,11 @@ export async function cycle(opts = {}) {
         }
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          const existingRt = existingAgentName && cfgImpl.AGENTS[existingAgentName]?.runtime;
+          if (existingRt && blockedRuntimes.has(existingRt)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'assignee-runtime-blocked', runtime: existingRt });
+            continue;
+          }
           if (existingAgentName && (priorAgentCycleAssigns[existingAgentName] || 0) >= maxPerAgentCascade) {
             logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent: existingAgentName });
             continue;
