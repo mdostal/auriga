@@ -1558,3 +1558,44 @@ test('detectChangesRequested: smoke/scratch issues are skipped', () => {
 test('detectChangesRequested: empty input returns empty array', () => {
   assert.deepEqual(core.detectChangesRequested([]), []);
 });
+
+// ---- PANT-660: isHiveStory label check must handle object labels (API shape) ----
+
+test('isHiveStory: detects hive labels when labels are API objects with .name, not plain strings — PANT-660', () => {
+  // Before fix: String({name:'build'}) === '[object Object]', not in HIVE_LABELS -> always false.
+  // After fix: (l && l.name) || '' is used, so object labels work.
+  assert.ok(core.isHiveStory({ labels: [{ id: 1, name: 'build', color: 'green' }] }),
+    'object label with name:"build" must match HIVE_LABELS');
+  assert.ok(core.isHiveStory({ labels: [{ id: 2, name: 'implementation', color: 'blue' }] }),
+    'object label with name:"implementation" must match');
+  assert.ok(core.isHiveStory({ labels: [{ id: 3, name: 'classic-methodology' }] }),
+    'object label with name:"classic-methodology" must match');
+  assert.ok(!core.isHiveStory({ labels: [{ id: 4, name: 'bug' }] }),
+    'object label with name:"bug" must NOT match HIVE_LABELS');
+  assert.ok(!core.isHiveStory({ labels: [{ id: 5, name: 'feature' }] }),
+    'object label with name:"feature" must NOT match HIVE_LABELS');
+});
+
+// ---- PANT-662: detectCascadeDispatch must include todo+assigned issues ----
+
+test('detectCascadeDispatch: todo+assigned issue with satisfied deps is returned — PANT-662', () => {
+  // Before fix: `if (i.assignee_id && st === ISSUE_STATUS.TODO) continue` skipped
+  // todo+assigned issues even though computeInflight no longer counts them as inflight
+  // (the "master switch" fix made computeInflight count only in_progress, not todos).
+  // A todo+assigned issue whose deps just completed was silently excluded, delaying
+  // cascade dispatch by ~10 min until detectAssignedIdle's recovery pass fired.
+  // deps in metadata.depends_on and completedIds use issue IDs (not identifiers).
+  const dep = { id: 'DEP-ID', identifier: 'PANT-101', project_id: 'AURIGA', status: 'done', title: 'the dep', parent_issue_id: 'PAR-ID' };
+  const blocker = {
+    id: 'BLK-ID', identifier: 'PANT-102', project_id: 'AURIGA', status: 'todo',
+    assignee_id: 'A', title: 'blocked by dep', parent_issue_id: 'PAR-ID',
+    metadata: { depends_on: 'DEP-ID' },
+  };
+  const completedIds = new Set(['DEP-ID']);
+  const statusById = new Map([['DEP-ID', 'done'], ['BLK-ID', 'todo']]);
+
+  const actions = core.detectCascadeDispatch([dep, blocker], completedIds, statusById, CFG);
+  assert.equal(actions.length, 1, 'todo+assigned issue with satisfied deps must be cascade-dispatched — PANT-662');
+  assert.equal(actions[0].identifier, 'PANT-102');
+  assert.equal(actions[0].action, 'cascade-enqueue');
+});
