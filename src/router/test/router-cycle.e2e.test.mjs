@@ -544,6 +544,95 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
 });
 
+// ---- PANT-576: zombie rerun path missing per-cycle-per-agent cap and counter updates ----
+
+test('zombie rerun: per-cycle-per-agent cap is enforced — second rerun gets zombie_skip (PANT-576)', async () => {
+  // Bug: zombie rerun path never checked priorAgentCycleAssigns → same agent
+  // received unlimited zombie reruns in one cycle.
+  //
+  // Setup: perCyclePerAgent=1, two stale in_progress issues both assigned to auriga-build.
+  // With fix: first rerun fires and increments priorAgentCycleAssigns; second gets
+  // zombie_skip(per-cycle-per-agent-cap).
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const tightCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 } };
+  const aurigaBuildId = cfg.AGENTS['auriga-build'].id;
+  const zombie1 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId });
+  const zombie2 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombie1, zombie2], cfg.AGENTS);
+  const failedRun = { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() };
+  runsByIdentifier[zombie1.identifier] = [failedRun];
+  runsByIdentifier[zombie2.identifier] = [failedRun];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  const zombieReruns = calls.rerun.filter(
+    (r) => r.identifier === zombie1.identifier || r.identifier === zombie2.identifier,
+  );
+  assert.equal(zombieReruns.length, 1, 'only one zombie rerun must fire when perCyclePerAgent=1 (PANT-576)');
+  const capSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  assert.equal(capSkips.length, 1, 'second zombie must be skipped with per-cycle-per-agent-cap (PANT-576)');
+});
+
+test('zombie rerun: updates priorAgentCycleAssigns, blocking picks-loop double-dispatch (PANT-576)', async () => {
+  // Bug: zombie rerun path never incremented priorAgentCycleAssigns → picks loop
+  // saw count=0 and dispatched the same agent again within the same cycle.
+  //
+  // Setup: perCyclePerAgent=1, zombie rerun for auriga-build, and a todo issue
+  // also routable to auriga-build in the picks loop.
+  // With fix: zombie rerun increments priorAgentCycleAssigns['auriga-build']=1
+  // → picks loop sees perAgentCycle=1 >= 1 and skips todoIssue.
+  const fixtureCfg = withFixtureLanes({ 'zombie-picks-proj-576': ['auriga-build'] });
+  const tightCfg = { ...fixtureCfg, CAPS: { ...fixtureCfg.CAPS, perCyclePerAgent: 1 } };
+  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({ project_id: 'zombie-picks-proj-576', status: 'in_progress', assignee_id: aurigaBuildId });
+  const todoIssue = makeIssue({ project_id: 'zombie-picks-proj-576', status: 'todo', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue, todoIssue], tightCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === zombieIssue.identifier),
+    'zombie must call rerunIssue on the stale issue');
+  assert.ok(!calls.assign.some((a) => a.identifier === todoIssue.identifier),
+    'picks loop must NOT assign todoIssue — zombie rerun consumed the perCyclePerAgent=1 slot (PANT-576)');
+});
+
+test('zombie rerun: updates loopRtProjected, blocking zombie-assign over-dispatch on same runtime (PANT-576)', async () => {
+  // Bug: zombie rerun path never incremented loopRtProjected → a subsequent
+  // zombie assign in the same cycle could dispatch beyond the runtime cap.
+  //
+  // Setup: RUNTIME_CAP.codex=2. One zombie-rerun issue assigned to auriga-dev (codex)
+  // fills runtimeInflight['codex']=1. With fix, rerun increments loopRtProjected['codex']=1,
+  // so total projected=2=cap. A second unassigned zombie in the same project then calls
+  // chooseAgentForProject, which sees runtime full and logs zombie_skip(no-lane-capacity).
+  // Without fix: loopRtProjected['codex']=0, projected=1 < 2 → over-dispatches.
+  const fixtureCfg = withFixtureLanes({ 'zombie-rt-proj-576': ['auriga-dev'] });
+  const tightCfg = { ...fixtureCfg, RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 2 } };
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  // Zombie rerun: existing assignee (auriga-dev/codex), stale run.
+  const rerunZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: aurigaDevId });
+  // Zombie assign: no assignee → action:'assign' → calls chooseAgentForProject.
+  const assignZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: null });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([rerunZombie, assignZombie], tightCfg.AGENTS);
+  runsByIdentifier[rerunZombie.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  runsByIdentifier[assignZombie.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === rerunZombie.identifier),
+    'zombie rerun must call rerunIssue for the stale assigned issue');
+  assert.ok(!calls.assign.some((a) => a.identifier === assignZombie.identifier),
+    'zombie assign must NOT dispatch assignZombie — rerun filled the codex runtime cap (PANT-576)');
+  const rtSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'no-lane-capacity');
+  assert.ok(rtSkips.length >= 1, 'zombie_skip(no-lane-capacity) must be logged for the over-capacity assign (PANT-576)');
+});
+
 // ---- t015: orchestrator hand-up (real cycle()-level, not just selectAssignments) ----
 
 function saturateAgent(fixtureCfg, agentName, projectId, n) {
