@@ -1056,6 +1056,35 @@ test('selectReviewDispatch: give-up-review does not consume the perCycleReview s
   assert.ok(giveUps.some((p) => p.identifier === 'PANT-667B'));
 });
 
+// ---- PANT-675: give-up-review must fire even when dispatch budget is consumed first ----
+
+test('selectReviewDispatch: give-up-review fires even when budget consumed by a lower-attempt dispatch — PANT-675', () => {
+  // perCycleReview=1 (maxTotal=1). Fresh issue (0 review runs) sorts first (bucket-0),
+  // consumes the dispatch slot. Exhausted issue (reviewMaxAttempts stale runs, assigned
+  // to review agent) sorts last (bucket-1). Before fix: the top-of-loop break fired
+  // before the exhausted issue was reached. After fix: already-assigned issues continue
+  // to be evaluated even after the budget is full.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const staleReviewRuns = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
+    status: 'completed', completed_at: new Date(NOW - (reviewMaxAttempts - k) * 60 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const freshIssue = inReview('PANT-675A', 200);           // 0 review runs, not yet assigned to review agent
+  const exhaustedIssue = inReview('PANT-675B', 201, 'RV'); // reviewMaxAttempts stale review runs → give-up
+
+  const picks = core.selectReviewDispatch(
+    [freshIssue, exhaustedIssue],
+    { 'PANT-675A': [], 'PANT-675B': staleReviewRuns },
+    CFG, {}, { now: NOW },
+  );
+
+  assert.ok(picks.some((p) => p.action === 'dispatch-review' && p.identifier === 'PANT-675A'),
+    'fresh issue must get dispatch-review (consumes the budget slot)');
+  const giveUps = picks.filter((p) => p.action === 'give-up-review');
+  assert.equal(giveUps.length, 1, 'exhausted issue must still get give-up-review despite full budget — PANT-675');
+  assert.equal(giveUps[0].identifier, 'PANT-675B');
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
