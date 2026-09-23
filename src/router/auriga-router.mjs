@@ -819,7 +819,13 @@ export async function cycle(opts = {}) {
           inflight[a.agent] = (inflight[a.agent] || 0) + 1;
           if (a.runtime) loopRtProjected[a.runtime] = (loopRtProjected[a.runtime] || 0) + 1;
           priorAgentCycleAssigns[a.agent] = (priorAgentCycleAssigns[a.agent] || 0) + 1;
-        } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+        } catch (e) {
+          logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message });
+          const msg = e.message || '';
+          if (/limit|quota|rate|429|exhaust/i.test(msg)) {
+            if (a.runtime) blockedRuntimes.add(a.runtime);
+          }
+        }
       }
     }
   }
