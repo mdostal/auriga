@@ -953,7 +953,11 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    // Only skip seeds NOT assigned to the planning lane. A seed on a build-lane agent
+    // should not be recovered by rerunning into that lane; a seed assigned to the
+    // planning agent stuck in the dispatch dead-zone should be recovered normally.
+    const assignedAgentName = cfg.AGENTS && Object.entries(cfg.AGENTS).find(([, a]) => a.id === i.assignee_id)?.[0];
+    if (isSeed(i, allIssues) && assignedAgentName !== 'minerva-dev') continue;
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;

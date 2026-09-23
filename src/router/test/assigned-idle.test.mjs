@@ -240,15 +240,27 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
 });
 
 
-test('PANT-577: detectAssignedIdle skips seed issues (isSeed guard)', () => {
-  // An explicitly-labelled seed assigned to an agent must not enter idle recovery —
-  // seeds should only be re-dispatched through the planning lane, not via assigned-idle.
-  const seed = { ...assignedTodo('PAN-seed', 'M'), labels: ['idea'], parent_issue_id: null };
-  const nonSeed = assignedTodo('PAN-child', 'M'); // has parent_issue_id → not a seed
-  const allIssues = [seed, nonSeed];
+test('PANT-577: detectAssignedIdle skips seeds on build-lane agents (isSeed guard)', () => {
+  // A seed assigned to a build-lane agent must not enter idle recovery — the rerun
+  // path would enqueue the build agent, never re-route to the planning lane.
+  const buildSeed = { ...assignedTodo('PAN-seed-build', 'A'), labels: ['idea'], parent_issue_id: null }; // auriga-dev (build)
+  const nonSeed = assignedTodo('PAN-child', 'A'); // has parent_issue_id → not a seed
+  const allIssues = [buildSeed, nonSeed];
   const actions = core.detectAssignedIdle(allIssues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
-  assert.equal(actions.length, 1, 'seed must be excluded; non-seed child must still be detected');
+  assert.equal(actions.length, 1, 'seed on build agent must be excluded; non-seed child must still be detected');
   assert.equal(actions[0].identifier, 'PAN-child');
+});
+
+test('PANT-643: detectAssignedIdle recovers seeds assigned to the planning lane (minerva-dev)', () => {
+  // A seed assigned to minerva-dev that is stuck in the dispatch dead-zone must be
+  // recovered. rerunIssue re-enqueues for the current assignment (planning lane) — it
+  // does NOT re-route to a build lane, so the isSeed guard is wrong here.
+  const planningSeed = { ...assignedTodo('PAN-seed-plan', 'M'), labels: ['idea'], parent_issue_id: null }; // minerva-dev
+  const buildSeed = { ...assignedTodo('PAN-seed-build', 'A'), labels: ['idea'], parent_issue_id: null }; // auriga-dev (build)
+  const allIssues = [planningSeed, buildSeed];
+  const actions = core.detectAssignedIdle(allIssues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
+  assert.equal(actions.length, 1, 'planning-lane seed must be recovered; build-lane seed must still be skipped');
+  assert.equal(actions[0].identifier, 'PAN-seed-plan');
 });
 
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
