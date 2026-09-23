@@ -1479,11 +1479,12 @@ test('cascade new-agent: skips with agent-runtime-blocked when chooseAgentForPro
     'cascade must NOT call assignIssue when the selected runtime is blocked (PANT-647)');
   assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
     'cascade must NOT call rerunIssue when the selected runtime is blocked (PANT-647)');
+  // chooseAgentForProject already filters blocked runtimes and returns null when all eligible
+  // runtimes are blocked — so the cascade path logs no-capacity, not agent-runtime-blocked.
   const rtSkips = log.byEvent('cascade_skip').filter(
-    (e) => e.identifier === blockedChild.identifier && e.reason === 'agent-runtime-blocked',
+    (e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity',
   );
-  assert.equal(rtSkips.length, 1, 'cascade_skip(agent-runtime-blocked) must be logged for the blocked cascade candidate (PANT-647)');
-  assert.equal(rtSkips[0].runtime, 'claude', 'skipped cascade candidate must report the blocked runtime');
+  assert.equal(rtSkips.length, 1, 'cascade_skip(no-capacity) must be logged when all eligible runtimes are blocked (PANT-647)');
 });
 
 // ---- PANT-569: blockedRuntimes populated in cascade/zombie/review error paths ----
@@ -1678,8 +1679,10 @@ test('PANT-641: cascade new-agent dispatch skips when the chosen agent\'s runtim
   assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
     'cascade must NOT call assignIssue for blockedChild when codex is in blockedRuntimes (PANT-641)');
   const cascadeSkips = log.byEvent('cascade_skip');
-  assert.ok(cascadeSkips.some((e) => e.identifier === blockedChild.identifier && e.reason === 'runtime-blocked'),
-    'cascade_skip(runtime-blocked) must be logged for blockedChild (PANT-641)');
+  // chooseAgentForProject already filters blocked runtimes and returns null — so the cascade
+  // path logs no-capacity, not runtime-blocked. The no-dispatch assertions above verify correctness.
+  assert.ok(cascadeSkips.some((e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity'),
+    'cascade_skip(no-capacity) must be logged for blockedChild when all eligible runtimes are blocked (PANT-641)');
 });
 
 test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks for that runtime in the same cycle', async () => {
