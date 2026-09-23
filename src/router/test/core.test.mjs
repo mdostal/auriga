@@ -271,9 +271,9 @@ test('selectAssignments: excludes agent-parked issues (blocked_reason set) from 
 test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (assignee)', () => {
   const now = Date.now();
   const inProgress = [
-    { id: 'z1', identifier: 'z1', project_id: 'MINERVA', status: 'in_progress', assignee_id: null, title: 'stalled' },
-    { id: 'z2', identifier: 'z2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled' },
-    { id: 'z3', identifier: 'z3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'healthy' },
+    { id: 'z1', identifier: 'z1', project_id: 'MINERVA', status: 'in_progress', assignee_id: null, title: 'stalled', parent_issue_id: 'parent-x' },
+    { id: 'z2', identifier: 'z2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled', parent_issue_id: 'parent-x' },
+    { id: 'z3', identifier: 'z3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'healthy', parent_issue_id: 'parent-x' },
   ];
   const runs = {
     z1: [],
@@ -380,8 +380,8 @@ test('detectZombies: stale-but-old run triggers recovery, fresh done does not', 
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
   const inProgress = [
-    { id: 'z4', identifier: 'z4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stale' },
-    { id: 'z5', identifier: 'z5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'recent' },
+    { id: 'z4', identifier: 'z4', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stale', parent_issue_id: 'parent-x' },
+    { id: 'z5', identifier: 'z5', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'recent', parent_issue_id: 'parent-x' },
   ];
   const runs = {
     z4: [{ status: 'running', completed_at: null, created_at: old, started_at: old }],
@@ -400,8 +400,8 @@ test('detectZombies: run count below zombieMaxAttempts still emits assign/rerun 
   const old = new Date(now - 30 * 60 * 1000).toISOString();
   // CFG.CAPS.zombieMaxAttempts is 3; 2 prior runs is still below the cap.
   const inProgress = [
-    { id: 'g1', identifier: 'g1', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled' },
-    { id: 'g2', identifier: 'g2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled' },
+    { id: 'g1', identifier: 'g1', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled', parent_issue_id: 'parent-x' },
+    { id: 'g2', identifier: 'g2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stalled', parent_issue_id: 'parent-x' },
   ];
   const runs = {
     g1: [
@@ -424,8 +424,8 @@ test('detectZombies: run count at/above zombieMaxAttempts emits give-up instead 
   const old = new Date(now - 30 * 60 * 1000).toISOString();
   const makeRuns = (n) => Array.from({ length: n }, () => ({ status: 'failed', error: 'x', created_at: old }));
   const inProgress = [
-    { id: 'g3', identifier: 'g3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stuck at cap' },
-    { id: 'g4', identifier: 'g4', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stuck above cap' },
+    { id: 'g3', identifier: 'g3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'stuck at cap', parent_issue_id: 'parent-x' },
+    { id: 'g4', identifier: 'g4', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stuck above cap', parent_issue_id: 'parent-x' },
   ];
   const runs = {
     g3: makeRuns(3), // exactly at CFG.CAPS.zombieMaxAttempts (3)
@@ -479,7 +479,7 @@ test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even fo
 test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
   const now = Date.now();
   const inProgress = [
-    { id: 'z6', identifier: 'z6', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled hive story', description: HIVE_DESCRIPTION },
+    { id: 'z6', identifier: 'z6', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'stalled hive story', description: HIVE_DESCRIPTION, parent_issue_id: 'parent-x' },
   ];
   const z = core.detectZombies(inProgress, { z6: [] }, CFG, now);
   const byId = Object.fromEntries(z.map((a) => [a.identifier, a]));
@@ -489,8 +489,8 @@ test('detectZombies flags isHive on the zombie action so re-routing respects HIV
 test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
   const now = Date.now();
   const inProgress = [
-    { id: 'zp1', identifier: 'zp1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'parked', metadata: { blocked_reason: 'waiting for human approval' } },
-    { id: 'zp2', identifier: 'zp2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not parked', metadata: {} },
+    { id: 'zp1', identifier: 'zp1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'parked', metadata: { blocked_reason: 'waiting for human approval' }, parent_issue_id: 'parent-x' },
+    { id: 'zp2', identifier: 'zp2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not parked', metadata: {}, parent_issue_id: 'parent-x' },
   ];
   const z = core.detectZombies(inProgress, { zp1: [], zp2: [] }, CFG, now);
   const ids = z.map((a) => a.identifier);
@@ -505,7 +505,7 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
     { id: 'ht1', identifier: 'ht1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work', labels: ['human-todo'], metadata: {} },
     { id: 'ht2', identifier: 'ht2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work labeled obj', labels: [{ name: 'human-todo' }], metadata: {} },
     { id: 'ht3', identifier: 'ht3', project_id: 'AURIGA', status: 'in_progress', assignee_id: null, title: 'human work no assignee', labels: ['human-todo'], metadata: {} },
-    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'agent work', labels: [], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'agent work', labels: [], metadata: {}, parent_issue_id: 'parent-x' },
   ];
   // All human-todo issues have no runs (stale), ensuring the guard fires before the staleness check
   const runs = { ht1: [], ht2: [], ht3: [], ag1: [] };
@@ -517,6 +517,32 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
   assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
 });
 
+
+test('detectZombies skips seed issues — never zombie-dispatch to a build lane', () => {
+  const now = Date.now();
+  const seedLabeled = {
+    id: 'sz1', identifier: 'sz1', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: null, title: 'plan something', parent_issue_id: null,
+    labels: [{ id: 'l1', name: 'idea', color: '#000' }], metadata: {},
+  };
+  const seedChildless = {
+    id: 'sz2', identifier: 'sz2', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: null, title: 'top level childless seed', parent_issue_id: null,
+    labels: [], metadata: {},
+  };
+  const notSeed = {
+    id: 'sz3', identifier: 'sz3', project_id: 'AURIGA', status: 'in_progress',
+    assignee_id: null, title: 'implement the plan', parent_issue_id: 'sz1',
+    labels: [], metadata: {},
+  };
+  const allIssues = [seedLabeled, seedChildless, notSeed];
+  const runs = { sz1: [], sz2: [], sz3: [] };
+  const z = core.detectZombies([seedLabeled, seedChildless, notSeed], runs, CFG, now, allIssues);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('sz1'), 'seed with idea label must be skipped');
+  assert.ok(!ids.includes('sz2'), 'childless+top-level seed must be skipped');
+  assert.ok(ids.includes('sz3'), 'non-seed stale issue must still be recovered');
+});
 
 // --- isSeed (PAN-6646 planning-lane routing) -------------------------------
 
@@ -1259,14 +1285,14 @@ test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => 
 
 test('detectZombies reroutes a hive story stuck on a codex lane instead of rerunning it', () => {
   const stale = Date.now() - (60 * 60 * 1000); // 1h old
-  const hiveOnCodex = { id: 'z1', identifier: 'PAN-z1', project_id: 'MEM', title: '[m-05-x] y', status: 'in_progress', assignee_id: 'A', description: HIVE_DESCRIPTION };
+  const hiveOnCodex = { id: 'z1', identifier: 'PAN-z1', project_id: 'MEM', title: '[m-05-x] y', status: 'in_progress', assignee_id: 'A', description: HIVE_DESCRIPTION, parent_issue_id: 'parent-x' };
   const runs = { 'PAN-z1': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
   const acts = core.detectZombies([hiveOnCodex], runs, CFG, Date.now());
   assert.equal(acts.length, 1);
   assert.equal(acts[0].action, 'assign'); // reroute, NOT rerun
   assert.equal(acts[0].reason, 'hive-on-noncapable-lane');
   // a non-hive story on codex is a normal rerun
-  const plainOnCodex = { id: 'z2', identifier: 'PAN-z2', project_id: 'AURIGA', title: 'plain task', status: 'in_progress', assignee_id: 'A' };
+  const plainOnCodex = { id: 'z2', identifier: 'PAN-z2', project_id: 'AURIGA', title: 'plain task', status: 'in_progress', assignee_id: 'A', parent_issue_id: 'parent-x' };
   const runs2 = { 'PAN-z2': [{ status: 'running', started_at: new Date(stale).toISOString() }] };
   const a2 = core.detectZombies([plainOnCodex], runs2, CFG, Date.now());
   assert.equal(a2[0].action, 'rerun');

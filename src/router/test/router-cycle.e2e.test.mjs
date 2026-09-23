@@ -454,7 +454,7 @@ test('route new todos: no run row appearing within the verify wait logs verify_n
 test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIssue, logs zombie_give_up, sets blocked, and gets a best-effort comment', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000); // 1h old, well past zombieStaleMs
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   // Pre-seed run history AT the cap (cfg.CAPS.zombieMaxAttempts) so detectZombies
   // gives up on it instead of recovering it.
@@ -484,7 +484,7 @@ test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIs
 test('zombie give-up: a comment failure is swallowed and never crashes the cycle', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
     status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
@@ -505,7 +505,7 @@ test('zombie give-up: a comment failure is swallowed and never crashes the cycle
 test('zombie give-up: a setIssueStatus failure is swallowed and never crashes the cycle', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A' });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
     status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
@@ -528,7 +528,7 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
   // No assignee_id → detectZombies emits action:'assign'
-  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null });
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
   runsByIdentifier[stuckIssue.identifier] = [
     { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
@@ -557,8 +557,8 @@ test('zombie rerun: per-cycle-per-agent cap is enforced — second rerun gets zo
   const stale = Date.now() - (60 * 60 * 1000);
   const tightCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 } };
   const aurigaBuildId = cfg.AGENTS['auriga-build'].id;
-  const zombie1 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId });
-  const zombie2 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId });
+  const zombie1 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId, labels: ['not-a-seed'] });
+  const zombie2 = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: aurigaBuildId, labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombie1, zombie2], cfg.AGENTS);
   const failedRun = { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() };
   runsByIdentifier[zombie1.identifier] = [failedRun];
@@ -587,7 +587,7 @@ test('zombie rerun: updates priorAgentCycleAssigns, blocking picks-loop double-d
   const tightCfg = { ...fixtureCfg, CAPS: { ...fixtureCfg.CAPS, perCyclePerAgent: 1 } };
   const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
   const stale = Date.now() - (60 * 60 * 1000);
-  const zombieIssue = makeIssue({ project_id: 'zombie-picks-proj-576', status: 'in_progress', assignee_id: aurigaBuildId });
+  const zombieIssue = makeIssue({ project_id: 'zombie-picks-proj-576', status: 'in_progress', assignee_id: aurigaBuildId, labels: ['not-a-seed'] });
   const todoIssue = makeIssue({ project_id: 'zombie-picks-proj-576', status: 'todo', labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue, todoIssue], tightCfg.AGENTS);
   runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
@@ -615,9 +615,9 @@ test('zombie rerun: updates loopRtProjected, blocking zombie-assign over-dispatc
   const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
   const stale = Date.now() - (60 * 60 * 1000);
   // Zombie rerun: existing assignee (auriga-dev/codex), stale run.
-  const rerunZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: aurigaDevId });
+  const rerunZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: aurigaDevId, labels: ['not-a-seed'] });
   // Zombie assign: no assignee → action:'assign' → calls chooseAgentForProject.
-  const assignZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: null });
+  const assignZombie = makeIssue({ project_id: 'zombie-rt-proj-576', status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
   const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([rerunZombie, assignZombie], tightCfg.AGENTS);
   runsByIdentifier[rerunZombie.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
   runsByIdentifier[assignZombie.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
