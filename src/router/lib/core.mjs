@@ -246,6 +246,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
     .filter((i) => !isHumanTodo(i, cfg))
+    .filter((i) => !isAgentParked(i))
     .filter((i) => allDepsSatisfied(i, statusById, issues));
 
   // Stable ordering: by project scan order, then by issue number ascending
