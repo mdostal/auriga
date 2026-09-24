@@ -76,14 +76,14 @@ function makeIssue(overrides = {}) {
 // which is real router behavior but not what these dispatch-shape tests are
 // exercising (mirrors mock-mca.mjs's own doc comment on this exact
 // synthesis).
-// opts.failAssignFor / opts.noRunFor: identifier sets letting a test drive
-// the inline sequence's OTHER two branches (assign failure;
-// assign-succeeds-but-no-run -> force-rerun) through the real cycle() call
-// path, the same way spawn-adapter.test.mjs drives dispatch()'s equivalent
-// branches directly against the real (unused-by-cycle()) adapter method.
+// opts.failAssignFor / opts.noRunFor / opts.failRerunFor: identifier sets
+// letting a test drive the inline sequence's branches through the real cycle()
+// call path. failRerunFor makes rerunIssue throw a rate-limit error for the
+// listed identifiers (covers zombie-assign and verify-no-run error paths).
 function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
+  const failRerunFor = opts.failRerunFor || new Set();
   const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
@@ -118,6 +118,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     rerunIssue: (identifier) => {
       calls.rerun.push({ identifier });
+      if (failRerunFor.has(identifier)) throw new Error('multica: rate limited (429)');
       runsByIdentifier[identifier] = [
         ...(runsByIdentifier[identifier] || []),
         { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
@@ -1702,4 +1703,58 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   const skips = log.byEvent('skip_blocked_runtime');
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
+});
+
+// ---- PANT-677: zombie assign assigned++ must fire AFTER rerunIssue ----
+
+test('PANT-677: zombie assign does not increment assigned when rerunIssue throws', async () => {
+  // Before fix: assigned++ was before sleepImpl + rerunIssue, so a zombie
+  // assign where rerunIssue rate-limits still counted toward result.assigned=1,
+  // over-reporting capacity consumed and leaking a budget slot.
+  // After fix: assigned++ is after rerunIssue — a throw leaves assigned=0.
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue], cfg.AGENTS, {
+    failRerunFor: new Set([zombieIssue.identifier]),
+  });
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 0, 'assigned must be 0 when zombie rerunIssue throws — PANT-677');
+  assert.ok(calls.assign.some((c) => c.identifier === zombieIssue.identifier), 'assignIssue must still be called');
+  assert.ok(calls.rerun.some((c) => c.identifier === zombieIssue.identifier), 'rerunIssue must be attempted');
+  const errors = log.byEvent('zombie_error');
+  assert.ok(errors.some((e) => e.identifier === zombieIssue.identifier), 'zombie_error must be logged on rerunIssue failure');
+});
+
+// ---- PANT-668: verify-no-run rerunIssue error must add runtime to blockedRuntimes ----
+
+test('PANT-668: rate-limit from rerunIssue in verify-no-run path blocks the runtime for subsequent picks', async () => {
+  // Before fix: the verify-no-run catch block only logged rerun_error but did
+  // NOT call blockedRuntimes.add, so the next pick for the same runtime still
+  // fired — dispatching into a quota-exhausted runtime.
+  // After fix: the catch block adds the runtime to blockedRuntimes, causing
+  // the subsequent pick's skip_blocked_runtime guard to fire.
+  const fixtureCfg = withFixtureLanes({ 'pant668-proj': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'pant668-proj', parent_issue_id: 'fake-parent' });
+  const issueB = makeIssue({ project_id: 'pant668-proj', parent_issue_id: 'fake-parent' });
+  // issueA: assign succeeds but no run starts; then rerunIssue throws a rate-limit error.
+  const { backlog, spawn, calls } = createMockAdapters([issueA, issueB], fixtureCfg.AGENTS, {
+    noRunFor: new Set([issueA.identifier]),
+    failRerunFor: new Set([issueA.identifier]),
+  });
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const rerunErrors = log.byEvent('rerun_error');
+  assert.ok(rerunErrors.some((e) => e.identifier === issueA.identifier), 'rerun_error must be logged for issueA');
+  const skips = log.byEvent('skip_blocked_runtime');
+  assert.ok(skips.some((e) => e.identifier === issueB.identifier),
+    'issueB must be skipped via skip_blocked_runtime after issueA rerunIssue rate-limited — PANT-668');
 });
