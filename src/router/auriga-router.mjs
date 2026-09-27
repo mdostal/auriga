@@ -291,6 +291,26 @@ export async function cycle(opts = {}) {
   // DISPATCH-scoped (feeds review-dispatch further down) — see the blocked->todo pass above.
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
 
+  // ---- state-machine: in_review -> done on a verified merged PR ----
+  // Each in_review issue is checked for a real merged PR via getIssuePullRequests.
+  // detectVerifiedDone requires a real merge (state=merged or merged_at set) — never
+  // fires on an open/closed PR, never fires on smoke/scratch issues or human-owned stories.
+  {
+    const prsByIssue = {};
+    for (const i of inReview) {
+      try { prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier); }
+      catch (e) { prsByIssue[i.identifier] = []; logImpl('prs_fetch_error', { identifier: i.identifier, error: e.message }); }
+    }
+    const verifiedDone = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
+    for (const vd of verifiedDone) {
+      logImpl('advance', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, kind: 'verified-done', applied: !dryRun });
+      if (!dryRun) {
+        try { backlog.setIssueStatus(vd.identifier, ISSUE_STATUS.DONE); }
+        catch (e) { logImpl('advance_error', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
+      }
+    }
+  }
+
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
   // the router owns the todo transition + unassign so a build lane can pick
