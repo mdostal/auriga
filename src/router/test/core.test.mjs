@@ -395,6 +395,45 @@ test('detectVerifiedDone: seed issue with merged planning PR is not advanced to 
   assert.equal(actionsHeuristic.length, 0, 'heuristic seed (childless top-level) with merged PR must not be advanced to done');
 });
 
+// PANT-373: a stray merged PR that merely matches the story must not advance it
+// to done when the story records its OWN (still-open) PR url — detectFalseDone
+// trusts ownPrUrl and would demote it straight back, thrashing done<->in_review.
+test('detectVerifiedDone: ownPrUrl is authoritative — stray merged PR does not advance (PANT-373)', () => {
+  const own = 'https://github.com/mdostal/auriga/pull/20';
+  const stray = { url: 'https://github.com/mdostal/auriga/pull/10', state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z', title: 'm-01 unrelated' };
+  const ownOpen = { url: own, state: 'OPEN', mergedAt: null };
+  const viaMeta = { id: 'o1', identifier: 'PANT-1', project_id: 'AURIGA', status: 'in_review', title: 'own via metadata', parent_issue_id: 'fake-parent', metadata: { pr_url: own } };
+  const viaDesc = { id: 'o2', identifier: 'PANT-2', project_id: 'AURIGA', status: 'in_review', title: 'own via description', parent_issue_id: 'fake-parent', description: `blah\npr_url: ${own}\n` };
+  const prs = { 'PANT-1': [stray, ownOpen], 'PANT-2': [stray, ownOpen] };
+  assert.deepEqual(core.detectVerifiedDone([viaMeta, viaDesc], prs), [], 'stray merged PR must not advance a story whose own PR is still open');
+
+  // The story's own PR merging does advance it (url compared loosely: protocol/trailing slash).
+  const ownMerged = { url: 'http://github.com/mdostal/auriga/pull/20/', state: 'MERGED', mergedAt: '2026-09-02T00:00:00Z' };
+  const actions = core.detectVerifiedDone([viaMeta], { 'PANT-1': [stray, ownMerged] });
+  assert.deepEqual(actions.map((a) => [a.identifier, a.action]), [['PANT-1', 'advance-done']]);
+
+  // html_url-shaped PR objects are honored too.
+  const htmlShaped = { html_url: own, state: 'closed', merged_at: '2026-09-02T00:00:00Z' };
+  assert.equal(core.detectVerifiedDone([viaMeta], { 'PANT-1': [htmlShaped] }).length, 1);
+
+  // No recorded own PR -> fallback: any matched merged PR still advances (prior behavior).
+  const noOwn = { id: 'o3', identifier: 'PANT-3', project_id: 'AURIGA', status: 'in_review', title: 'no own pr', parent_issue_id: 'fake-parent' };
+  assert.equal(core.detectVerifiedDone([noOwn], { 'PANT-3': [stray] }).length, 1);
+});
+
+// PANT-373 symmetry: with ownPrUrl set and the own PR still open, neither detector
+// flips the story — detectVerifiedDone won't advance it, and had it been done,
+// detectFalseDone would demote it. No same-cycle done<->in_review oscillation.
+test('detectVerifiedDone + detectFalseDone: stray merged PR causes no oscillation (PANT-373)', () => {
+  const own = 'https://github.com/mdostal/auriga/pull/20';
+  const stray = { url: 'https://github.com/mdostal/auriga/pull/10', state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z' };
+  const ownOpen = { url: own, state: 'OPEN' };
+  const story = { id: 'y', identifier: 'PANT-9', project_id: 'AURIGA', status: 'in_review', title: 'story y', parent_issue_id: 'fake-parent', metadata: { pr_url: own } };
+  assert.equal(core.detectVerifiedDone([story], { 'PANT-9': [stray, ownOpen] }).length, 0);
+  const demote = core.detectFalseDone([{ ...story, status: 'done' }], [ownOpen]);
+  assert.equal(demote.length, 1, 'sanity: detectFalseDone still demotes a done story whose own PR is open');
+});
+
 test('detectZombies: stale-but-old run triggers recovery, fresh done does not', () => {
   const now = Date.now();
   const old = new Date(now - 30 * 60 * 1000).toISOString();
