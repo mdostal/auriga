@@ -136,12 +136,14 @@ npm run dry        # one cycle, compute + log decisions, assign NOTHING (--once 
 npm run once       # one real cycle then exit (--once)
 
 # supervised: keep exactly ONE detached router alive, restart on death
-nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
+./supervisor.sh    # POSIX sh; node from PATH; JSONL to stdout
 ```
 
 Flags on `auriga-router.mjs`: `--once`, `--dry-run`, `--max-assign N`, `--no-zombie`.
 Env overrides: `AURIGA_PER_CYCLE_TOTAL`, `AURIGA_PER_CYCLE_PER_AGENT`, `AURIGA_CYCLE_MS`,
-`AURIGA_PIDFILE`, `AURIGA_LOG`. Lane maps, agent IDs, and caps live in
+`AURIGA_PIDFILE`, `AURIGA_LOG` (unset = JSONL to stdout), `AURIGA_HEARTBEAT_FILE`. Each cycle
+ends with a `cycle_summary` event and a heartbeat write; `bin/healthcheck.mjs` is the container
+healthcheck (see [`src/router/README.md`](src/router/README.md#observability)). Lane maps, agent IDs, and caps live in
 [`src/router/lib/config.mjs`](src/router/lib/config.mjs). See
 [`src/router/README.md`](src/router/README.md) for state-machine and human-queue details.
 
