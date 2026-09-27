@@ -1013,7 +1013,7 @@ async function runCycle(opts, state) {
       // Remote create failed — undo the pre-cancel so the issue re-enters
       // the candidate pool next cycle rather than being stranded as cancelled.
       logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
-      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
+      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch { /* next cycle retries */ }
       continue;
     }
 
