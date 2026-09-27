@@ -186,3 +186,32 @@ test('GET /api/gaps recomputes after the TTL expires', async () => {
     assert.equal(calls, 2);
   });
 });
+
+test('GET /api/gaps names the sections core-api cannot serve instead of reporting them as empty (PANT-818)', async () => {
+  const app = express();
+  // pantheon-v2-l2 adapter shape: board issues only, no listAllProjects/listAutopilots.
+  const backlog = { listAllIssues: () => ISSUES };
+  app.use(createGapsRouter(CFG, backlog, core));
+  await withServer(app, async (base) => {
+    const res = await fetch(`${base}/api/gaps`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.missing_projects, null);
+    assert.equal(body.autopilot_scheduler_gaps, null);
+    assert.match(body.unavailable.missing_projects, /core-api/);
+    assert.match(body.unavailable.autopilot_scheduler_gaps, /core-api/);
+    // The sections core-api CAN serve are still computed.
+    assert.equal(body.stories_missing_target_repo.length, 1);
+    assert.deepEqual(body.idle_lanes, ['agent-b']);
+  });
+});
+
+test('GET /api/gaps reports no unavailable sections when the adapter serves them all', async () => {
+  const app = express();
+  app.use(createGapsRouter(CFG, fakeMca(), core));
+  await withServer(app, async (base) => {
+    const body = await (await fetch(`${base}/api/gaps`)).json();
+    assert.deepEqual(body.unavailable, {});
+    assert.deepEqual(body.autopilot_scheduler_gaps, []);
+  });
+});

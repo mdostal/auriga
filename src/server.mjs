@@ -3,16 +3,22 @@
 // live lane state, and computed gaps. Data layer for the Janus UI and the
 // Cura sync-check. Phase 1 (MVP): GET-only. Phase 2 (PATCH /api/config,
 // POST /api/config/reload) is deferred.
+//
+// Board data comes ONLY through Pantheon core-api (PANT-818): the same
+// backlog adapter the MCP server and the router use (pantheon-v2-l2 by
+// default, AURIGA_BACKLOG_ADAPTER=stub for tests). No direct Multica CLI or
+// GitHub call anywhere on this surface.
 import express from 'express';
 import * as cfg from './router/lib/config.mjs';
 import * as core from './router/lib/core.mjs';
-import * as mca from './router/lib/multica.mjs';
+import { selectBacklogAdapter } from './router/lib/adapters/select-backlog.mjs';
 import { createConfigRouter } from './api/config.mjs';
 import { createLanesRouter } from './api/lanes.mjs';
 import { createGapsRouter } from './api/gaps.mjs';
 
-export function createApp() {
+export function createApp(opts = {}) {
   const app = express();
+  const backlog = opts.backlog || selectBacklogAdapter(opts.env || process.env);
 
   // Janus UI runs on a separate origin; this is a read-only API so an open
   // CORS policy is fine, but allow pinning it down via env if that changes.
@@ -26,8 +32,8 @@ export function createApp() {
 
   app.get('/healthz', (req, res) => res.json({ ok: true }));
   app.use(createConfigRouter(cfg));
-  app.use(createLanesRouter(cfg, mca, core));
-  app.use(createGapsRouter(cfg, mca, core));
+  app.use(createLanesRouter(cfg, backlog, core));
+  app.use(createGapsRouter(cfg, backlog, core));
 
   return app;
 }
