@@ -27,8 +27,11 @@ What works, honestly:
   `DEFAULT_LANE`.
 - **Pure-code state-machine transitions** — `in_progress → in_review` when the latest run is done
   and not failed; `in_review → done` **only** when a linked PR has actually merged — run status
-  alone is never trusted as completion. Both scans re-derive candidates from live board state each
-  cycle, so they're idempotent by construction.
+  alone is never trusted as completion. The PR facts come from the board's own issue→PR linkage
+  (`getIssuePullRequests`, via `core-api`). The router does no GitHub polling: per-cycle repo
+  discovery and PR listing, and the PR-driven `done → in_review` reversal, were removed in
+  PANT-717. Both scans re-derive candidates from live board state each cycle, so they're idempotent
+  by construction.
 - **Un-planned "seed" hand-off to Minerva** — a childless, top-level, unplanned ticket routes to
   the `minerva-dev` planning lane instead of a build lane (never falls back to
   `chooseAgentForProject` if the planning lane has no capacity — it skips the issue that cycle
@@ -45,7 +48,7 @@ What works, honestly:
   re-assigned), respecting `isHive` so recovery honors the same capability rule, and gives up
   cleanly (logs + comments) past a configured retry cap instead of looping forever.
 - **Safety** — only ever assigns / re-runs; never deletes or cancels. `--dry-run` computes and logs
-  every decision without touching the board. 400+ router unit/integration tests cover the pure
+  every decision without touching the board. 650+ router unit/integration tests cover the pure
   decision logic against mocked board state, plus a lint gate (`oxlint --deny-warnings`) enforced
   as the first step of `npm run test:all`.
 
