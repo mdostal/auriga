@@ -363,3 +363,36 @@ test('PANT-436: hive story idle on a hive-capable lane still restarts; non-hive 
   const actions = core.detectAssignedIdle([onHive, plainOnCodex], {}, CFG_WITH_HIVE, core.agentIdSet(CFG_WITH_HIVE.AGENTS), NOW);
   assert.deepEqual(actions.map((a) => [a.identifier, a.action]), [['PAN-1', 'start'], ['PAN-2', 'start']]);
 });
+
+// PANT-440: idle age must come from created_at / last run start, never updated_at —
+// any issue write (a comment, a label) advances updated_at and would reset the timer.
+test('PANT-440: a recent updated_at (comment) does not hide a dead-zone issue with an old created_at and zero runs', () => {
+  const issue = {
+    ...assignedTodo('PAN-440', 'A', NOW - 60 * 1000), // commented on 1 min ago
+    created_at: new Date(OLD).toISOString(),
+  };
+  const actions = core.detectAssignedIdle([issue], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-440');
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].idleAgeMs, NOW - OLD);
+});
+
+test('PANT-440: a run started within the stale window keeps an old issue out of recovery', () => {
+  const issue = { ...assignedTodo('PAN-440', 'A', OLD), created_at: new Date(OLD).toISOString() };
+  const runs = { 'PAN-440': [{ status: 'failed', created_at: new Date(NOW - 2 * 60 * 1000).toISOString() }] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 0);
+});
+
+test('PANT-440: idle age is measured from the latest run start once that is past the stale window', () => {
+  const lastRun = NOW - 30 * 60 * 1000;
+  const issue = { ...assignedTodo('PAN-440', 'A', NOW - 60 * 1000), created_at: new Date(NOW - 3 * 60 * 60 * 1000).toISOString() };
+  const runs = { 'PAN-440': [
+    { status: 'failed', created_at: new Date(NOW - 2 * 60 * 60 * 1000).toISOString() },
+    { status: 'failed', created_at: new Date(lastRun).toISOString() },
+  ] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].idleAgeMs, NOW - lastRun);
+});
