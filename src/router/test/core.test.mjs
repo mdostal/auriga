@@ -777,6 +777,48 @@ test("routing: unmarked, top-level, childless issue labeled 'not-a-seed' routes 
   assert.equal(picks[0].agent, 'auriga-dev');
 });
 
+// PANT-772 (GH #226): a tenant whose AGENTS has no planning lane (firefly-events/
+// Flayr) must not silently skip every top-level ticket as an unroutable seed.
+const { 'minerva-dev': _planning, ...AGENTS_NO_PLANNING } = CFG.AGENTS;
+const CFG_NO_PLANNING = { ...CFG, AGENTS: AGENTS_NO_PLANNING };
+
+test('routing: tenant with no planning agent dispatches a top-level unlabeled ticket to its build lane (PANT-772)', () => {
+  const issue = todo('ffe6', 'AURIGA', 6); // top-level, childless, unlabeled -> heuristic seed
+  const picks = core.selectAssignments([issue], CFG_NO_PLANNING, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'auriga-dev');
+  assert.deepEqual(picks.seedNoPlanning, [{ identifier: 'ffe6', issueId: 'ffe6', fallback: true }]);
+});
+
+test('routing: tenant with no planning agent holds (and reports) an explicitly-labeled seed (PANT-772)', () => {
+  const issue = { ...todo('ffe7', 'AURIGA', 7), labels: [{ id: 'l', name: 'idea' }] };
+  const picks = core.selectAssignments([issue], CFG_NO_PLANNING, {}, {});
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.seedNoPlanning, [{ identifier: 'ffe7', issueId: 'ffe7', fallback: false }]);
+});
+
+test('routing: with the planning agent present, seedNoPlanning stays empty (PANT-772)', () => {
+  const picks = core.selectAssignments([todo('seed5', 'AURIGA', 1)], CFG, {}, {});
+  assert.equal(picks[0].agent, 'minerva-dev');
+  assert.deepEqual(picks.seedNoPlanning, []);
+});
+
+test('isSeedForTenant: heuristic seed is a build ticket only when the tenant lacks the planning agent (PANT-772)', () => {
+  const heuristic = todo('h', 'AURIGA', 1);
+  const labeled = { ...todo('l', 'AURIGA', 2), labels: ['needs-plan'] };
+  assert.equal(core.isSeedForTenant(heuristic, [], CFG), true);
+  assert.equal(core.isSeedForTenant(heuristic, [], CFG_NO_PLANNING), false);
+  assert.equal(core.isSeedForTenant(heuristic, [], {}), true); // no AGENTS map -> unknown -> historical behaviour
+  assert.equal(core.isSeedForTenant(labeled, [], CFG_NO_PLANNING), true);
+});
+
+test('detectVerifiedDone: fallback-built top-level ticket on a no-planning tenant advances on merge (PANT-772)', () => {
+  const issue = { id: 'f1', identifier: 'FFE-6', project_id: 'AURIGA', status: 'in_review', title: 'flayr fix', parent_issue_id: null, labels: [] };
+  const prs = { 'FFE-6': [{ state: 'MERGED', mergedAt: '2026-09-27T00:00:00Z' }] };
+  assert.equal(core.detectVerifiedDone([issue], prs, CFG_NO_PLANNING, [issue]).length, 1);
+  assert.equal(core.detectVerifiedDone([issue], prs, CFG, [issue]).length, 0); // unchanged where Minerva exists
+});
+
 test('routing: issue with a parent_issue_id is not seed-classified, uses the normal build lane', () => {
   const issue = story('story1', 'AURIGA', 1, 'epic1');
   const picks = core.selectAssignments([issue], CFG, {}, {});
