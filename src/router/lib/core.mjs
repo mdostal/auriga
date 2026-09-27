@@ -1038,6 +1038,12 @@ export function agentIdSet(agents = {}) {
   return new Set(Object.values(agents).map((a) => a && a.id).filter(Boolean));
 }
 
+// Timestamp -> epoch ms; missing/unparseable values become 0 so they never win a max().
+function toMs(ts) {
+  const ms = ts ? new Date(ts).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 // Detect assigned `todo` issues that should have dispatched already but are
 // still idle. These do not count as capacity, so recovery is a separate bounded
 // pass instead of part of route selection.
@@ -1060,11 +1066,19 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
     // must be recovered just like any other assigned-idle issue.
 
-    const touchedAt = i.updated_at || i.created_at;
-    const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
+    // PANT-440: idle age is measured from the LATER of issue creation and the
+    // last run start — explicitly NOT i.updated_at. Any write (a comment, a
+    // label, the router's own side-effects) advances updated_at, so using it
+    // let a genuine dead-zone reset its stale timer forever. updated_at is only
+    // a fallback for records that carry no created_at.
+    const runs = runsByIssue[i.identifier] || [];
+    const baseTime = Math.max(
+      toMs(i.created_at || i.updated_at),
+      ...runs.map((r) => toMs(r.created_at || r.dispatched_at || r.started_at)),
+    );
+    const idleAgeMs = baseTime > 0 ? now - baseTime : Infinity;
     if (idleAgeMs < staleMs) continue;
 
-    const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
 
     if (reviewLaneIds.has(i.assignee_id)) {
