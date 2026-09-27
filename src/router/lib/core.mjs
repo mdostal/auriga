@@ -362,7 +362,7 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    if (isSeedByLabel(i)) continue; // label-only: heuristic fires on any top-level in_progress story
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
