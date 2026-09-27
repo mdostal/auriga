@@ -237,17 +237,9 @@ const seedTodo = (id, assigneeId) => ({
   parent_issue_id: null, labels: [],
 });
 
-test('PANT-550: detectAssignedIdle skips explicitly-labelled seed (idea label)', () => {
-  const seed = { ...seedTodo('PAN-99', 'M'), labels: [{ id: '1', name: 'idea' }] };
-  const actions = core.detectAssignedIdle([seed], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, [seed]);
-  assert.equal(actions.length, 0, 'explicitly-labelled seed must be excluded from idle recovery');
-});
-
-test('PANT-550: detectAssignedIdle skips childless top-level issue (heuristic seed)', () => {
-  const seed = seedTodo('PAN-10', 'M'); // top-level, no children in allIssues
-  const actions = core.detectAssignedIdle([seed], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, [seed]);
-  assert.equal(actions.length, 0, 'childless top-level issue must be excluded from idle recovery');
-});
+// PANT-550's "skip seeds" tests were superseded by PANT-643 (see the PANT-643
+// test above): detectAssignedIdle reruns the CURRENT assignee and never
+// re-routes, so assigned seeds must stay recoverable here.
 
 test('PANT-550: detectAssignedIdle does NOT skip top-level issue that already has children', () => {
   // Parent is top-level but has a child in allIssues → isSeed returns false → eligible for recovery.
@@ -270,15 +262,18 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
 });
 
 
-test('PANT-577: detectAssignedIdle skips seed issues (isSeed guard)', () => {
-  // An explicitly-labelled seed assigned to an agent must not enter idle recovery —
-  // seeds should only be re-dispatched through the planning lane, not via assigned-idle.
+test('PANT-643: detectAssignedIdle does NOT skip seed issues — rerunIssue re-enqueues the current agent, never re-routes to build', () => {
+  // detectAssignedIdle calls spawn.rerunIssue, which re-enqueues the CURRENT assignment.
+  // A seed assigned to minerva-dev must be recoverable: skipping it leaves it permanently
+  // stranded (PANT-643). The isSeed guard was removed because the semantics here are safe:
+  // rerun never re-routes to a build lane; it fires against whoever is already assigned.
   const seed = { ...assignedTodo('PAN-seed', 'M'), labels: ['idea'], parent_issue_id: null };
-  const nonSeed = assignedTodo('PAN-child', 'M'); // has parent_issue_id → not a seed
+  const nonSeed = assignedTodo('PAN-child', 'M'); // has parent_issue_id → structural non-seed
   const allIssues = [seed, nonSeed];
   const actions = core.detectAssignedIdle(allIssues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
-  assert.equal(actions.length, 1, 'seed must be excluded; non-seed child must still be detected');
-  assert.equal(actions[0].identifier, 'PAN-child');
+  assert.equal(actions.length, 2, 'PANT-643: both seed and non-seed must be detected — rerunIssue is safe for both');
+  assert.ok(actions.some((a) => a.identifier === 'PAN-seed'), 'explicitly-labelled seed must be recovered');
+  assert.ok(actions.some((a) => a.identifier === 'PAN-child'), 'non-seed child must still be detected');
 });
 
 // PANT-736: review-lane agent on a todo ticket must be unassigned, not re-dispatched.
