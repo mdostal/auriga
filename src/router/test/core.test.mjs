@@ -711,6 +711,59 @@ test('routing: a decomposed non-seed story in Pantheon Core routes to the build 
   assert.equal(byId['pc-story'], 'auriga-build'); // build lane, never DEFAULT_LANE codex
 });
 
+// PANT-518: seed + hand-up label — planning lane unavailable must escalate, not silently defer.
+
+test('routing: seed with hand-up label and missing planning agent escalates to handUps (PANT-518)', () => {
+  const issue = { ...todo('sh1', 'AURIGA', 1), labels: ['idea', 'hand-up'] };
+  const cfgNoPlanner = { ...CFG, AGENTS: { ...CFG.AGENTS } };
+  delete cfgNoPlanner.AGENTS['minerva-dev'];
+  const picks = core.selectAssignments([issue], cfgNoPlanner, {}, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0, 'seed must NOT be dispatched to a build agent');
+  assert.deepEqual(picks.handUps, [{ identifier: 'sh1', issueId: 'sh1', reason: 'no-local-route' }]);
+});
+
+test('routing: seed with hand-up label and planning agent at maxInflight cap escalates to handUps (PANT-518)', () => {
+  const issue = { ...todo('sh2', 'AURIGA', 1), labels: ['idea', 'hand-up'] };
+  // Saturate minerva-dev's maxInflight (3) so agentHasCapacity returns false.
+  const inflight = { 'minerva-dev': 3 };
+  const picks = core.selectAssignments([issue], CFG, inflight, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0, 'seed must NOT be dispatched to a build agent');
+  assert.deepEqual(picks.handUps, [{ identifier: 'sh2', issueId: 'sh2', reason: 'no-local-route' }]);
+});
+
+test('routing: seed with hand-up label and blocked planning runtime escalates to handUps (PANT-518)', () => {
+  const issue = { ...todo('sh3', 'AURIGA', 1), labels: ['idea', 'hand-up'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {
+    blockedRuntimes: new Set(['claude-planning']),
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 0, 'seed must NOT be dispatched to a build agent');
+  assert.deepEqual(picks.handUps, [{ identifier: 'sh3', issueId: 'sh3', reason: 'no-local-route' }]);
+});
+
+test('routing: seed with hand-up label and working planning route dispatches to minerva-dev, not handUps (PANT-518)', () => {
+  const issue = { ...todo('sh4', 'AURIGA', 1), labels: ['idea', 'hand-up'] };
+  const picks = core.selectAssignments([issue], CFG, {}, {
+    parentBoardConfig: { baseUrl: 'http://core-api:3012', projectId: 'parent-proj' },
+  });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'minerva-dev');
+  assert.deepEqual(picks.handUps, [], 'hand-up must not fire when planning route is available');
+});
+
+test('routing: seed with hand-up label and no planning route but no parentBoardConfig produces no handUps (PANT-518)', () => {
+  const issue = { ...todo('sh5', 'AURIGA', 1), labels: ['idea', 'hand-up'] };
+  const cfgNoPlanner = { ...CFG, AGENTS: { ...CFG.AGENTS } };
+  delete cfgNoPlanner.AGENTS['minerva-dev'];
+  const picks = core.selectAssignments([issue], cfgNoPlanner, {}, {});
+  assert.equal(picks.length, 0);
+  assert.deepEqual(picks.handUps, []);
+});
+
 test('depsSatisfied: gates a story on its depends_on metadata (only done/cancelled unblock)', () => {
   const statusById = new Map([['dep-done', 'done'], ['dep-open', 'in_progress'], ['dep-cxl', 'cancelled']]);
   assert.equal(core.depsSatisfied({ metadata: {} }, statusById), true); // no deps

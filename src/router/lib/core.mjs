@@ -278,29 +278,39 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     // Un-planned seeds MUST route to the Minerva planning lane, never a build
     // lane — and if the planning lane has no capacity this cycle, skip the
     // issue entirely rather than falling back to chooseAgentForProject.
+    // PANT-518: when the planning lane is unavailable, fall through to the
+    // isHandUp check (below) rather than always continuing — a seed with the
+    // hand-up label and no planning route must escalate, not silently defer.
     if (isSeed(issue, issues) && !isHiveStory(issue)) {
-      if (!cfg.AGENTS[PLANNING_AGENT]) continue;
-      if (!agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) continue;
-      const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
-      if (blockedRuntimes.has(runtime)) continue;
-      if ((projected.perAgentCycle[PLANNING_AGENT] || 0) >= maxPerAgent) continue;
-      const seedDecision = assignmentDecision(issue, PLANNING_AGENT, cfg, opts);
-      if (seedDecision.action === 'noop') continue;
-
-      projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
-      projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
-      projected.perAgentCycle[PLANNING_AGENT] = (projected.perAgentCycle[PLANNING_AGENT] || 0) + 1;
-
-      chosen.push({
-        identifier: issue.identifier,
-        issueId: issue.id,
-        projectId: issue.project_id,
-        lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
-        agent: PLANNING_AGENT,
-        runtime,
-        assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
-        assignmentReason: seedDecision.reason,
-      });
+      let seedHandled = false;
+      if (cfg.AGENTS[PLANNING_AGENT]
+          && agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) {
+        const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
+        if (!blockedRuntimes.has(runtime) && (projected.perAgentCycle[PLANNING_AGENT] || 0) < maxPerAgent) {
+          const seedDecision = assignmentDecision(issue, PLANNING_AGENT, cfg, opts);
+          if (seedDecision.action !== 'noop') {
+            projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
+            projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
+            projected.perAgentCycle[PLANNING_AGENT] = (projected.perAgentCycle[PLANNING_AGENT] || 0) + 1;
+            chosen.push({
+              identifier: issue.identifier,
+              issueId: issue.id,
+              projectId: issue.project_id,
+              lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
+              agent: PLANNING_AGENT,
+              runtime,
+              assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
+              assignmentReason: seedDecision.reason,
+            });
+          }
+          seedHandled = true; // dispatched or noop — either way the issue is handled
+        }
+      }
+      // Seeds never fall through to build-lane dispatch. When the planning
+      // lane had no route, check hand-up before skipping this cycle.
+      if (!seedHandled && isHandUp(issue) && opts.parentBoardConfig) {
+        handUps.push({ identifier: issue.identifier, issueId: issue.id, reason: 'no-local-route' });
+      }
       continue;
     }
 
