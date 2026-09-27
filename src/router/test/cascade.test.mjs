@@ -12,7 +12,7 @@ function statusMap(issues) {
 
 test('cascade: a completed parent enqueues its blocked dependent (metadata dep)', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', labels: ['not-a-seed'], metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -23,7 +23,7 @@ test('cascade: a completed parent enqueues its blocked dependent (metadata dep)'
 
 test('cascade: also enqueues a TODO dependent whose deps are now satisfied', () => {
   const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', metadata: { depends_on: 'A' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'todo', title: 'child', labels: ['not-a-seed'], metadata: { depends_on: 'A' } };
   const issues = [parent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 1);
@@ -33,7 +33,7 @@ test('cascade: also enqueues a TODO dependent whose deps are now satisfied', () 
 test('cascade: does NOT enqueue while a sibling dep is still unmet (genuine gate)', () => {
   const doneParent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'p1' };
   const openParent = { id: 'C', identifier: 'PAN-3', project_id: 'PROJ', status: 'todo', title: 'p2' };
-  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', metadata: { depends_on: 'A,C' } };
+  const child = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'child', labels: ['not-a-seed'], metadata: { depends_on: 'A,C' } };
   const issues = [doneParent, openParent, child];
   const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
   assert.equal(acts.length, 0, 'child must stay blocked until BOTH deps are done');
