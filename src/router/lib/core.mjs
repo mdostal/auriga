@@ -73,7 +73,7 @@ const HIVE_STEP_AGENT_RE = /\bagent:\s*(researcher|developer|tester|reviewer)\b/
 
 export function isHiveStory(issue = {}) {
   const labels = Array.isArray(issue.labels) ? issue.labels : [];
-  if (labels.some((l) => HIVE_LABELS.has(String(l).toLowerCase()))) return true;
+  if (labels.some((l) => HIVE_LABELS.has((typeof l === 'string' ? l : (l && l.name) || '').toLowerCase()))) return true;
   const desc = issue.description || '';
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
@@ -384,7 +384,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 // (see classifyRun) is the only signal. Only considers issues currently
 // in_progress, so a re-scan after the transition naturally stops re-firing
 // (the issue is no longer in the input set) — idempotent by construction.
-export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, allIssues = []) {
+export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
@@ -409,12 +409,13 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 // pantheon-owns-multica-board-bridge cutover; GH #81 found this function
 // still checking the OLD Multica-native shape's casing (lowercase
 // 'merged'/snake_case merged_at) and never firing on a real one.
-export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}) {
+export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of inReviewIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds have planning PRs that must not advance the epic to done
     const prs = prsByIssue[i.identifier] || [];
     const merged = prs.some(isPrMerged);
     if (merged) {
@@ -439,8 +440,10 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
   return false;
 }
 
-export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
+export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), _allIssues = []) {
   const actions = [];
+  // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
+  const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
@@ -473,7 +476,8 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
-    if (runs.length >= cfg.CAPS.zombieMaxAttempts) {
+    const buildRuns = runs.filter((r) => !reviewAgentIds.has(r.agent_id));
+    if (buildRuns.length >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({
         identifier: i.identifier,
         issueId: i.id,
@@ -606,11 +610,11 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const giveUps = [];
   const projected = {};
   for (const i of ordered) {
-    if (actions.length >= maxTotal) break;
+    if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue; // PANT-675: still evaluate already-assigned issues (potential give-ups) after budget consumed
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
-    if (isSeedByLabel(i)) continue; // PANT-737: seeds are planning-lane; never dispatch a review run for them
+    if (isSeedByLabel(i)) continue; // PANT-625/PANT-737: seeds are planning-lane; never dispatch a review run for them
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -633,11 +637,12 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         });
         continue;
       }
-      const agentRt = cfg.AGENTS[idToName[i.assignee_id]]?.runtime;
-      if (agentRt && blockedRuntimes.has(agentRt)) continue; // PANT-588: don't consume the slot
+      const rerAgentName = idToName[i.assignee_id];
+      const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
+      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-588/PANT-666: don't consume the slot re-dispatching into a blocked runtime
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-        agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',
+        agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
       });
       continue;
     }
@@ -647,7 +652,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected);
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
     actions.push({
@@ -694,7 +699,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
-  const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+  const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -730,9 +735,9 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
+    if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // seeds must not be auto-unblocked into selectAssignments' planning lane re-dispatch
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -771,12 +776,13 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = [], cfg = {}) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (allIssues.length > 0 && isSeed(i, allIssues)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and
@@ -854,6 +860,7 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
+    if (isSeed(parent, issues)) continue; // PANT-627: seed epics with planning labels must not auto-close
     const pst = (parent.status || '').toLowerCase();
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
@@ -912,7 +919,7 @@ export function dependsOnAny(issue, completedIds, allIssues = []) {
   }
   const slugs = descStoryDeps(issue);
   if (slugs.length) {
-    const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
     for (const slug of slugs) {
       const dep = resolveDepSibling(slug, siblings);
       if (dep && completedIds.has(dep.id)) return true;
@@ -942,7 +949,11 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
     if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
-    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue; // already assigned+queued (inflight)
+    // Already assigned+queued: the cascade path would re-route it via
+    // chooseAgentForProject and reassign it to whichever lane agent has room.
+    // Kept over main's PANT-662 removal (sync/main-into-dev); an idle assigned
+    // todo is recovered by detectAssignedIdle instead, on its CURRENT assignee.
+    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue;
     if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
@@ -961,7 +972,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 // status as the formal "send back" signal; the router owns the transition to
 // todo + unassign (the router must never rely solely on agent free-text for a
 // status mutation the state machine should handle).
-export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssues = []) {
+export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of changesRequestedIssues) {
     if (isSmokeScratch(i.title)) continue;
@@ -989,7 +1000,7 @@ export function agentIdSet(agents = {}) {
 // Detect assigned `todo` issues that should have dispatched already but are
 // still idle. These do not count as capacity, so recovery is a separate bounded
 // pass instead of part of route selection.
-export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), _allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
   // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
   // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
@@ -1004,7 +1015,9 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    // PANT-643: do NOT guard seeds here — detectAssignedIdle calls rerunIssue (re-enqueues the
+    // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
+    // must be recovered just like any other assigned-idle issue.
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
@@ -1038,6 +1051,35 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
       idleAgeMs,
       action: 'start',
       reason: !lr ? 'assigned-todo-no-runs' : (classified.failed ? 'assigned-todo-last-run-failed' : 'assigned-todo-stale'),
+    });
+  }
+  return actions;
+}
+
+// Detect `todo` issues assigned to an agent that is no longer in cfg.AGENTS
+// (archived or removed agent). These slip through every dispatch pass:
+//   - selectAssignments: has an assignee that is not router-managed → skipped
+//   - detectZombies: status is todo, not in_progress → skipped
+//   - detectAssignedIdle: knownAgentIds.has(i.assignee_id) is false → skipped
+// The only fix is to unassign them so they re-enter the normal candidate pool
+// as fresh, unassigned todos for selectAssignments to route next cycle.
+// (PANT-684)
+export function detectArchivedAssignments(todoIssues, cfg, knownAgentIds = agentIdSet(cfg.AGENTS)) {
+  const actions = [];
+  for (const i of todoIssues) {
+    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!i.assignee_id || knownAgentIds.has(i.assignee_id)) continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      assigneeId: i.assignee_id,
+      projectId: i.project_id,
+      lane: cfg.PROJECT_NAMES?.[i.project_id] || i.project_id,
+      action: 'unassign',
+      reason: 'archived-agent',
     });
   }
   return actions;

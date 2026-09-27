@@ -76,15 +76,16 @@ function makeIssue(overrides = {}) {
 // which is real router behavior but not what these dispatch-shape tests are
 // exercising (mirrors mock-mca.mjs's own doc comment on this exact
 // synthesis).
-// opts.failAssignFor / opts.noRunFor: identifier sets letting a test drive
-// the inline sequence's OTHER two branches (assign failure;
-// assign-succeeds-but-no-run -> force-rerun) through the real cycle() call
-// path, the same way spawn-adapter.test.mjs drives dispatch()'s equivalent
-// branches directly against the real (unused-by-cycle()) adapter method.
+// opts.failAssignFor / opts.noRunFor / opts.failRerunFor: identifier sets
+// letting a test drive the inline sequence's branches through the real cycle()
+// call path. failRerunFor makes rerunIssue throw a rate-limit error for the
+// listed identifiers (covers zombie-assign, zombie-rerun, verify-no-run, and
+// review-dispatch error paths without needing spawn-adapter.test.mjs's adapter-level fixture).
 function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
-  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
+  const failRerunFor = opts.failRerunFor || new Set();
+  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [], metadata: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
 
@@ -100,6 +101,11 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     commentOnIssue: (identifier, body) => {
       calls.comment.push({ identifier, body });
+    },
+    setIssueMetadata: (identifier, metadataObj) => {
+      calls.metadata.push({ identifier, metadataObj });
+      const issue = findIssue(identifier);
+      if (issue) issue.metadata = { ...issue.metadata, ...metadataObj };
     },
   };
 
@@ -118,6 +124,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     rerunIssue: (identifier) => {
       calls.rerun.push({ identifier });
+      if (failRerunFor.has(identifier)) throw new Error('multica: rate limited (429)');
       runsByIdentifier[identifier] = [
         ...(runsByIdentifier[identifier] || []),
         { status: 'in_progress', created_at: new Date().toISOString(), dispatched_at: new Date().toISOString() },
@@ -230,8 +237,8 @@ test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within on
 // attempted to dispatch review for a real PANT-* dostal-tech ticket).
 test('selectReviewDispatch is never handed another tenant\'s in_review issue — dispatch stays scoped to cfg.PROJECT_IDS', async () => {
   const OWN_PROJECT = projectId('Pantheon Core');
-  const ownIssue = makeIssue({ project_id: OWN_PROJECT, status: 'in_review' });
-  const foreignIssue = makeIssue({ project_id: 'foreign-tenant-project', status: 'in_review' });
+  const ownIssue = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const foreignIssue = makeIssue({ project_id: 'foreign-tenant-project', status: 'in_review', parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([ownIssue, foreignIssue], cfg.AGENTS);
   // Simulate the REAL production adapter's board-wide discovery: listAllProjectIds
   // returns every project it knows about, including ones outside this tenant's
@@ -269,7 +276,7 @@ test('unblock / parent-rollup / run-completion / changeback all stay scoped to c
 
   // ---- unblock: blocked issue whose declared dep is already done ----
   const ownDep = makeIssue({ project_id: OWN_PROJECT, status: 'done' });
-  const ownBlocked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', metadata: { depends_on: ownDep.id } });
+  const ownBlocked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: ownDep.id } });
   const foreignDep = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done' });
   const foreignBlocked = makeIssue({ project_id: FOREIGN_PROJECT, status: 'blocked', metadata: { depends_on: foreignDep.id } });
 
@@ -280,12 +287,13 @@ test('unblock / parent-rollup / run-completion / changeback all stay scoped to c
   const foreignChild = makeIssue({ project_id: FOREIGN_PROJECT, status: 'done', parent_issue_id: foreignParent.id });
 
   // ---- run-completion: in_progress issue whose latest run already completed ----
-  const ownInProgress = makeIssue({ project_id: OWN_PROJECT, status: 'in_progress' });
-  const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress' });
+  // must carry not-a-seed so detectRunCompletions (PANT-542 guard) doesn't skip it
+  const ownInProgress = makeIssue({ project_id: OWN_PROJECT, status: 'in_progress', labels: ['not-a-seed'] });
+  const foreignInProgress = makeIssue({ project_id: FOREIGN_PROJECT, status: 'in_progress', labels: ['not-a-seed'] });
 
   // ---- changeback: changes_requested issue, no other precondition ----
-  const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
-  const foreignChangeback = makeIssue({ project_id: FOREIGN_PROJECT, status: 'changes_requested', assignee_id: 'someone' });
+  const ownChangeback = makeIssue({ project_id: OWN_PROJECT, status: 'changes_requested', assignee_id: 'someone', parent_issue_id: 'fake-parent' });
+  const foreignChangeback = makeIssue({ project_id: FOREIGN_PROJECT, status: 'changes_requested', assignee_id: 'someone', parent_issue_id: 'fake-parent' });
 
   const boardIssues = [
     ownDep, ownBlocked, foreignDep, foreignBlocked,
@@ -452,6 +460,85 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
   assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
 });
 
+// ---- PANT-444: give-up paths must write metadata.blocked_reason ----
+// Without blocked_reason, isAgentParked() returns false and the issue
+// re-enters the cascade/unblock loops on the very next cycle.
+
+test('PANT-444: zombie give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'zombie give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'zombie-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  // verify the in-memory issue object now satisfies isAgentParked
+  const issue = stuckIssue;
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  assert.ok(typeof r === 'string' && r.trim() !== '', 'isAgentParked guard must now return true');
+});
+
+test('PANT-444: zombie give-up: setIssueMetadata failure is swallowed and never crashes the cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  backlog.setIssueMetadata = () => { throw new Error('metadata API down'); };
+  const log = createLogSink();
+
+  await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
+
+  assert.equal(log.byEvent('zombie_give_up').length, 1);
+  assert.equal(log.byEvent('zombie_give_up_error').filter((e) => e.op === 'set-blocked-reason').length, 1);
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'setIssueStatus(blocked) must still succeed even when setIssueMetadata fails');
+});
+
+test('PANT-444: review give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewMaxAttempts = 2;
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant444-review-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const stuckIssue = makeIssue({
+    project_id: 'pant444-review-proj', status: 'in_review',
+    assignee_id: REVIEW_AGENT_ID, labels: ['not-a-seed'],
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: reviewMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+    agent_id: REVIEW_AGENT_ID,
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const giveUps = log.byEvent('review_give_up');
+  assert.equal(giveUps.length, 1, 'review_give_up must be logged');
+  assert.equal(giveUps[0].identifier, stuckIssue.identifier);
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'review give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'review-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'review give-up must also set status to blocked');
+});
+
 // ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----
 
 test('zombie assign: an unassigned in_progress zombie gets assignIssue then rerunIssue (PANT-409)', async () => {
@@ -472,6 +559,39 @@ test('zombie assign: an unassigned in_progress zombie gets assignIssue then reru
   assert.ok(calls.rerun.some((c) => c.identifier === stuckIssue.identifier), 'zombie assign must call rerunIssue after assignIssue (PANT-409)');
   const zombieLogs = log.byEvent('zombie');
   assert.ok(zombieLogs.some((z) => z.identifier === stuckIssue.identifier), 'zombie event must be logged');
+});
+
+// ---- PANT-614: zombie assign path missing blockedRuntimes check ----
+
+test('zombie assign: skips with assignee-runtime-blocked when chooseAgentForProject selects a rate-limited runtime (PANT-614)', async () => {
+  // Bug: zombie assign path (else branch) never checked blockedRuntimes after
+  // chooseAgentForProject — dispatching into a rate-limited runtime.
+  //
+  // blockedRuntimes is populated by the route-new-todos pass (which runs AFTER
+  // zombie recovery in cycle order). opts.initialBlockedRuntimes pre-seeds the
+  // Set so the zombie recovery pass sees it as blocked — the same guard the
+  // zombie-rerun path already applies (PANT-511) and that the issue description
+  // asks the assign path to mirror.
+  const fixtureCfg = withFixtureLanes({ 'zombie-blocked-rt-614': ['auriga-build'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({ project_id: 'zombie-blocked-rt-614', status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['claude']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === zombieIssue.identifier),
+    'zombie assign must NOT call assignIssue when the selected runtime is blocked (PANT-614)');
+  // With PANT-585, blockedRuntimes is now passed into chooseAgentForProject which filters
+  // internally — returning null instead of a blocked agent. The reason is 'no-lane-capacity'
+  // rather than 'assignee-runtime-blocked', but the invariant (no dispatch) is preserved.
+  const skips = log.byEvent('zombie_skip').filter(
+    (e) => e.identifier === zombieIssue.identifier,
+  );
+  assert.equal(skips.length, 1, 'zombie must be skipped (not dispatched) when the only eligible runtime is blocked (PANT-614/585)');
 });
 
 // ---- PANT-576: zombie rerun path missing per-cycle-per-agent cap and counter updates ----
@@ -854,7 +974,7 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
   };
   const saturatingIssue = makeIssue({ project_id: 'cascade-proj', status: 'in_progress', assignee_id: tightCfg.AGENTS['auriga-dev'].id });
   const doneParent = makeIssue({ project_id: 'cascade-proj', status: 'done' });
-  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', metadata: { depends_on: doneParent.id } });
+  const blockedChild = makeIssue({ project_id: 'cascade-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
   const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, doneParent, blockedChild], tightCfg.AGENTS);
   const log = createLogSink();
 
@@ -1046,6 +1166,63 @@ test('cascade: dispatches normally when last run completed beyond redispatchCool
     'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
 });
 
+// PANT-431: detectVerifiedDone + selectReviewDispatch same-cycle stale-snapshot
+// regression. When a merged PR advances an in_review issue to done in the same
+// cycle that its review run has gone stale, selectReviewDispatch must NOT emit
+// a rerun-review dispatch for it — the issue is already done.
+test('an in_review issue advanced to done by a merged PR in the same cycle is never re-dispatched for review (PANT-431)', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const FIXED_NOW = Date.now();
+  const reviewAgentId = cfg.AGENTS['auriga-review'].id;
+  const story = makeIssue({
+    project_id: AURIGA,
+    status: 'in_review',
+    assignee_id: reviewAgentId,
+    parent_issue_id: 'fake-parent',
+  });
+  // Stale run: completed well beyond zombieStaleMs ago so selectReviewDispatch
+  // would hit the rerun-review branch if the issue were still present.
+  const staleAge = (cfg.CAPS.zombieStaleMs ?? 20 * 60 * 1000) + 60 * 60 * 1000;
+  const staleAt = new Date(FIXED_NOW - staleAge).toISOString();
+  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS);
+  backlog.getIssuePullRequests = (identifier) => (identifier !== story.identifier ? [] : [{
+    number: 99,
+    title: `fix: ${story.identifier} implementation`,
+    headRefName: `fix/${story.identifier.toLowerCase()}-impl`,
+    body: story.identifier,
+    state: 'merged',
+    merged_at: new Date(FIXED_NOW - 5000).toISOString(),
+    url: `https://github.com/acme/repo/pull/99`,
+  }]);
+  // Seed the stale run so selectReviewDispatch sees it; it must NOT act on it.
+  backlog.getIssueRuns = (identifier) => {
+    if (identifier === story.identifier) {
+      return [{ status: 'completed', completed_at: staleAt, created_at: staleAt }];
+    }
+    return [];
+  };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
+
+  const advanced = log.byEvent('advance').find(
+    (e) => e.identifier === story.identifier && e.to === 'done'
+  );
+  assert.ok(advanced, 'detectVerifiedDone must advance the in_review story to done via the merged PR');
+
+  const reviewEvents = log.byEvent('review').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewEvents.length, 0,
+    'selectReviewDispatch must not emit a review event for an issue already advanced to done this cycle');
+
+  const reviewDispatched = log.byEvent('review_dispatched').filter((e) => e.identifier === story.identifier);
+  assert.equal(reviewDispatched.length, 0,
+    'must not fire a review_dispatched log event for a just-done ticket');
+
+  const reruns = calls.rerun.filter((r) => r.identifier === story.identifier);
+  assert.equal(reruns.length, 0,
+    'spawn.rerunIssue must not be called for an issue that was advanced to done in the same cycle');
+});
+
 test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
   // Three separate blocked stories that can all cascade (each depends on a different done
   // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev
@@ -1102,6 +1279,52 @@ test('cascade: per-cycle-per-agent cap is enforced across multiple cascade itera
     `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
 });
 
+test('cascade: per-cycle-per-agent cap is enforced on existing-assignee rerun path when multiple cascade candidates share an assignee (PANT-566)', async () => {
+  // Bug: the cap pre-check at line 475 is `if (agent && ...)` — never fires when
+  // agent===null. Two blocked children both have the same existing assignee. With
+  // perCyclePerAgent=1, the second rerun must be skipped (cap already hit by first).
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+    AGENTS: {
+      ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }).AGENTS,
+      'auriga-dev': {
+        ...withFixtureLanes({ 'cascade-pca-proj-566': ['auriga-dev'] }).AGENTS['auriga-dev'],
+        maxInflight: 1,
+      },
+    },
+  };
+  const existingAgentId = fixtureCfg.AGENTS['auriga-dev'].id;
+  // saturatingIssue fills auriga-dev's inflight slot so chooseAgentForProject returns null.
+  const saturatingIssue = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_progress', assignee_id: existingAgentId });
+  const inReviewParentA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const inReviewParentB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'in_review', parent_issue_id: 'fake-parent' });
+  // Two blocked children with the same existing assignee auriga-dev.
+  const childA = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentA.id } });
+  const childB = makeIssue({ project_id: 'cascade-pca-proj-566', status: 'blocked', assignee_id: existingAgentId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParentB.id } });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParentA, inReviewParentB, childA, childB], fixtureCfg.AGENTS,
+  );
+  // Both parents have merged PRs so detectVerifiedDone advances them to done,
+  // unblocking both children for the cascade pass.
+  backlog.getIssuePullRequests = (identifier) =>
+    [inReviewParentA.identifier, inReviewParentB.identifier].includes(identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const reruns = calls.rerun.filter((r) => [childA.identifier, childB.identifier].includes(r.identifier));
+  assert.strictEqual(reruns.length, 1,
+    `perCyclePerAgent=1 must cap existing-assignee reruns — exactly 1 of 2 children should be rerun, got ${reruns.length}`);
+  const capSkips = log.byEvent('cascade_skip').filter(
+    (e) => e.reason === 'per-cycle-per-agent-cap' &&
+      [childA.identifier, childB.identifier].includes(e.identifier),
+  );
+  assert.strictEqual(capSkips.length, 1,
+    `expected exactly 1 cascade_skip(per-cycle-per-agent-cap) for the second child, got ${capSkips.length}`);
+});
+
 // ---- PANT-549: build-dispatch picks loop must skip blocked runtimes ----------
 // blockedRuntimes is populated in the picks loop itself (when assignIssue throws
 // a rate-limit error). Without a guard at the top of the loop body, subsequent
@@ -1125,6 +1348,56 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   const skips = log.byEvent('skip_blocked_runtime');
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
+});
+
+test('cascade: existing-assignee rerun updates inflight, blocking over-dispatch to the same agent in the picks loop (PANT-596)', async () => {
+  // Bug: cascade existing-assignee rerun path did not update inflight[existingAgentName].
+  // Without fix: inflight['auriga-build']=0 after cascade rerun → picks sees
+  // agentNow=0 < maxInflight=1 and dispatches picksTodo to auriga-build — over-dispatch.
+  // With fix: inflight['auriga-build']=1 → agentHasCapacity returns false → picks
+  // does NOT dispatch picksTodo.
+  //
+  // Setup: cascade-596-proj has codex lane (auriga-dev / heimdall-dev-codex).
+  // saturatingIssue fills runtimeInflight['codex']=1=cap → chooseAgentForProject returns null.
+  // blockedChild has existing assignee auriga-build (claude runtime, maxInflight=1) →
+  // existing-assignee rerun path fires. picksTodo is in picks-596-proj lane ['auriga-build'].
+  const fixtureCfg = withFixtureLanes({
+    'cascade-596-proj': ['auriga-dev', 'heimdall-dev-codex'],
+    'picks-596-proj': ['auriga-build'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
+    AGENTS: {
+      ...fixtureCfg.AGENTS,
+      'auriga-build': { ...fixtureCfg.AGENTS['auriga-build'], maxInflight: 1 },
+    },
+  };
+  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const saturatingIssue = makeIssue({ project_id: 'cascade-596-proj', status: 'in_progress', assignee_id: aurigaDevId });
+  const inReviewParent = makeIssue({ project_id: 'cascade-596-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const blockedChild = makeIssue({
+    project_id: 'cascade-596-proj', status: 'blocked',
+    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+    parent_issue_id: 'fake-parent',
+  });
+  const picksTodo = makeIssue({ project_id: 'picks-596-proj', status: 'todo', parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParent, blockedChild, picksTodo], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier
+      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must rerun blockedChild via existing-assignee path (codex lane full)');
+  assert.ok(!calls.assign.some((a) => a.identifier === picksTodo.identifier),
+    'picks must NOT dispatch picksTodo — cascade rerun consumed auriga-build maxInflight=1 slot; ' +
+    'without PANT-596 fix inflight is stale and picks over-dispatches to the same agent');
 });
 
 test('cascade: existing-assignee rerun counts toward assigned — maxAssign blocks a second dispatch in the same cycle (PANT-582)', async () => {
@@ -1153,10 +1426,10 @@ test('cascade: existing-assignee rerun counts toward assigned — maxAssign bloc
   const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
   const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
   const saturatingIssue = makeIssue({ project_id: 'cascade-582-proj', status: 'in_progress', assignee_id: aurigaDevId });
-  const inReviewParent = makeIssue({ project_id: 'cascade-582-proj', status: 'in_review' });
+  const inReviewParent = makeIssue({ project_id: 'cascade-582-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
   const blockedChild = makeIssue({
     project_id: 'cascade-582-proj', status: 'blocked',
-    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
+    assignee_id: aurigaBuildId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParent.id },
   });
   const unassignedTodo = makeIssue({ project_id: 'todo-582-proj', status: 'todo' });
   const { backlog, spawn, calls } = createMockAdapters(
@@ -1175,4 +1448,417 @@ test('cascade: existing-assignee rerun counts toward assigned — maxAssign bloc
     'result.assigned must be 1 — existing-assignee rerun counts toward the budget (PANT-582)');
   assert.ok(!calls.assign.some((a) => a.identifier === unassignedTodo.identifier),
     'unassignedTodo must NOT be dispatched — maxAssign=1 exhausted by cascade rerun');
+});
+
+test('cascade: existing-assignee rerun updates loopRtProjected, blocking over-dispatch on same runtime (PANT-544)', async () => {
+  // Bug: cascade existing-assignee rerun path never incremented loopRtProjected →
+  // a subsequent cascade candidate's chooseAgentForProject saw codex runtime
+  // capacity under-reported and could assign a second codex agent in the same cycle
+  // via cascade (before the picks pass even ran).
+  //
+  // Setup: RUNTIME_CAP.codex=4. 3 in-progress issues on auriga-dev (codex) saturate
+  // it at maxInflight=3, filling runtimeInflight['codex']=3. blockedA has existing
+  // assignee auriga-dev; chooseAgentForProject returns null (auriga-dev at maxInflight).
+  // With fix, the existing-assignee rerun increments loopRtProjected['codex']=1 so
+  // total projected=4=cap. blockedB (no existing assignee, heimdall-dev-codex lane)
+  // then sees cap full → cascade_skip(no-capacity) and is NOT rerun by cascade.
+  // Without fix: loopRtProjected['codex']=0, projected=3 < 4 → blockedB gets cascade-
+  // assigned AND cascade-rerun (both calls visible in calls.assign and calls.rerun).
+  //
+  // Parents start in_review with merged PRs so detectVerifiedDone advances them to
+  // done before the cascade pass.
+  const fixtureCfg = withFixtureLanes({
+    'cascade-rt-544-a': ['auriga-dev'],
+    'cascade-rt-544-b': ['heimdall-dev-codex'],
+  });
+  const tightCfg = {
+    ...fixtureCfg,
+    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 4 },
+  };
+  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
+  const saturating = Array.from({ length: 3 }, () =>
+    makeIssue({ project_id: 'cascade-rt-544-a', status: 'in_progress', assignee_id: aurigaDevId }),
+  );
+  const parentA = makeIssue({ project_id: 'cascade-rt-544-a', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const parentB = makeIssue({ project_id: 'cascade-rt-544-b', status: 'in_review', parent_issue_id: 'fake-parent' });
+  const blockedA = makeIssue({
+    project_id: 'cascade-rt-544-a', status: 'blocked',
+    labels: ['not-a-seed'], assignee_id: aurigaDevId, metadata: { depends_on: parentA.id },
+  });
+  const blockedB = makeIssue({
+    project_id: 'cascade-rt-544-b', status: 'blocked',
+    labels: ['not-a-seed'], metadata: { depends_on: parentB.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [...saturating, parentA, parentB, blockedA, blockedB], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    (identifier === parentA.identifier || identifier === parentB.identifier)
+      ? [{ state: 'MERGED', title: identifier }] : [];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedA.identifier),
+    'cascade must rerun blockedA via existing-assignee path (auriga-dev saturated at maxInflight)');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedA.identifier),
+    'cascade must NOT reassign blockedA — it fired via the existing-assignee path');
+  // With fix, loopRtProjected['codex'] = 1 after blockedA's rerun → cascade_skip(no-capacity)
+  // for blockedB. Without fix, cascade would have called both assignIssue AND rerunIssue for
+  // blockedB (cascade dispatch path, not existing-assignee path).
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedB.identifier),
+    'cascade must NOT call rerunIssue for blockedB — the cascade_skip(no-capacity) must fire (PANT-544)');
+  const rtSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'no-capacity' && e.identifier === blockedB.identifier);
+  assert.ok(rtSkips.length >= 1, `cascade_skip(no-capacity) must be logged for blockedB (PANT-544), got ${JSON.stringify(log.byEvent('cascade_skip'))}`);
+});
+
+// ---- PANT-647: cascade new-agent path missing blockedRuntimes pre-check ----
+
+test('cascade new-agent: skips with agent-runtime-blocked when chooseAgentForProject selects a rate-limited runtime (PANT-647)', async () => {
+  // Bug: cascade new-agent path called chooseAgentForProject then immediately
+  // called spawn.assignIssue without checking blockedRuntimes — dispatching into
+  // a rate-limited runtime. The zombie new-reroute path (lines 763–768) correctly
+  // checks blockedRuntimes after chooseAgentForProject; this mirrors that pattern.
+  //
+  // opts.initialBlockedRuntimes pre-seeds the Set so the cascade pass sees it as
+  // blocked from the start — same mechanism as the PANT-614 zombie test.
+  const fixtureCfg = withFixtureLanes({ 'cascade-blocked-rt-647': ['auriga-build'] }); // claude runtime
+  const doneParent = makeIssue({ project_id: 'cascade-blocked-rt-647', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'cascade-blocked-rt-647', status: 'blocked',
+    labels: ['not-a-seed'], metadata: { depends_on: doneParent.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['claude']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue when the selected runtime is blocked (PANT-647)');
+  assert.ok(!calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must NOT call rerunIssue when the selected runtime is blocked (PANT-647)');
+  // chooseAgentForProject already filters blocked runtimes and returns null when all eligible
+  // runtimes are blocked — so the cascade path logs no-capacity, not agent-runtime-blocked.
+  const rtSkips = log.byEvent('cascade_skip').filter(
+    (e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity',
+  );
+  assert.equal(rtSkips.length, 1, 'cascade_skip(no-capacity) must be logged when all eligible runtimes are blocked (PANT-647)');
+});
+
+// ---- PANT-569: blockedRuntimes populated in cascade/zombie/review error paths ----
+// blockedRuntimes was only ever written in the picks loop; cascade/zombie/review
+// catch blocks logged the error but never called blockedRuntimes.add(). Their
+// blockedRuntimes.has() guards therefore always checked an empty Set, making
+// rate-limit protection inoperative for those loops. The fix adds
+// blockedRuntimes.add(runtime) to each catch block so subsequent loops in the
+// same cycle can observe the blocked runtime.
+
+test('PANT-569: cascade assign rate-limit populates blockedRuntimes — picks loop skips the blocked runtime', async () => {
+  // cascade assigns blockedChild to auriga-dev (codex). assignIssue throws 429.
+  // Without fix: blockedRuntimes stays {}, picks dispatches pickStory to codex.
+  // With fix: blockedRuntimes gets 'codex'; selectAssignments skips pickStory.
+  const fixtureCfg = withFixtureLanes({ 'pant569-cascade-proj': ['auriga-dev'] }); // codex runtime
+  const doneParent = makeIssue({ project_id: 'pant569-cascade-proj', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'pant569-cascade-proj', status: 'blocked',
+    parent_issue_id: 'fake-parent', metadata: { depends_on: doneParent.id },
+  });
+  const pickStory = makeIssue({
+    project_id: 'pant569-cascade-proj', status: 'todo',
+    parent_issue_id: 'fake-parent', // avoid seed routing to minerva-dev
+  });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [doneParent, blockedChild, pickStory], fixtureCfg.AGENTS,
+    { failAssignFor: new Set([blockedChild.identifier]) },
+  );
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const cascadeErrors = log.byEvent('cascade_error');
+  assert.ok(cascadeErrors.some((e) => e.identifier === blockedChild.identifier),
+    'cascade_error must be logged for the rate-limited blockedChild');
+  assert.ok(!calls.assign.some((a) => a.identifier === pickStory.identifier),
+    'pickStory must be skipped by selectAssignments once cascade error adds codex to blockedRuntimes (PANT-569)');
+});
+
+test('PANT-569: zombie assign rate-limit populates blockedRuntimes — picks loop skips the blocked runtime', async () => {
+  // zombie assigns zombieIssue to auriga-dev (codex). assignIssue throws 429.
+  // Without fix: blockedRuntimes stays {}, picks dispatches pickStory to codex.
+  // With fix: blockedRuntimes gets 'codex'; selectAssignments skips pickStory.
+  const fixtureCfg = withFixtureLanes({ 'pant569-zombie-proj': ['auriga-dev'] }); // codex runtime
+  const stale = Date.now() - (60 * 60 * 1000); // 1h ago — well past zombieStaleMs (20min)
+  const zombieIssue = makeIssue({
+    project_id: 'pant569-zombie-proj', status: 'in_progress', assignee_id: null,
+    parent_issue_id: 'fake-parent',
+  });
+  const pickStory = makeIssue({
+    project_id: 'pant569-zombie-proj', status: 'todo',
+    parent_issue_id: 'fake-parent',
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [zombieIssue, pickStory], fixtureCfg.AGENTS,
+    { failAssignFor: new Set([zombieIssue.identifier]) },
+  );
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const zombieErrors = log.byEvent('zombie_error');
+  assert.ok(zombieErrors.some((e) => e.identifier === zombieIssue.identifier),
+    'zombie_error must be logged for the rate-limited zombieIssue');
+  assert.ok(!calls.assign.some((a) => a.identifier === pickStory.identifier),
+    'pickStory must be skipped by selectAssignments once zombie error adds codex to blockedRuntimes (PANT-569)');
+});
+
+test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequent review dispatch in same cycle is skipped', async () => {
+  // With maxInflight:2 and perCycleReview:2, two review stories are selected.
+  // reviewStory1's assignIssue throws 429 → blockedRuntimes gets 'claude-review'.
+  // Without fix: reviewStory2 is also dispatched, hitting another rate-limit.
+  // With fix: the review loop's blockedRuntimes.has() guard skips reviewStory2.
+  const OWN_PROJECT = projectId('Pantheon Core');
+  const reviewCfg = {
+    ...cfg,
+    CAPS: { ...cfg.CAPS, perCycleReview: 2 },
+    AGENTS: {
+      ...cfg.AGENTS,
+      'auriga-review': { ...cfg.AGENTS['auriga-review'], maxInflight: 2 },
+    },
+  };
+  const reviewStory1 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const reviewStory2 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const { backlog, spawn } = createMockAdapters(
+    [reviewStory1, reviewStory2], reviewCfg.AGENTS,
+    { failAssignFor: new Set([reviewStory1.identifier]) },
+  );
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: reviewCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(log.byEvent('review_error').some((e) => e.identifier === reviewStory1.identifier),
+    'review_error must be logged for the rate-limited reviewStory1');
+  const reviewSkips = log.byEvent('review_skip');
+  assert.ok(reviewSkips.some((e) => e.identifier === reviewStory2.identifier && e.reason === 'runtime-blocked'),
+    'reviewStory2 must be skipped with reason=runtime-blocked once review error adds claude-review to blockedRuntimes (PANT-569)');
+});
+
+// ---- PANT-597: review dispatch path missing inflight/loopRtProjected/priorAgentCycleAssigns updates ----
+
+test('review dispatch: updates priorAgentCycleAssigns, blocking zombie rerun on same agent (PANT-597)', async () => {
+  // Bug: review dispatch never incremented priorAgentCycleAssigns → the zombie
+  // rerun path saw count=0 and could dispatch the same agent again in the same
+  // cycle, busting the perCyclePerAgent=1 cap.
+  //
+  // Setup: perCyclePerAgent=1, one in_review issue → dispatch-review to auriga-review,
+  // one in_progress zombie assigned to auriga-review with a stale run → action:'rerun'.
+  // With fix: review dispatch increments priorAgentCycleAssigns['auriga-review']=1
+  // → zombie rerun path sees count=1 >= 1 and logs zombie_skip(per-cycle-per-agent-cap).
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const tightCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 } };
+  const aurigaReviewId = tightCfg.AGENTS['auriga-review'].id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const zombieIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_progress', assignee_id: aurigaReviewId, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], tightCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.some((a) => a.identifier === reviewIssue.identifier),
+    'review dispatch must fire for the in_review issue');
+  assert.ok(!calls.rerun.some((r) => r.identifier === zombieIssue.identifier),
+    'zombie rerun must NOT fire — review dispatch consumed the perCyclePerAgent=1 slot (PANT-597)');
+  const capSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  assert.equal(capSkips.length, 1, 'zombie must be skipped with per-cycle-per-agent-cap (PANT-597)');
+});
+
+test('review dispatch: updates loopRtProjected, blocking zombie over-dispatch on claude-review runtime (PANT-597)', async () => {
+  // Bug: review dispatch never incremented loopRtProjected → chooseAgentForProject
+  // for a subsequent unassigned zombie saw claude-review=0 (free) and could dispatch
+  // auriga-review again, exceeding RUNTIME_CAP['claude-review']=1.
+  //
+  // Setup: RUNTIME_CAP['claude-review']=1 (default). One in_review issue in
+  // Pantheon Core → dispatch-review to auriga-review (runtime: claude-review).
+  // A fixture project with only auriga-review in its lane has an unassigned
+  // in_progress zombie → action:'assign' → chooseAgentForProject.
+  // With fix: loopRtProjected['claude-review']=1; agentHasCapacity('auriga-review',...)
+  // sees runtimeInflight+loopRtProjected=1 >= cap=1 → false → zombie_skip(no-lane-capacity).
+  const PANTHEON_CORE = projectId('Pantheon Core');
+  const fixtureCfg = withFixtureLanes({ 'review-rt-proj-597': ['auriga-review'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewIssue = makeIssue({ project_id: PANTHEON_CORE, status: 'in_review', parent_issue_id: 'fake-parent' });
+  const zombieIssue = makeIssue({ project_id: 'review-rt-proj-597', status: 'in_progress', assignee_id: null, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([reviewIssue, zombieIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[zombieIssue.identifier] = [{ status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() }];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.assign.some((a) => a.identifier === reviewIssue.identifier),
+    'review dispatch must fire for the in_review issue');
+  assert.ok(!calls.assign.some((a) => a.identifier === zombieIssue.identifier),
+    'zombie assign must NOT fire — review dispatch filled the claude-review runtime cap (PANT-597)');
+  const rtSkips = log.byEvent('zombie_skip').filter((e) => e.reason === 'no-lane-capacity');
+  assert.ok(rtSkips.length >= 1, 'zombie_skip(no-lane-capacity) must be logged for the over-capacity assign (PANT-597)');
+});
+
+// ---- PANT-641: cascade new-agent dispatch missing blockedRuntimes check ----------
+// The if(agent) branch called assignIssue without first checking blockedRuntimes.
+// The sibling if(!agent && issueObj.assignee_id) path (PANT-621) was already fixed;
+// this test covers the new-agent (no existing assignee) path.
+
+test('PANT-641: cascade new-agent dispatch skips when the chosen agent\'s runtime is blocked', async () => {
+  // The cascade loop runs before the picks loop, so blockedRuntimes is pre-seeded via
+  // opts.initialBlockedRuntimes to simulate a runtime blocked earlier in the same cycle
+  // (e.g., by a prior cascade error or a zombie assign error).
+  // chooseAgentForProject selects auriga-dev (codex runtime). Without fix, assignIssue
+  // fires into the blocked runtime. With fix, cascade_skip(runtime-blocked) is logged.
+  const fixtureCfg = withFixtureLanes({ 'pant641-proj': ['auriga-dev'] }); // codex runtime
+  const doneParent = makeIssue({ project_id: 'pant641-proj', status: 'done' });
+  const blockedChild = makeIssue({
+    project_id: 'pant641-proj', status: 'blocked',
+    parent_issue_id: 'fake-parent', metadata: { depends_on: doneParent.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, initialBlockedRuntimes: new Set(['codex']) });
+
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT call assignIssue for blockedChild when codex is in blockedRuntimes (PANT-641)');
+  const cascadeSkips = log.byEvent('cascade_skip');
+  // chooseAgentForProject already filters blocked runtimes and returns null — so the cascade
+  // path logs no-capacity, not runtime-blocked. The no-dispatch assertions above verify correctness.
+  assert.ok(cascadeSkips.some((e) => e.identifier === blockedChild.identifier && e.reason === 'no-capacity'),
+    'cascade_skip(no-capacity) must be logged for blockedChild when all eligible runtimes are blocked (PANT-641)');
+});
+
+// ---- PANT-677: zombie assign assigned++ must fire AFTER rerunIssue ----
+
+test('PANT-677: zombie assign does not increment assigned when rerunIssue throws', async () => {
+  // Before fix: assigned++ was before sleepImpl + rerunIssue, so a zombie
+  // assign where rerunIssue rate-limits still counted toward result.assigned=1,
+  // over-reporting capacity consumed and leaking a budget slot.
+  // After fix: assigned++ is after rerunIssue — a throw leaves assigned=0.
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: null, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([zombieIssue], cfg.AGENTS, {
+    failRerunFor: new Set([zombieIssue.identifier]),
+  });
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 0, 'assigned must be 0 when zombie rerunIssue throws — PANT-677');
+  assert.ok(calls.assign.some((c) => c.identifier === zombieIssue.identifier), 'assignIssue must still be called');
+  assert.ok(calls.rerun.some((c) => c.identifier === zombieIssue.identifier), 'rerunIssue must be attempted');
+  const errors = log.byEvent('zombie_error');
+  assert.ok(errors.some((e) => e.identifier === zombieIssue.identifier), 'zombie_error must be logged on rerunIssue failure');
+});
+
+// ---- PANT-668: verify-no-run rerunIssue error must add runtime to blockedRuntimes ----
+
+test('PANT-668: rate-limit from rerunIssue in verify-no-run path blocks the runtime for subsequent picks', async () => {
+  // Before fix: the verify-no-run catch block only logged rerun_error but did
+  // NOT call blockedRuntimes.add, so the next pick for the same runtime still
+  // fired — dispatching into a quota-exhausted runtime.
+  // After fix: the catch block adds the runtime to blockedRuntimes, causing
+  // the subsequent pick's skip_blocked_runtime guard to fire.
+  const fixtureCfg = withFixtureLanes({ 'pant668-proj': ['auriga-dev'] });
+  const issueA = makeIssue({ project_id: 'pant668-proj', parent_issue_id: 'fake-parent' });
+  const issueB = makeIssue({ project_id: 'pant668-proj', parent_issue_id: 'fake-parent' });
+  // issueA: assign succeeds but no run starts; then rerunIssue throws a rate-limit error.
+  const { backlog, spawn } = createMockAdapters([issueA, issueB], fixtureCfg.AGENTS, {
+    noRunFor: new Set([issueA.identifier]),
+    failRerunFor: new Set([issueA.identifier]),
+  });
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const rerunErrors = log.byEvent('rerun_error');
+  assert.ok(rerunErrors.some((e) => e.identifier === issueA.identifier), 'rerun_error must be logged for issueA');
+  const skips = log.byEvent('skip_blocked_runtime');
+  assert.ok(skips.some((e) => e.identifier === issueB.identifier),
+    'issueB must be skipped via skip_blocked_runtime after issueA rerunIssue rate-limited — PANT-668');
+});
+
+// ---- PANT-655: zombie rerun must NOT double-count inflight ----
+
+test('PANT-655: zombie rerun does not increment inflight — in_progress assignee already counted by computeInflight', async () => {
+  // Before fix: zombie "rerun" path incremented inflight[zombieAgentName] after
+  // spawn.rerunIssue. But the zombie is in_progress, so computeInflight already counts
+  // it. The double-count caused phantom capacity exhaustion for the existing agent,
+  // blocking a second valid pick in the same cycle.
+  // After fix: inflight is NOT incremented in the zombie rerun path (only
+  // priorAgentCycleAssigns and loopRtProjected are updated for per-cycle tracking).
+  const fixtureCfg = withFixtureLanes({ 'pant655-proj': ['auriga-dev'] });
+  const stale = Date.now() - (60 * 60 * 1000);
+  const zombieIssue = makeIssue({
+    project_id: 'pant655-proj', status: 'in_progress',
+    assignee_id: fixtureCfg.AGENTS['auriga-dev'].id, labels: ['not-a-seed'],
+  });
+  // A second todo issue for the same project — should be dispatched if capacity is free.
+  const freshIssue = makeIssue({ project_id: 'pant655-proj', labels: ['not-a-seed'] });
+
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [zombieIssue, freshIssue], fixtureCfg.AGENTS,
+  );
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  // zombie should be rerun
+  assert.ok(calls.rerun.some((c) => c.identifier === zombieIssue.identifier), 'zombie must be rerun');
+  // result.assigned must count both the zombie rerun AND the fresh pick
+  assert.ok(result.assigned >= 1, 'at least one assign must be recorded — PANT-655');
+  // Confirm no phantom double-count by checking that assigned log shows correct count
+  const zombieLogs = log.byEvent('zombie');
+  assert.ok(zombieLogs.length >= 1, 'zombie event must fire');
+});
+
+// ---- PANT-661: review dispatch inflight/priorAgentCycleAssigns/loopRtProjected reserved before rerunIssue ----
+
+test('PANT-661: review dispatch still reserves capacity when rerunIssue throws — inflight updated before rerunIssue', async () => {
+  // Before fix: inflight, priorAgentCycleAssigns, loopRtProjected were incremented AFTER
+  // spawn.rerunIssue. If rerunIssue threw (rate-limit), the catch block ran but the
+  // counters were never updated — the agent slot was not reserved despite assignIssue
+  // having succeeded, allowing the same agent to be over-dispatched in the same cycle.
+  // After fix: inflight/priorAgentCycleAssigns/loopRtProjected are updated BEFORE
+  // rerunIssue so a throw leaves capacity correctly reserved.
+  // We verify: when rerunIssue fails for issueA, issueB (same agent) must be blocked
+  // by the perCyclePerAgent or runtime cap in subsequent picks this cycle.
+  const fixtureCfg = withFixtureLanes({ 'pant661-proj': ['auriga-review'] });
+  const reviewAgentId = fixtureCfg.AGENTS['auriga-review']?.id;
+
+  const issueA = makeIssue({ project_id: 'pant661-proj', status: 'in_review', assignee_id: reviewAgentId, parent_issue_id: 'fake-parent' });
+  const issueB = makeIssue({ project_id: 'pant661-proj', status: 'in_review', assignee_id: null, parent_issue_id: 'fake-parent' });
+
+  const { backlog, spawn, runsByIdentifier } = createMockAdapters(
+    [issueA, issueB], fixtureCfg.AGENTS,
+    { failRerunFor: new Set([issueA.identifier]) },
+  );
+  // Give issueA stale runs so it qualifies for rerun-review dispatch
+  const stale = Date.now() - (60 * 60 * 1000);
+  runsByIdentifier[issueA.identifier] = [
+    { status: 'completed', completed_at: new Date(stale).toISOString(), agent_id: reviewAgentId },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const reviewErrors = log.byEvent('review_error');
+  assert.ok(reviewErrors.some((e) => e.identifier === issueA.identifier),
+    'review_error must be logged when rerunIssue throws for issueA — PANT-661');
 });
