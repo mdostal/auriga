@@ -85,7 +85,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
   const failRerunFor = opts.failRerunFor || new Set();
-  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
+  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [], metadata: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
 
@@ -101,6 +101,11 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     commentOnIssue: (identifier, body) => {
       calls.comment.push({ identifier, body });
+    },
+    setIssueMetadata: (identifier, metadataObj) => {
+      calls.metadata.push({ identifier, metadataObj });
+      const issue = findIssue(identifier);
+      if (issue) issue.metadata = { ...issue.metadata, ...metadataObj };
     },
   };
 
@@ -453,6 +458,85 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
   // comment is still attempted even if setIssueStatus failed
   assert.equal(calls.comment.length, 1);
   assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
+});
+
+// ---- PANT-444: give-up paths must write metadata.blocked_reason ----
+// Without blocked_reason, isAgentParked() returns false and the issue
+// re-enters the cascade/unblock loops on the very next cycle.
+
+test('PANT-444: zombie give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'zombie give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'zombie-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  // verify the in-memory issue object now satisfies isAgentParked
+  const issue = stuckIssue;
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  assert.ok(typeof r === 'string' && r.trim() !== '', 'isAgentParked guard must now return true');
+});
+
+test('PANT-444: zombie give-up: setIssueMetadata failure is swallowed and never crashes the cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  backlog.setIssueMetadata = () => { throw new Error('metadata API down'); };
+  const log = createLogSink();
+
+  await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
+
+  assert.equal(log.byEvent('zombie_give_up').length, 1);
+  assert.equal(log.byEvent('zombie_give_up_error').filter((e) => e.op === 'set-blocked-reason').length, 1);
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'setIssueStatus(blocked) must still succeed even when setIssueMetadata fails');
+});
+
+test('PANT-444: review give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewMaxAttempts = 2;
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant444-review-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const stuckIssue = makeIssue({
+    project_id: 'pant444-review-proj', status: 'in_review',
+    assignee_id: REVIEW_AGENT_ID, labels: ['not-a-seed'],
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: reviewMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+    agent_id: REVIEW_AGENT_ID,
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const giveUps = log.byEvent('review_give_up');
+  assert.equal(giveUps.length, 1, 'review_give_up must be logged');
+  assert.equal(giveUps[0].identifier, stuckIssue.identifier);
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'review give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'review-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'review give-up must also set status to blocked');
 });
 
 // ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----

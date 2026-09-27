@@ -512,6 +512,10 @@ export async function cycle(opts = {}) {
     if (r.action === 'give-up-review') {
       logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: true });
       try { backlog.setIssueStatus(r.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked', error: e.message }); }
+      if (typeof backlog.setIssueMetadata === 'function') {
+        try { backlog.setIssueMetadata(r.identifier, { blocked_reason: 'review-give-up-max-attempts' }); }
+        catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked-reason', error: e.message }); }
+      }
       try {
         backlog.commentOnIssue(
           r.identifier,
@@ -633,6 +637,10 @@ export async function cycle(opts = {}) {
         logImpl('zombie_give_up', { ...z, applied: !dryRun });
         if (!dryRun) {
           try { backlog.setIssueStatus(z.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked', error: e.message }); }
+          if (typeof backlog.setIssueMetadata === 'function') {
+            try { backlog.setIssueMetadata(z.identifier, { blocked_reason: 'zombie-give-up-max-attempts' }); }
+            catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked-reason', error: e.message }); }
+          }
           try {
             backlog.commentOnIssue(
               z.identifier,
