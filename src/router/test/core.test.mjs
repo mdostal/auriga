@@ -873,6 +873,35 @@ test('selectReviewDispatch: human-todo label suppresses rerun-review on stale re
   assert.deepEqual(picks, []);
 });
 
+// ---- PANT-737: seed-labeled tickets must not dispatch or hold inflight -----
+
+test('selectReviewDispatch: idea-labeled seed in in_review is skipped — no dispatch — PANT-737', () => {
+  // A seed (label 'idea') accidentally landing in in_review must never receive a review dispatch.
+  const seed = inReview('PANT-179', 179, null, { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: idea seed already assigned to review agent is skipped — no rerun — PANT-737', () => {
+  const seed = inReview('PANT-179B', 180, 'RV', { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: seed assigned to review agent (maxInflight=1) does not block other reviews — PANT-737 regression', () => {
+  // Live scenario: PANT-179 (idea label) assigned to auriga-review, in_review.
+  // computeReviewInflight used to count it -> reviewInflight['auriga-review'] = 1 ->
+  // chooseReviewAgent returned null -> 26 other tickets blocked for over an hour.
+  // With the fix: the seed is excluded from inflight, so the normal ticket gets dispatched.
+  const seed = inReview('PANT-179', 179, 'RV', { labels: [{ name: 'idea' }] });
+  const normal = inReview('PANT-255', 255);
+  const reviewInflight = core.computeReviewInflight([seed, normal], CFG);
+  assert.equal(reviewInflight['auriga-review'], 0, 'seed must not hold the inflight slot');
+  const picks = core.selectReviewDispatch([seed, normal], { 'PANT-179': [], 'PANT-255': [] }, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-255', 'normal ticket gets the review slot');
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
