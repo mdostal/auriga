@@ -500,6 +500,30 @@ test('selectAssignments: issue gets assigned to unblocked agent when lowest-load
   assert.equal(picks[0].agent, 'heimdall-dev-codex', 'must fall back to the unblocked codex agent');
 });
 
+// PANT-472: chooseAgentForProject must skip agents already at the perAgentCycle cap
+// and return the next eligible agent in the lane (Failure Scenario B).
+test('chooseAgentForProject: skips agents at perAgentCycle cap, returns next eligible (PANT-472)', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  // HEIMDALL lane: heimdall-dev (lower load), heimdall-dev-codex (higher load).
+  // heimdall-dev is at cap=1 — must be skipped; heimdall-dev-codex must be returned.
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 1 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 1);
+  assert.equal(agent, 'heimdall-dev-codex', 'must skip capped agent and return the next eligible one');
+});
+
+// PANT-472 Failure Scenario B: when the lowest-load agent is at its perAgentCycle cap,
+// selectAssignments must route the issue to the next agent in the lane (not skip it).
+test('selectAssignments: routes to second lane agent when first is at perAgentCycle cap (PANT-472)', () => {
+  // HEIMDALL lane: heimdall-dev (preferred, cap=2), heimdall-dev-codex (fallback).
+  // priorAgentCycleAssigns seeds heimdall-dev at its cap — every issue must go to heimdall-dev-codex.
+  const issues = [story('h1', 'HEIMDALL', 1, 'EPIC1'), story('h2', 'HEIMDALL', 2, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, {}, {
+    priorAgentCycleAssigns: { 'heimdall-dev': CFG.CAPS.perCyclePerAgent },
+  });
+  assert.ok(picks.length > 0, 'issues must not be silently skipped when first lane agent is at cap');
+  assert.ok(picks.every((p) => p.agent === 'heimdall-dev-codex'), `expected heimdall-dev-codex, got ${picks.map((p) => p.agent)}`);
+});
+
 test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
   const now = Date.now();
   const inProgress = [

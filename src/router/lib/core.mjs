@@ -188,11 +188,12 @@ export function depsSatisfied(issue, statusById) {
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
 // load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set()) {
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
   const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
+    (projected.perAgentCycle?.[name] || 0) < maxPerAgent
   );
   if (!eligible.length) return null;
   // Prefer lane order but break by lowest projected load.
@@ -313,7 +314,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes);
+    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes, maxPerAgent);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -327,10 +328,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
     const runtime = cfg.AGENTS[agent].runtime;
-    if (blockedRuntimes.has(runtime)) continue;
     const decision = assignmentDecision(issue, agent, cfg, opts);
     if (decision.action === 'noop') continue;
-    if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
 
     // commit projection
     projected.perAgent[agent] = (projected.perAgent[agent] || 0) + 1;
