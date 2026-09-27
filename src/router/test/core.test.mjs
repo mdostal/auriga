@@ -508,6 +508,24 @@ test('chooseAgentForProject: skips agents on blockedRuntimes, returns next eligi
   assert.equal(agent, 'heimdall-dev-codex', 'must pick the unblocked codex agent, not the lower-load blocked one');
 });
 
+// PANT-653: when the best lane agent is at its perCyclePerAgent cap, chooseAgentForProject
+// must return the next eligible agent rather than null.
+test('chooseAgentForProject: skips per-cycle-capped agent and returns next eligible (PANT-653)', () => {
+  // HEIMDALL lane: heimdall-dev (opencode, load 0), heimdall-dev-codex (codex, load 0).
+  // heimdall-dev has 0 inflight — normally first pick. But perAgentCycle says it's at cap.
+  // chooseAgentForProject must skip heimdall-dev and return heimdall-dev-codex.
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 1 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 1);
+  assert.equal(agent, 'heimdall-dev-codex',
+    'must skip heimdall-dev (at perCyclePerAgent cap) and fall back to heimdall-dev-codex — PANT-653');
+});
+
+test('chooseAgentForProject: returns null when all lane agents are at perCyclePerAgent cap (PANT-653)', () => {
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 1, 'heimdall-dev-codex': 1 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 1);
+  assert.equal(agent, null, 'must return null when ALL agents are at cap');
+});
+
 // PANT-585: selectAssignments must not skip the issue when the lowest-load agent
 // is on a blocked runtime — it should fall back to an unblocked agent instead.
 test('selectAssignments: issue gets assigned to unblocked agent when lowest-load agent runtime is blocked (PANT-585)', () => {
@@ -1144,6 +1162,86 @@ test('selectReviewDispatch: rerun-review fires normally when runtime is NOT bloc
   assert.equal(picks[0].action, 'rerun-review');
 });
 
+// ---- PANT-658: review-phase accounting across a REVIEW_LANE change ---------------
+
+const OLD_RV = 'OLD-RV';
+const CFG_FORMER = { ...CFG, FORMER_REVIEW_AGENT_IDS: [OLD_RV] };
+const runBy = (agentId, minsAgo, status = 'completed') => {
+  const at = new Date(NOW - minsAgo * 60_000).toISOString();
+  return status === 'running'
+    ? { status, started_at: at, agent_id: agentId }
+    : { status, started_at: at, completed_at: at, agent_id: agentId };
+};
+const runsBy = (agentId, n, fromMinsAgo = 60) => Array.from({ length: n }, (_, k) => runBy(agentId, fromMinsAgo + k * 60));
+
+test('selectReviewDispatch: builder still assigned after handoff gets dispatch-review to a lane reviewer — PANT-658', () => {
+  // Normal build->review handoff: builder AB (registered, not in REVIEW_LANE) is still the
+  // assignee and has a recent build run. It must NOT be treated as a (former) reviewer.
+  const i = inReview('PANT-658-BLD', 700, 'AB');
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-BLD': [runBy('AB', 10)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: builder runs never count toward reviewRunCount or fairness — PANT-658/PANT-531', () => {
+  const heavy = inReview('PANT-658-HEAVYBLD', 701, 'AB'); // 5 build runs, never reviewed
+  const fresh = inReview('PANT-658-FRESH', 702);
+  const picks = core.selectReviewDispatch(
+    [heavy, fresh], { 'PANT-658-HEAVYBLD': runsBy('AB', 5), 'PANT-658-FRESH': [] }, CFG_FORMER, {}, { now: NOW },
+  );
+  assert.equal(picks.filter((p) => p.action === 'give-up-review').length, 0, 'never-reviewed ticket must not be given up');
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-HEAVYBLD', 'build runs must not deprioritize it behind the fresh ticket');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('selectReviewDispatch: issue held by a former reviewer is re-dispatched to a current lane reviewer, not rerun on it — PANT-658', () => {
+  const i = inReview('PANT-658-FORMER', 703, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-FORMER': [runBy(OLD_RV, 30)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: former reviewer with a live run is left alone — PANT-658', () => {
+  const i = inReview('PANT-658-LIVE', 704, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-LIVE': [runBy(OLD_RV, 1, 'running')] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: former reviewer with exhausted runs gets give-up-review with a string agent — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-EXHA', 705, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-EXHA': runsBy(OLD_RV, max) }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  assert.equal(typeof picks[0].agent, 'string');
+});
+
+test('selectReviewDispatch: give-up cap counts former + current reviewer runs together — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-MIX', 706, 'RV');
+  const runs = [...runsBy(OLD_RV, max - 1, 120), runBy('RV', 30)];
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG_FORMER, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  // Without the former-reviewer list the old runs don't count: plain rerun-review.
+  const plain = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(plain[0].action, 'rerun-review');
+});
+
+test('selectReviewDispatch: former-reviewer runs count toward fairness — PANT-658', () => {
+  const fairnessMax = CFG.CAPS.reviewFairnessMaxAttempts ?? 3;
+  const heavy = inReview('PANT-658-FAIRH', 707, OLD_RV);
+  const fresh = inReview('PANT-658-FAIRF', 708);
+  const picks = core.selectReviewDispatch(
+    [heavy, fresh], { 'PANT-658-FAIRH': runsBy(OLD_RV, fairnessMax), 'PANT-658-FAIRF': [] }, CFG_FORMER, {}, { now: NOW },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-FAIRF');
+});
+
 // ---- PANT-667: give-up-review must not consume the perCycleReview budget ----
 
 test('selectReviewDispatch: give-up-review does not consume the perCycleReview slot — PANT-667', () => {
@@ -1368,7 +1466,8 @@ test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
   assert.equal(core.detectParentDone(issues, CFG).length, 0);
 });
 
-// ============================================================================
+// =====================================================================});
+
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.
 // ============================================================================
@@ -1453,6 +1552,25 @@ test('descDepsSatisfied resolves "p1-<name>" slug deps by exact `id:` match, not
   // both deps done -> satisfied
   const stateMachineDone = { ...stateMachineBlocked, status: 'done' };
   assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineDone]), true);
+});
+
+// Regression (PANT-446): top-level issues (parent_issue_id === null) had an always-empty
+// sibling list because the filter required s.parent_issue_id to be truthy before comparing
+// it to null, making null === null unreachable.
+test('descDepsSatisfied resolves p1-style deps for top-level issues (no parent_issue_id)', () => {
+  const depDone = {
+    id: 'x', status: 'done', parent_issue_id: null,
+    title: '[p1-routing-capability] Routing capability',
+    description: 'id: p1-routing-capability\n',
+  };
+  const depTodo = { ...depDone, id: 'x2', status: 'todo' };
+  const issue = {
+    id: 'y', status: 'blocked', parent_issue_id: null,
+    title: '[p1-dependent-story] Dependent story',
+    description: 'id: p1-dependent-story\ndepends_on: [p1-routing-capability]\n',
+  };
+  assert.equal(core.descDepsSatisfied(issue, [issue, depDone]), true);
+  assert.equal(core.descDepsSatisfied(issue, [issue, depTodo]), false);
 });
 
 test('detectUnblocks fires on a blocked story whose DESCRIPTION dep (not metadata) is done', () => {
@@ -1715,6 +1833,88 @@ test('detectChangesRequested: seed issues (idea label) in changes_requested are 
   const seedIssue = { ...cr('PAN-55', 55), labels: [{ id: 'l1', name: 'idea' }], parent_issue_id: null };
   const actions = core.detectChangesRequested([seedIssue], {}, [seedIssue]);
   assert.deepEqual(actions, []);
+});
+
+// ============================================================================
+// PANT-456: chooseAgentForIssue — tree-path routing restored
+// ============================================================================
+
+const TREE_CFG = {
+  ...CFG,
+  TREE_AGENT_ATTACHMENTS: {
+    'firefly-events/events/api': ['consus-dev'],
+    'firefly-events/events': ['heimdall-dev'],
+  },
+};
+
+test('chooseAgentForIssue: issue with matching tree_path routes to the attached agent — PANT-456', () => {
+  const issue = { ...story('t1', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'consus-dev', 'tree-path match must win over PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: ancestor path matches when exact path has no attachment — PANT-456', () => {
+  const issue = { ...story('t2', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api/v2' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'consus-dev', 'most-specific ancestor attachment must be used');
+});
+
+test('chooseAgentForIssue: no tree_path falls back to PROJECT_LANE — PANT-456', () => {
+  const issue = story('t3', 'AURIGA', 1, 'EPIC1');
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'auriga-dev', 'no tree_path -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree_path with no matching attachment falls back to PROJECT_LANE — PANT-456', () => {
+  const issue = { ...story('t4', 'AURIGA', 1, 'EPIC1'), tree_path: 'unrelated/path' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'auriga-dev', 'unmatched tree_path -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree-path agent at capacity tries ancestor attachment, then falls back to PROJECT_LANE — PANT-456', () => {
+  // firefly-events/events/api -> consus-dev; ancestor firefly-events/events -> heimdall-dev.
+  // Exhaust both to confirm PROJECT_LANE fallback fires only when ALL tree-path agents are at capacity.
+  const issue = { ...story('t5', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const inflightFull = { 'consus-dev': 2, 'heimdall-dev': 3 }; // both at maxInflight
+  const rtFull = { claude: 2, opencode: 3 };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, inflightFull, rtFull, empty);
+  assert.equal(agent, 'auriga-dev', 'all tree-path agents at capacity -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree-path agent on blocked runtime falls back to ancestor, then PROJECT_LANE — PANT-456', () => {
+  // Block both claude (consus-dev) and opencode (heimdall-dev) to force PROJECT_LANE fallback.
+  const issue = { ...story('t6', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty, new Set(['claude', 'opencode']));
+  assert.equal(agent, 'auriga-dev', 'all tree-path agent runtimes blocked -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: hive story bypasses tree-path routing, routes to HIVE_LANE — PANT-456', () => {
+  // Even with a tree_path that matches an attachment, hive stories must always go to HIVE_LANE
+  const issue = { ...story('t7', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api', description: HIVE_DESCRIPTION };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.ok(CFG.HIVE_LANE.includes(agent), `hive story must route to HIVE_LANE, got ${agent}`);
+});
+
+test('selectAssignments: issue with matching tree_path routes to attached agent, not PROJECT_LANE — PANT-456', () => {
+  const issue = { ...story('ta1', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const picks = core.selectAssignments([issue], TREE_CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'consus-dev', 'selectAssignments must use tree-path routing when configured');
+});
+
+test('selectAssignments: issue without tree_path still routes to PROJECT_LANE after tree-path fix — PANT-456 regression', () => {
+  const issues = [story('c1', 'CONSUS', 1, 'EPIC1'), story('a1', 'AURIGA', 2, 'EPIC1')];
+  const picks = core.selectAssignments(issues, TREE_CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['c1'], 'consus-dev');
+  assert.equal(byId['a1'], 'auriga-dev');
 });
 
 // ---- PANT-660: isHiveStory label check must handle object labels (API shape) ----

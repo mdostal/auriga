@@ -235,3 +235,8 @@ export const HIVE_LANE = _ext.HIVE_LANE ?? ['auriga-build', 'mnemosyne-dev', 'vo
 // re-exported there, exactly like the AGENTS split in p2-multica-backlog-adapter).
 export const REVIEW_LANE = _ext.REVIEW_LANE ?? ['auriga-review'];
 
+// Agent ids that used to be in REVIEW_LANE (PANT-658). Their runs still count toward the
+// review fairness/give-up caps, and in_review issues they hold get re-dispatched to a
+// current lane reviewer. Add an id here whenever a reviewer is dropped from REVIEW_LANE.
+export const FORMER_REVIEW_AGENT_IDS = _ext.FORMER_REVIEW_AGENT_IDS ?? [];
+

@@ -19,6 +19,7 @@ import {
   computeReviewInflight, chooseReviewAgent,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun };
 export { storyKey, slugKey, descStoryDeps, descStoryId };
@@ -188,11 +189,12 @@ export function depsSatisfied(issue, statusById) {
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
 // load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set()) {
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
   const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
+    (projected.perAgentCycle?.[name] || 0) < maxPerAgent
   );
   if (!eligible.length) return null;
   // Prefer lane order but break by lowest projected load.
@@ -203,6 +205,32 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
     return lane.indexOf(x) - lane.indexOf(y);
   });
   return eligible[0];
+}
+
+// Choose the best agent for an issue, consulting TREE_AGENT_ATTACHMENTS first.
+// Hive stories always bypass tree-path routing (HIVE_LANE is unconditional).
+// Falls back to chooseAgentForProject when no tree-path attachment matches or
+// all matched agents are at capacity or on blocked runtimes.
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set()) {
+  if (isHiveStory(issue)) {
+    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes);
+  }
+  const treeLane = getEligibleAgentsByTreePath(issue, cfg);
+  if (treeLane.length) {
+    const eligible = treeLane.filter((name) =>
+      agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
+      !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+    );
+    if (eligible.length) {
+      eligible.sort((x, y) => {
+        const lx = (inflight[x] || 0) + (projected.perAgent[x] || 0);
+        const ly = (inflight[y] || 0) + (projected.perAgent[y] || 0);
+        return lx !== ly ? lx - ly : treeLane.indexOf(x) - treeLane.indexOf(y);
+      });
+      return eligible[0];
+    }
+  }
+  return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes);
 }
 
 // Select this cycle's assignments from the board.
@@ -313,7 +341,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes);
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -545,6 +573,16 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
 
+  // PANT-658: agents that used to be in REVIEW_LANE. Run history alone can't tell a former
+  // reviewer from the builder that is still assigned after the build->review handoff, so
+  // this needs an explicit positive signal (cfg.FORMER_REVIEW_AGENT_IDS). Their runs count
+  // as review-phase runs (fairness + give-up cap carry over across a lane change), but an
+  // issue they hold is re-dispatched to a CURRENT lane reviewer, never rerun on them.
+  const formerReviewIds = new Set((cfg.FORMER_REVIEW_AGENT_IDS || []).filter((id) => id && !reviewAgentIds.has(id)));
+  const reviewPhaseIds = new Set([...reviewAgentIds, ...formerReviewIds]);
+  const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
+  const reviewRunsOf = (runs) => runs.filter((r) => reviewPhaseIds.has(r.agent_id)).length;
+
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
   // (e.g. a planning-only ticket with no PR ever coming, or one detectFalseDone
@@ -565,10 +603,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // starved outright, while every other real in_review ticket gets first
   // crack at the slot.
   const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
-  // PANT-531: count only review-phase runs (agent_id in reviewAgentIds). Build-phase runs
+  // PANT-531: count only review-phase runs (current or former review agents). Build-phase runs
   // must not inflate this counter — a story needing 3+ build iterations would otherwise be
   // deprioritized the moment it enters in_review, before any review run has ever fired.
-  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).filter((r) => reviewAgentIds.has(r.agent_id)).length;
+  const attemptsOf = (i) => reviewRunsOf(runsByIssue[i.identifier] || []);
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
@@ -601,9 +639,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
       // give-up-review on its very first review dispatch. The give-up action sets the issue
       // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
-      const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
-      const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
-      if (reviewRunCount >= reviewMaxAttempts) {
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
         giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
@@ -618,6 +654,17 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
       });
       continue;
+    }
+
+    if (formerReviewIds.has(i.assignee_id)) {
+      if (hasActiveRun(runs, now, staleMs)) continue; // let the former reviewer's live run finish
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
+        giveUps.push({
+          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+          agent: `former-review:${i.assignee_id}`, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
+        });
+        continue;
+      }
     }
 
     // not yet under review — pick a review agent with free capacity. Dispatch is
@@ -672,7 +719,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
-  const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+  const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -892,7 +939,7 @@ export function dependsOnAny(issue, completedIds, allIssues = []) {
   }
   const slugs = descStoryDeps(issue);
   if (slugs.length) {
-    const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
     for (const slug of slugs) {
       const dep = resolveDepSibling(slug, siblings);
       if (dep && completedIds.has(dep.id)) return true;
@@ -1009,6 +1056,24 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
         idleAgeMs,
         action: 'unassign',
         reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
+    // PANT-436: a hive story on a non-hive-capable lane (codex/opencode) can't
+    // run /hive:execute — rerunning it just burns a slot. Unassign so fresh
+    // routing sends it to the hive lane (detectZombies only sees in_progress,
+    // so a plain skip would leave it stuck in todo).
+    if (isHiveStory(i) && !isHiveCapableAssignee(i.assignee_id, cfg)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'hive-on-noncapable-lane',
       });
       continue;
     }

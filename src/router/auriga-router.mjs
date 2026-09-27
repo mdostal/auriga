@@ -411,16 +411,12 @@ export async function cycle(opts = {}) {
         // path instead treats rerun as ALWAYS required (assign never enqueues on
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
-        agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj), blockedRuntimes);
+        const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, coreImpl.isHiveStory(issueObj), blockedRuntimes, maxPerAgentCascade);
         // Skip only when no agent has capacity AND the issue has no existing assignee.
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
         if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
-        const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
-        if (agent && (priorAgentCycleAssigns[agent] || 0) >= maxPerAgentCascade) {
-          logImpl('cascade_skip', { identifier: c.identifier, reason: 'per-cycle-per-agent-cap', agent });
-          continue;
-        }
         if (agent) {
           const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
           if (cAgentRt && blockedRuntimes.has(cAgentRt)) {
@@ -512,6 +508,10 @@ export async function cycle(opts = {}) {
     if (r.action === 'give-up-review') {
       logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: true });
       try { backlog.setIssueStatus(r.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked', error: e.message }); }
+      if (typeof backlog.setIssueMetadata === 'function') {
+        try { backlog.setIssueMetadata(r.identifier, { blocked_reason: 'review-give-up-max-attempts' }); }
+        catch (e) { logImpl('review_give_up_error', { identifier: r.identifier, op: 'set-blocked-reason', error: e.message }); }
+      }
       try {
         backlog.commentOnIssue(
           r.identifier,
@@ -633,6 +633,10 @@ export async function cycle(opts = {}) {
         logImpl('zombie_give_up', { ...z, applied: !dryRun });
         if (!dryRun) {
           try { backlog.setIssueStatus(z.identifier, ISSUE_STATUS.BLOCKED); } catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked', error: e.message }); }
+          if (typeof backlog.setIssueMetadata === 'function') {
+            try { backlog.setIssueMetadata(z.identifier, { blocked_reason: 'zombie-give-up-max-attempts' }); }
+            catch (e) { logImpl('zombie_give_up_error', { identifier: z.identifier, op: 'set-blocked-reason', error: e.message }); }
+          }
           try {
             backlog.commentOnIssue(
               z.identifier,
@@ -673,16 +677,12 @@ export async function cycle(opts = {}) {
         }
       } else {
         // needs (re)routing — route via its lane
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive, blockedRuntimes);
+        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, z.isHive, blockedRuntimes, maxPerAgentZombie);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
         const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
         if (zAgentRt && blockedRuntimes.has(zAgentRt)) {
           logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', agent, runtime: zAgentRt }); continue;
-        }
-        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
-        if ((priorAgentCycleAssigns[agent] || 0) >= maxPerAgentZombie) {
-          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent });
-          continue;
         }
         logImpl('zombie', { ...z, agent, applied: !dryRun });
         if (!dryRun) {

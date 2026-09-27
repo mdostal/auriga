@@ -85,7 +85,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
   const failAssignFor = opts.failAssignFor || new Set();
   const noRunFor = opts.noRunFor || new Set();
   const failRerunFor = opts.failRerunFor || new Set();
-  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [] };
+  const calls = { assign: [], rerun: [], status: [], unassign: [], comment: [], metadata: [] };
   const runsByIdentifier = {};
   const findIssue = (identifier) => boardIssues.find((i) => i.identifier === identifier);
 
@@ -101,6 +101,11 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     },
     commentOnIssue: (identifier, body) => {
       calls.comment.push({ identifier, body });
+    },
+    setIssueMetadata: (identifier, metadataObj) => {
+      calls.metadata.push({ identifier, metadataObj });
+      const issue = findIssue(identifier);
+      if (issue) issue.metadata = { ...issue.metadata, ...metadataObj };
     },
   };
 
@@ -453,6 +458,85 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
   // comment is still attempted even if setIssueStatus failed
   assert.equal(calls.comment.length, 1);
   assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
+});
+
+// ---- PANT-444: give-up paths must write metadata.blocked_reason ----
+// Without blocked_reason, isAgentParked() returns false and the issue
+// re-enters the cascade/unblock loops on the very next cycle.
+
+test('PANT-444: zombie give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'zombie give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'zombie-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  // verify the in-memory issue object now satisfies isAgentParked
+  const issue = stuckIssue;
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  assert.ok(typeof r === 'string' && r.trim() !== '', 'isAgentParked guard must now return true');
+});
+
+test('PANT-444: zombie give-up: setIssueMetadata failure is swallowed and never crashes the cycle', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const stale = Date.now() - (60 * 60 * 1000);
+  const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], cfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+  }));
+  backlog.setIssueMetadata = () => { throw new Error('metadata API down'); };
+  const log = createLogSink();
+
+  await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
+
+  assert.equal(log.byEvent('zombie_give_up').length, 1);
+  assert.equal(log.byEvent('zombie_give_up_error').filter((e) => e.op === 'set-blocked-reason').length, 1);
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'setIssueStatus(blocked) must still succeed even when setIssueMetadata fails');
+});
+
+test('PANT-444: review give-up sets metadata.blocked_reason so isAgentParked returns true', async () => {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const stale = Date.now() - (60 * 60 * 1000);
+  const reviewMaxAttempts = 2;
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant444-review-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const stuckIssue = makeIssue({
+    project_id: 'pant444-review-proj', status: 'in_review',
+    assignee_id: REVIEW_AGENT_ID, labels: ['not-a-seed'],
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuckIssue], fixtureCfg.AGENTS);
+  runsByIdentifier[stuckIssue.identifier] = Array.from({ length: reviewMaxAttempts }, () => ({
+    status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
+    agent_id: REVIEW_AGENT_ID,
+  }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const giveUps = log.byEvent('review_give_up');
+  assert.equal(giveUps.length, 1, 'review_give_up must be logged');
+  assert.equal(giveUps[0].identifier, stuckIssue.identifier);
+
+  const metadataCall = calls.metadata.find((m) => m.identifier === stuckIssue.identifier);
+  assert.ok(metadataCall, 'review give-up must call setIssueMetadata (PANT-444)');
+  assert.equal(metadataCall.metadataObj.blocked_reason, 'review-give-up-max-attempts',
+    'blocked_reason must be set so isAgentParked() returns true and re-dispatch is blocked');
+  assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'),
+    'review give-up must also set status to blocked');
 });
 
 // ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----
@@ -1172,7 +1256,8 @@ test('cascade: per-cycle-per-agent cap is enforced across multiple cascade itera
   // Three blocked stories all unblock simultaneously (each depends on a different done
   // parent, all routed to the same agent via a single-agent lane). With perCyclePerAgent=1,
   // only the first cascade assignment should go through; the remaining two must be
-  // skipped with cascade_skip(per-cycle-per-agent-cap).
+  // skipped. With the PANT-653 fix, the cap is enforced inside chooseAgentForProject
+  // so capped agents are excluded from eligible[] — returns null — logged as no-capacity.
   const fixtureCfg = {
     ...withFixtureLanes({ 'cascade-pca-proj': ['auriga-dev'] }),
     CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
@@ -1190,9 +1275,100 @@ test('cascade: per-cycle-per-agent cap is enforced across multiple cascade itera
 
   assert.ok(calls.assign.length <= 1,
     `perCyclePerAgent=1 must be respected — at most 1 cascade assignment, got ${calls.assign.length}`);
-  const capSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'per-cycle-per-agent-cap');
+  const capSkips = log.byEvent('cascade_skip').filter((e) => e.reason === 'no-capacity');
   assert.ok(capSkips.length >= 2,
-    `expected >=2 cascade_skip(per-cycle-per-agent-cap) entries, got ${capSkips.length}`);
+    `expected >=2 cascade_skip(no-capacity) entries after cap exhausted, got ${capSkips.length}`);
+});
+
+// ---- PANT-653: cascade and zombie dispatch must fall back to the next lane agent ----
+// When the best lane agent is at its perCyclePerAgent cap, chooseAgentForProject
+// must exclude it and return the next eligible agent — not silently skip the item.
+
+test('cascade: per-cycle-per-agent cap falls back to next lane agent instead of skipping (PANT-653)', async () => {
+  // Two-agent lane: ['auriga-build', 'heimdall-dev-codex'], perCyclePerAgent=1.
+  // Two cascade candidates both need routing. The first gets auriga-build (0 cycle
+  // assigns < cap 1). The second sees auriga-build at cap and must fall back to
+  // heimdall-dev-codex rather than being silently skipped. Before the fix, the
+  // second item got cascade_skip; after the fix it routes to the fallback agent.
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant653-cascade-proj': ['auriga-build', 'heimdall-dev-codex'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+  };
+  const doneA = makeIssue({ project_id: 'pant653-cascade-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'pant653-cascade-proj', status: 'done' });
+  const cascadeA = makeIssue({
+    project_id: 'pant653-cascade-proj',
+    status: 'blocked',
+    labels: ['not-a-seed'],
+    metadata: { depends_on: doneA.id },
+  });
+  const cascadeB = makeIssue({
+    project_id: 'pant653-cascade-proj',
+    status: 'blocked',
+    labels: ['not-a-seed'],
+    metadata: { depends_on: doneB.id },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, cascadeA, cascadeB], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  // Both cascade items must be routed — no silent skips.
+  assert.equal(calls.assign.length, 2,
+    `expected 2 cascade assignments (one per cascade candidate), got ${calls.assign.length} — PANT-653`);
+  const agents = calls.assign.map((a) => a.agentName);
+  assert.ok(agents.includes('auriga-build'), 'first cascade must route to auriga-build (first in lane)');
+  assert.ok(agents.includes('heimdall-dev-codex'),
+    'second cascade must fall back to heimdall-dev-codex when auriga-build is at cap — PANT-653');
+  assert.equal(log.byEvent('cascade_skip').length, 0,
+    'no cascade_skip entries — both items must be routed, not dropped (PANT-653)');
+});
+
+test('zombie assign: per-cycle-per-agent cap falls back to next lane agent instead of skipping (PANT-653)', async () => {
+  // Two-agent lane: ['auriga-build', 'heimdall-dev-codex'], perCyclePerAgent=1.
+  // A cascade candidate fires first (cascade runs before zombie loop) and routes
+  // to auriga-build, filling its per-cycle cap. An unassigned in_progress zombie
+  // must then fall back to heimdall-dev-codex rather than being silently skipped.
+  const stale = Date.now() - (60 * 60 * 1000);
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant653-zombie-proj': ['auriga-build', 'heimdall-dev-codex'] }),
+    CAPS: { ...cfg.CAPS, perCyclePerAgent: 1 },
+  };
+  const doneDep = makeIssue({ project_id: 'pant653-zombie-proj', status: 'done' });
+  const cascadeIssue = makeIssue({
+    project_id: 'pant653-zombie-proj',
+    status: 'blocked',
+    labels: ['not-a-seed'],
+    metadata: { depends_on: doneDep.id },
+  });
+  const zombieIssue = makeIssue({
+    project_id: 'pant653-zombie-proj',
+    status: 'in_progress',
+    assignee_id: null,
+    labels: ['not-a-seed'],
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(
+    [doneDep, cascadeIssue, zombieIssue], fixtureCfg.AGENTS
+  );
+  runsByIdentifier[zombieIssue.identifier] = [
+    { status: 'failed', error: 'boom', created_at: new Date(stale).toISOString() },
+  ];
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  // cascade fills auriga-build's cap, zombie must fall back to heimdall-dev-codex
+  const cascadeAssign = calls.assign.find((a) => a.identifier === cascadeIssue.identifier);
+  assert.ok(cascadeAssign, 'cascade issue must be assigned');
+  assert.equal(cascadeAssign.agentName, 'auriga-build',
+    'cascade issue must route to auriga-build (first in lane, cap not yet reached)');
+  const zombieAssign = calls.assign.find((a) => a.identifier === zombieIssue.identifier);
+  assert.ok(zombieAssign,
+    'zombie issue must be assigned — must NOT be skipped when auriga-build is at cap (PANT-653)');
+  assert.equal(zombieAssign.agentName, 'heimdall-dev-codex',
+    'zombie must fall back to heimdall-dev-codex when auriga-build is at per-cycle cap — PANT-653');
+  assert.equal(log.byEvent('zombie_skip').length, 0,
+    'no zombie_skip entries — zombie must be routed, not dropped (PANT-653)');
 });
 
 test('cascade: per-cycle-per-agent cap is enforced on existing-assignee rerun path when multiple cascade candidates share an assignee (PANT-566)', async () => {
