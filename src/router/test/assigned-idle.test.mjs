@@ -338,3 +338,28 @@ test('oldest-idle-first: recovery prioritizes the longest-stuck items when capac
   assert.equal(result.selected.length, 1);
   assert.equal(result.selected[0].identifier, 'PAN-oldest');
 });
+
+const CFG_WITH_HIVE = {
+  ...CFG,
+  AGENTS: {
+    ...CFG.AGENTS,
+    'auriga-build': { id: 'AB', runtime: 'claude', maxInflight: 2 },
+  },
+  HIVE_LANE: ['auriga-build'],
+};
+
+test('PANT-436: hive story idle on a codex lane is unassigned (for rerouting), never restarted', () => {
+  const issue = { ...assignedTodo('PAN-1', 'A'), labels: ['build'] }; // auriga-dev (codex)
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_HIVE, core.agentIdSet(CFG_WITH_HIVE.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'unassign');
+  assert.equal(actions[0].reason, 'hive-on-noncapable-lane');
+  assert.ok(!actions.some((a) => a.action === 'start'));
+});
+
+test('PANT-436: hive story idle on a hive-capable lane still restarts; non-hive story on codex still restarts', () => {
+  const onHive = { ...assignedTodo('PAN-1', 'AB'), labels: ['build'] };
+  const plainOnCodex = assignedTodo('PAN-2', 'A');
+  const actions = core.detectAssignedIdle([onHive, plainOnCodex], {}, CFG_WITH_HIVE, core.agentIdSet(CFG_WITH_HIVE.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => [a.identifier, a.action]), [['PAN-1', 'start'], ['PAN-2', 'start']]);
+});
