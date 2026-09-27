@@ -667,7 +667,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
-  const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+  const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -885,7 +885,7 @@ export function dependsOnAny(issue, completedIds, allIssues = []) {
   }
   const slugs = descStoryDeps(issue);
   if (slugs.length) {
-    const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
     for (const slug of slugs) {
       const dep = resolveDepSibling(slug, siblings);
       if (dep && completedIds.has(dep.id)) return true;
