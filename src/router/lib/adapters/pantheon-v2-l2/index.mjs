@@ -355,7 +355,10 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // Populated at dispatch time by selectRoute(); consumed (and cleared) at
   // outcome time by reportRouteOutcome(). Survives across cycles in the same
   // process instance; entries are cleaned up once the outcome is reported.
-  const _decisions = new Map();
+  // cfg.decisions lets a caller that rebuilds this adapter (mainMultiTenant,
+  // on a tenant config change) hand the same store to the new instance so
+  // decisions recorded before the rebuild can still be reported (PANT-388).
+  const _decisions = cfg.decisions instanceof Map ? cfg.decisions : new Map();
 
   // Best-effort: calls POST /api/route/select before assignIssue() so Heimdall
   // can record the routing decision and inform future lane selection. Stores the
