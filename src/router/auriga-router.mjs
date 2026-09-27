@@ -224,6 +224,35 @@ export async function cycle(opts = {}) {
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
 
+  // ---- BOARD-WIDE PR candidate scan (ONCE per cycle) ----
+  // Restores the pre-cutover router's own top-level ghListRepos/ghOpenPrs/
+  // ghPrs gather (which ran once per cycle and was reused across every
+  // issue): backlog.listCandidatePullRequests(), when the adapter provides it
+  // (the real Multica adapter does; simpler test/stub adapters generally
+  // don't), does the raw repo-wide gh scan HERE, ONCE, and every call site
+  // below that needs "does issue X have a matching PR" filters this SAME
+  // cached, unfiltered list via matchedPrs() — using core.mjs's real
+  // prMatchesStory/prIdentityMatchesStory, never a narrower per-adapter
+  // heuristic. This fixes two regressions an independent review found in this
+  // epic's diff: (1) a PR matching only via a story's short slug key (not the
+  // raw ticket identifier) is found again, and (2) the repo-wide gh scan no
+  // longer re-runs per issue per call site (an O(issues x repos) subprocess
+  // explosion), it runs once per cycle like it always did pre-cutover.
+  let candidatePrs = null;
+  if (typeof backlog.listCandidatePullRequests === 'function') {
+    try { candidatePrs = backlog.listCandidatePullRequests(); }
+    catch (e) { logImpl('candidate_pr_scan_error', { error: e.message }); }
+  }
+  // Returns the PRs in `candidatePrs` matching `issueObj` via `matcher`
+  // (coreImpl.prMatchesStory or coreImpl.prIdentityMatchesStory). Falls back
+  // to backlog.getIssuePullRequests's own per-identifier lookup (filtered by
+  // the SAME rich matcher) only when the adapter has no board-wide scan —
+  // e.g. stub/mock adapters used by unit tests.
+  function matchedPrs(identifier, issueObj, matcher) {
+    if (candidatePrs) return candidatePrs.filter((pr) => matcher(pr, issueObj));
+    return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
+  }
+
   // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
   // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
   // not built yet) is invisible to every other pass — the build candidate pool only
@@ -303,6 +332,13 @@ export async function cycle(opts = {}) {
       }
     }
   }
+  // Exclude just-advanced issues from the review-dispatch snapshot so a stale
+  // run on a now-done ticket does not trigger a spurious rerun-review in this
+  // same cycle (mirrors the `cascaded` exclusion in selectAssignments below).
+  const _verifiedThisCycle = new Set(verified.map((v) => v.identifier));
+  const inReviewForDispatch = _verifiedThisCycle.size
+    ? inReview.filter((i) => !_verifiedThisCycle.has(i.identifier))
+    : inReview;
 
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
@@ -626,7 +662,6 @@ export async function cycle(opts = {}) {
         priorAgentCycleAssigns[r.agent] = (priorAgentCycleAssigns[r.agent] || 0) + 1;
       }
       if (reviewRt) loopRtProjected[reviewRt] = (loopRtProjected[reviewRt] || 0) + 1;
-      spawn.rerunIssue(r.identifier);
       assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step

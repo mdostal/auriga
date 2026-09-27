@@ -1052,9 +1052,11 @@ test('PANT-522: review dispatch loop respects maxAssign:0 (no review dispatches 
 test('PANT-522: review dispatch loop respects maxAssign when perCycleReview allows multiple picks', async () => {
   // Three in_review issues + perCycleReview:3 produces up to 3 review picks.
   // With maxAssign:1, only the first pick must fire; the guard must stop the rest.
+  // parent_issue_id: 'fake-parent' makes these non-seeds (isSeed heuristic skips
+  // childless top-level issues — planned stories always have a parent).
   const PANTHEON_CORE = projectId('Pantheon Core');
   const reviewCfg = { ...cfg, CAPS: { ...cfg.CAPS, perCycleReview: 3 } };
-  const issues = Array.from({ length: 3 }, () => makeIssue({ project_id: PANTHEON_CORE, status: 'in_review' }));
+  const issues = Array.from({ length: 3 }, () => makeIssue({ project_id: PANTHEON_CORE, status: 'in_review', parent_issue_id: 'fake-parent' }));
   const { backlog, spawn, calls } = createMockAdapters(issues, cfg.AGENTS);
   const log = createLogSink();
 
@@ -1101,7 +1103,9 @@ test('PANT-726: dispatch-review does NOT call rerunIssue when assignIssue auto-e
     CAPS: { ...cfg.CAPS, reviewMaxAttempts: 10, reviewFairnessMaxAttempts: 10 },
     REVIEW_LANE: ['auriga-review'],
   };
-  const inReviewIssue = makeIssue({ project_id: 'pant726-proj', status: 'in_review' });
+  // parent_issue_id: 'fake-parent' prevents isSeed heuristic from filtering out this
+  // planned story from review dispatch (seeds have no review-eligible PR).
+  const inReviewIssue = makeIssue({ project_id: 'pant726-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([inReviewIssue], fixtureCfg.AGENTS);
   const log = createLogSink();
 
@@ -1124,7 +1128,7 @@ test('PANT-726: dispatch-review DOES call rerunIssue when assignIssue did not en
     CAPS: { ...cfg.CAPS, reviewMaxAttempts: 10, reviewFairnessMaxAttempts: 10 },
     REVIEW_LANE: ['auriga-review'],
   };
-  const inReviewIssue = makeIssue({ project_id: 'pant726-fallback-proj', status: 'in_review' });
+  const inReviewIssue = makeIssue({ project_id: 'pant726-fallback-proj', status: 'in_review', parent_issue_id: 'fake-parent' });
   const { backlog, spawn, calls } = createMockAdapters([inReviewIssue], fixtureCfg.AGENTS, {
     noRunFor: new Set([inReviewIssue.identifier]),
   });
@@ -1384,14 +1388,25 @@ test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking 
     project_id: 'cascade-proj-545', status: 'blocked',
     assignee_id: aurigaBuildId, parent_issue_id: 'fake-parent', metadata: { depends_on: inReviewParent.id },
   });
+  // idleTodo: assigned to auriga-build (claude, not blocked by codex cap), no active runs.
+  const idleTodo = makeIssue({ project_id: 'cascade-proj-545', status: 'todo', assignee_id: aurigaBuildId });
+  const { backlog, spawn, calls } = createMockAdapters(
+    [saturatingIssue, inReviewParent, blockedChild, idleTodo], tightCfg.AGENTS,
+  );
+  backlog.getIssuePullRequests = (identifier) =>
+    identifier === inReviewParent.identifier
+      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
   const log = createLogSink();
 
-  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
 
-  assert.equal(calls.assign.length, 1, 'only the first (failing) pick should have called assignIssue');
-  const skips = log.byEvent('skip_blocked_runtime');
-  assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
-  assert.equal(skips[0].identifier, issueB.identifier);
+  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
+    'cascade must rerun blockedChild via existing-assignee path (codex lane full, auriga-build already assigned)');
+  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
+    'cascade must NOT reassign blockedChild in the existing-assignee path');
+  assert.ok(!calls.rerun.some((r) => r.identifier === idleTodo.identifier),
+    'assigned-idle must NOT dispatch idleTodo — cascade rerun consumed the perCyclePerAgent=1 ' +
+    'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
 });
 
 test('cascade: existing-assignee rerun updates inflight, blocking over-dispatch to the same agent in the picks loop (PANT-596)', async () => {
