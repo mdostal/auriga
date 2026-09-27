@@ -427,7 +427,17 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}, allIssu
     if (isHumanTodo(i, cfg)) continue;
     if (isSeed(i, allIssues)) continue; // seeds have planning PRs that must not advance the epic to done
     const prs = prsByIssue[i.identifier] || [];
-    const merged = prs.some(isPrMerged);
+    // AUTHORITATIVE PATH (PANT-373): when the story records its OWN PR url, ONLY
+    // that exact PR being merged can advance it. A stray merged PR that merely
+    // matched the story (identifier/short key in its title, branch or body) must
+    // not advance it while its own PR is still open — detectFalseDone would demote
+    // it straight back (it trusts ownPrUrl), thrashing done<->in_review every cycle.
+    // Mirrors detectFalseDone's ownPrUrl path so the two directions are symmetric.
+    // FALLBACK (no recorded own PR): any matched merged PR counts (prior behavior).
+    const own = ownPrUrl(i);
+    const merged = own
+      ? prs.some((p) => isPrMerged(p) && samePrUrl(p.url || p.html_url, own))
+      : prs.some(isPrMerged);
     if (merged) {
       actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-done' });
     }
