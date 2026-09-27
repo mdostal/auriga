@@ -1368,7 +1368,8 @@ test('detectParentDone: skips human-todo parent (isHumanTodo guard)', () => {
   assert.equal(core.detectParentDone(issues, CFG).length, 0);
 });
 
-// ============================================================================
+// =====================================================================});
+
 // Loop-integrity fixes (2026-07-31): story-key matching, description-declared
 // dep resolution, false-done demotion, hive-lane zombie reroute.
 // ============================================================================
@@ -1734,6 +1735,88 @@ test('detectChangesRequested: seed issues (idea label) in changes_requested are 
   const seedIssue = { ...cr('PAN-55', 55), labels: [{ id: 'l1', name: 'idea' }], parent_issue_id: null };
   const actions = core.detectChangesRequested([seedIssue], {}, [seedIssue]);
   assert.deepEqual(actions, []);
+});
+
+// ============================================================================
+// PANT-456: chooseAgentForIssue — tree-path routing restored
+// ============================================================================
+
+const TREE_CFG = {
+  ...CFG,
+  TREE_AGENT_ATTACHMENTS: {
+    'firefly-events/events/api': ['consus-dev'],
+    'firefly-events/events': ['heimdall-dev'],
+  },
+};
+
+test('chooseAgentForIssue: issue with matching tree_path routes to the attached agent — PANT-456', () => {
+  const issue = { ...story('t1', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'consus-dev', 'tree-path match must win over PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: ancestor path matches when exact path has no attachment — PANT-456', () => {
+  const issue = { ...story('t2', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api/v2' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'consus-dev', 'most-specific ancestor attachment must be used');
+});
+
+test('chooseAgentForIssue: no tree_path falls back to PROJECT_LANE — PANT-456', () => {
+  const issue = story('t3', 'AURIGA', 1, 'EPIC1');
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'auriga-dev', 'no tree_path -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree_path with no matching attachment falls back to PROJECT_LANE — PANT-456', () => {
+  const issue = { ...story('t4', 'AURIGA', 1, 'EPIC1'), tree_path: 'unrelated/path' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.equal(agent, 'auriga-dev', 'unmatched tree_path -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree-path agent at capacity tries ancestor attachment, then falls back to PROJECT_LANE — PANT-456', () => {
+  // firefly-events/events/api -> consus-dev; ancestor firefly-events/events -> heimdall-dev.
+  // Exhaust both to confirm PROJECT_LANE fallback fires only when ALL tree-path agents are at capacity.
+  const issue = { ...story('t5', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const inflightFull = { 'consus-dev': 2, 'heimdall-dev': 3 }; // both at maxInflight
+  const rtFull = { claude: 2, opencode: 3 };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, inflightFull, rtFull, empty);
+  assert.equal(agent, 'auriga-dev', 'all tree-path agents at capacity -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: tree-path agent on blocked runtime falls back to ancestor, then PROJECT_LANE — PANT-456', () => {
+  // Block both claude (consus-dev) and opencode (heimdall-dev) to force PROJECT_LANE fallback.
+  const issue = { ...story('t6', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty, new Set(['claude', 'opencode']));
+  assert.equal(agent, 'auriga-dev', 'all tree-path agent runtimes blocked -> falls back to PROJECT_LANE');
+});
+
+test('chooseAgentForIssue: hive story bypasses tree-path routing, routes to HIVE_LANE — PANT-456', () => {
+  // Even with a tree_path that matches an attachment, hive stories must always go to HIVE_LANE
+  const issue = { ...story('t7', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api', description: HIVE_DESCRIPTION };
+  const empty = { perAgent: {}, perRuntime: {} };
+  const agent = core.chooseAgentForIssue(issue, TREE_CFG, {}, {}, empty);
+  assert.ok(CFG.HIVE_LANE.includes(agent), `hive story must route to HIVE_LANE, got ${agent}`);
+});
+
+test('selectAssignments: issue with matching tree_path routes to attached agent, not PROJECT_LANE — PANT-456', () => {
+  const issue = { ...story('ta1', 'AURIGA', 1, 'EPIC1'), tree_path: 'firefly-events/events/api' };
+  const picks = core.selectAssignments([issue], TREE_CFG, {}, {});
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].agent, 'consus-dev', 'selectAssignments must use tree-path routing when configured');
+});
+
+test('selectAssignments: issue without tree_path still routes to PROJECT_LANE after tree-path fix — PANT-456 regression', () => {
+  const issues = [story('c1', 'CONSUS', 1, 'EPIC1'), story('a1', 'AURIGA', 2, 'EPIC1')];
+  const picks = core.selectAssignments(issues, TREE_CFG, {}, {});
+  const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
+  assert.equal(byId['c1'], 'consus-dev');
+  assert.equal(byId['a1'], 'auriga-dev');
 });
 
 // ---- PANT-660: isHiveStory label check must handle object labels (API shape) ----
