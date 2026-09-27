@@ -137,7 +137,7 @@ export function isSeed(issue, allIssues = []) {
 // isSeed limited to the explicit-label legs only — used in detect* functions where
 // the childless+top-level heuristic is too broad (an in_progress story has no children
 // in that set, so the heuristic would fire on every top-level ticket).
-function isSeedByLabel(issue) {
+export function isSeedByLabel(issue) {
   const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
   if (labelNames.includes('not-a-seed')) return false;
   return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
