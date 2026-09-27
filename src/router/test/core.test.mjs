@@ -1643,6 +1643,48 @@ test('detectFalseDone still demotes on an open identity-matching PR when NO merg
   assert.equal(acts[0].prUrl, 'https://github.com/mdostal/heimdall/pull/99');
 });
 
+test('detectFalseDone: merged identity-matching PR supplied via mergedPrs suppresses demotion from an open-only list (PANT-656)', () => {
+  // The router's PR scan is open-only, so the merged PR can never appear in openPrs;
+  // before PANT-656 the thrash guard searched openPrs only and was dead code.
+  const pan50 = {
+    id: 'p50', identifier: 'PAN-50', project_id: 'AURIGA',
+    title: 'impl', status: 'done', metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const merged = {
+    headRefName: 'feat/pan-50-impl', state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/10',
+  };
+  const staleOpen = {
+    headRefName: 'feat/pan-50-retry', state: 'OPEN',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/7',
+  };
+  assert.equal(core.detectFalseDone([pan50], [staleOpen]).length, 1, 'without mergedPrs the stale open PR demotes');
+  assert.equal(core.detectFalseDone([pan50], [staleOpen], {}, [], [merged]).length, 0);
+});
+
+test('detectFalseDone: mergedPrs only suppresses when the merged PR matches the story and repo (PANT-656)', () => {
+  const pan50 = {
+    id: 'p50', identifier: 'PAN-50', project_id: 'AURIGA',
+    title: 'impl', status: 'done', metadata: { target_repo: 'mdostal/heimdall' },
+  };
+  const staleOpen = {
+    headRefName: 'feat/pan-50-retry', state: 'OPEN',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/7',
+  };
+  const otherStory = {
+    headRefName: 'feat/pan-51-impl', state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z',
+    _repo: 'mdostal/heimdall', url: 'https://github.com/mdostal/heimdall/pull/11',
+  };
+  const otherRepo = {
+    headRefName: 'feat/pan-50-impl', state: 'MERGED', mergedAt: '2026-09-01T00:00:00Z',
+    _repo: 'mdostal/auriga', url: 'https://github.com/mdostal/auriga/pull/12',
+  };
+  const notMerged = { ...staleOpen, url: 'https://github.com/mdostal/heimdall/pull/8' };
+  const acts = core.detectFalseDone([pan50], [staleOpen], {}, [], [otherStory, otherRepo, notMerged]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].prUrl, 'https://github.com/mdostal/heimdall/pull/7');
+});
+
 test('isHiveCapableAssignee is true only for hive/review lane agent ids', () => {
   assert.ok(core.isHiveCapableAssignee('AB', CFG));  // auriga-build
   assert.ok(core.isHiveCapableAssignee('RV', CFG));  // auriga-review
