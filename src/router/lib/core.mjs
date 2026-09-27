@@ -133,6 +133,15 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// isSeed limited to the explicit-label legs only — used in detect* functions where
+// the childless+top-level heuristic is too broad (an in_progress story has no children
+// in that set, so the heuristic would fire on every top-level ticket).
+function isSeedByLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -364,7 +373,7 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    if (isSeedByLabel(i)) continue; // label-only: heuristic fires on any top-level in_progress story
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
@@ -422,7 +431,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // never zombie-dispatch a seed to a build lane
+    if (isSeedByLabel(i)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -712,6 +721,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds must not be auto-unblocked into selectAssignments' planning lane re-dispatch
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -971,6 +981,12 @@ export function agentIdSet(agents = {}) {
 // pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
+  // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
+  // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
+  const reviewLaneIds = new Set(
+    (cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean)
+  );
   const actions = [];
   for (const i of todoIssues) {
     if ((i.status || '').toLowerCase() !== 'todo') continue;
@@ -988,6 +1004,21 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
+
+    if (reviewLaneIds.has(i.assignee_id)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({

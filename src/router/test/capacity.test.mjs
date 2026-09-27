@@ -50,6 +50,27 @@ test('computeReviewInflight: counts in_review issues currently assigned to a rev
   assert.equal(counts['auriga-review'], 1);
 });
 
+// ---- PANT-737: seed-labeled tickets must not hold inflight slots -----------
+
+test('computeReviewInflight: seed-labeled (idea) issue assigned to review agent does not count — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'idea' }] };
+  const normal = { assignee_id: 'RV', labels: [] };
+  const counts = computeReviewInflight([seed, normal], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1, 'only the non-seed issue counts');
+});
+
+test('computeReviewInflight: not-a-seed label overrides idea — issue counts normally', () => {
+  const notSeed = { assignee_id: 'RV', labels: [{ name: 'idea' }, { name: 'not-a-seed' }] };
+  const counts = computeReviewInflight([notSeed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1);
+});
+
+test('computeReviewInflight: needs-plan label also excludes from inflight — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'needs-plan' }] };
+  const counts = computeReviewInflight([seed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 0);
+});
+
 test('chooseReviewAgent: null when the whole lane is at capacity', () => {
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 1 }), null);
   assert.equal(chooseReviewAgent(REVIEW_CFG, { 'auriga-review': 0 }), 'auriga-review');

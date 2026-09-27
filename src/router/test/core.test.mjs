@@ -309,14 +309,16 @@ test('detectRunCompletions: done+non-failed run -> advance-in-review; active/fai
   assert.equal(actions[0].action, 'advance-in-review');
 });
 
-test('detectRunCompletions: seed issue with done run is NOT advanced to in_review', () => {
+test('detectRunCompletions: explicitly-labeled seed is NOT advanced; unlabeled top-level issue IS advanced (isSeedByLabel, not heuristic)', () => {
   const now = Date.now();
   const seedWithLabel = {
     id: 'seed1', identifier: 'seed1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'plan something', parent_issue_id: null,
     labels: [{ id: 'l1', name: 'idea', color: '#000' }],
   };
-  const seedChildless = {
+  // top-level + childless but no explicit seed label: NOT filtered by isSeedByLabel
+  // (the heuristic is too broad here — a real in_progress story has no children yet)
+  const unlabeledTopLevel = {
     id: 'seed2', identifier: 'seed2', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'top level childless', parent_issue_id: null, labels: [],
   };
@@ -324,17 +326,15 @@ test('detectRunCompletions: seed issue with done run is NOT advanced to in_revie
     id: 'impl1', identifier: 'impl1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'implement the thing', parent_issue_id: 'seed1', labels: [],
   };
-  const inProgress = [seedWithLabel, seedChildless, notSeed];
-  // allIssues includes notSeed as a child of seed1, so seed1 is NOT childless
-  // but has an explicit label — it's still a seed. seed2 is childless+top-level.
-  const allIssues = [seedWithLabel, seedChildless, notSeed];
+  const inProgress = [seedWithLabel, unlabeledTopLevel, notSeed];
+  const allIssues = [seedWithLabel, unlabeledTopLevel, notSeed];
   const runs = {
     seed1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     seed2: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     impl1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
   };
   const actions = core.detectRunCompletions(inProgress, runs, now, {}, allIssues);
-  assert.deepEqual(actions.map((a) => a.identifier), ['impl1']);
+  assert.deepEqual(actions.map((a) => a.identifier), ['seed2', 'impl1']);
 });
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
@@ -560,30 +560,42 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
   assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
 });
 
+test('detectZombies skips explicitly-labeled seed issues (isSeedByLabel guard) — PANT-519', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'sd1', identifier: 'sd1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea', labels: ['idea'], metadata: {} },
+    { id: 'sd2', identifier: 'sd2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'needs plan', labels: ['needs-plan'], metadata: {} },
+    { id: 'sd3', identifier: 'sd3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea obj', labels: [{ name: 'idea' }], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'regular stalled story', labels: [], metadata: {} },
+    { id: 'ag2', identifier: 'ag2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not-a-seed idea', labels: ['idea', 'not-a-seed'], metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { sd1: [], sd2: [], sd3: [], ag1: [], ag2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('sd1'), 'idea-labeled (string) seed must be skipped');
+  assert.ok(!ids.includes('sd2'), 'needs-plan-labeled seed must be skipped');
+  assert.ok(!ids.includes('sd3'), 'idea-labeled (object) seed must be skipped');
+  assert.ok(ids.includes('ag1'), 'unlabeled stale story must still be recovered');
+  assert.ok(ids.includes('ag2'), 'not-a-seed escape hatch must bypass the seed guard');
+});
 
-test('detectZombies skips seed issues — never zombie-dispatch to a build lane', () => {
+
+test('detectZombies skips labeled seed issues — never zombie-dispatch to a build lane', () => {
   const now = Date.now();
   const seedLabeled = {
     id: 'sz1', identifier: 'sz1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: null, title: 'plan something', parent_issue_id: null,
     labels: [{ id: 'l1', name: 'idea', color: '#000' }], metadata: {},
   };
-  const seedChildless = {
-    id: 'sz2', identifier: 'sz2', project_id: 'AURIGA', status: 'in_progress',
-    assignee_id: null, title: 'top level childless seed', parent_issue_id: null,
-    labels: [], metadata: {},
-  };
   const notSeed = {
     id: 'sz3', identifier: 'sz3', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: null, title: 'implement the plan', parent_issue_id: 'sz1',
     labels: [], metadata: {},
   };
-  const allIssues = [seedLabeled, seedChildless, notSeed];
-  const runs = { sz1: [], sz2: [], sz3: [] };
-  const z = core.detectZombies([seedLabeled, seedChildless, notSeed], runs, CFG, now, allIssues);
+  const allIssues = [seedLabeled, notSeed];
+  const runs = { sz1: [], sz3: [] };
+  const z = core.detectZombies([seedLabeled, notSeed], runs, CFG, now, allIssues);
   const ids = z.map((a) => a.identifier);
   assert.ok(!ids.includes('sz1'), 'seed with idea label must be skipped');
-  assert.ok(!ids.includes('sz2'), 'childless+top-level seed must be skipped');
   assert.ok(ids.includes('sz3'), 'non-seed stale issue must still be recovered');
 });
 
@@ -976,6 +988,35 @@ test('selectReviewDispatch: human-todo label suppresses rerun-review on stale re
   const i = inReview('PANT-391B', 392, 'RV', { labels: ['human-todo'], metadata: {} });
   const picks = core.selectReviewDispatch([i], { 'PANT-391B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
   assert.deepEqual(picks, []);
+});
+
+// ---- PANT-737: seed-labeled tickets must not dispatch or hold inflight -----
+
+test('selectReviewDispatch: idea-labeled seed in in_review is skipped — no dispatch — PANT-737', () => {
+  // A seed (label 'idea') accidentally landing in in_review must never receive a review dispatch.
+  const seed = inReview('PANT-179', 179, null, { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: idea seed already assigned to review agent is skipped — no rerun — PANT-737', () => {
+  const seed = inReview('PANT-179B', 180, 'RV', { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: seed assigned to review agent (maxInflight=1) does not block other reviews — PANT-737 regression', () => {
+  // Live scenario: PANT-179 (idea label) assigned to auriga-review, in_review.
+  // computeReviewInflight used to count it -> reviewInflight['auriga-review'] = 1 ->
+  // chooseReviewAgent returned null -> 26 other tickets blocked for over an hour.
+  // With the fix: the seed is excluded from inflight, so the normal ticket gets dispatched.
+  const seed = inReview('PANT-179', 179, 'RV', { labels: [{ name: 'idea' }] });
+  const normal = inReview('PANT-255', 255);
+  const reviewInflight = core.computeReviewInflight([seed, normal], CFG);
+  assert.equal(reviewInflight['auriga-review'], 0, 'seed must not hold the inflight slot');
+  const picks = core.selectReviewDispatch([seed, normal], { 'PANT-179': [], 'PANT-255': [] }, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-255', 'normal ticket gets the review slot');
 });
 
 // ---- GH #102: anti-starvation fairness ------------------------------------

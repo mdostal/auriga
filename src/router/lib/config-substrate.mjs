@@ -235,19 +235,3 @@ export const HIVE_LANE = _ext.HIVE_LANE ?? ['auriga-build', 'mnemosyne-dev', 'vo
 // re-exported there, exactly like the AGENTS split in p2-multica-backlog-adapter).
 export const REVIEW_LANE = _ext.REVIEW_LANE ?? ['auriga-review'];
 
-// GitHub owner whose repos the review lane sweeps for open PRs. The router
-// discovers ALL of this owner's repos live (mca.ghListRepos) each cycle so a new
-// repo (logic-loops, house-finder, ...) is covered the moment it exists, instead
-// of waiting to be hand-added to REVIEW_SEARCH_REPOS below. REVIEW_SEARCH_REPOS
-// remains the static fallback used only when live discovery returns nothing.
-export const REVIEW_REPO_OWNER = _ext.REVIEW_REPO_OWNER ?? 'mdostal';
-
-// Baseline repos the review lane searches for a story's open PR. Multica's
-// issue<->PR linkage is empty in practice, so PR discovery goes through gh; the
-// router also adds any explicit target_repo it finds on an in_review story, so
-// this is just the default set of OUR private plugin repos.
-export const REVIEW_SEARCH_REPOS = _ext.REVIEW_SEARCH_REPOS ?? [
-  'mdostal/auriga', 'mdostal/heimdall', 'mdostal/consus',
-  'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
-  'mdostal/cron-maker',
-];
