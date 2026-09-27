@@ -112,16 +112,27 @@ export function computeReviewInflight(inReviewIssues, cfg) {
 }
 
 // Pick the review-lane agent with the most free capacity (lowest current+projected
-// load) that is still under its maxInflight. Returns null when the lane is full.
-export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRuntimes = new Set()) {
+// load) that is still under its maxInflight, its runtime bucket's RUNTIME_CAP and
+// the per-cycle-per-agent cap. Returns null when the lane is full.
+// cycleCaps: { perAgentCycle, maxPerAgent } — this cycle's dispatch counts so far.
+export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRuntimes = new Set(), cycleCaps = {}) {
   const lane = cfg.REVIEW_LANE || [];
+  const perAgentCycle = cycleCaps.perAgentCycle || {};
+  const maxPerAgent = cycleCaps.maxPerAgent ?? Infinity;
+  const loadOf = (name) => (reviewInflight[name] || 0) + (projected[name] || 0);
   const eligible = lane.filter((name) => {
     const a = cfg.AGENTS[name];
     if (!a) return false;
     if (a.available === false) return false; // PAN-8645: offline runtime
     if (blockedRuntimes.has(a.runtime)) return false; // PANT-587: skip rate-limited runtimes
-    const now = (reviewInflight[name] || 0) + (projected[name] || 0);
-    return now < (a.maxInflight ?? Infinity);
+    if ((perAgentCycle[name] || 0) >= maxPerAgent) return false; // PANT-814: perCyclePerAgent
+    // PANT-814: the review bucket's RUNTIME_CAP (e.g. 'claude-review') was never read.
+    const rtCap = (cfg.RUNTIME_CAP || {})[a.runtime];
+    if (rtCap != null) {
+      const rtNow = lane.filter((n) => cfg.AGENTS[n]?.runtime === a.runtime).reduce((sum, n) => sum + loadOf(n), 0);
+      if (rtNow >= rtCap) return false;
+    }
+    return loadOf(name) < (a.maxInflight ?? Infinity);
   });
   if (!eligible.length) return null;
   eligible.sort((x, y) => {

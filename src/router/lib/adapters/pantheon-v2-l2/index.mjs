@@ -45,6 +45,12 @@ import {
 } from '../../config-substrate.mjs';
 
 const DEFAULT_BASE_URL = 'http://core-api:3012';
+
+// listAllProjectIds()'s single board-wide sentinel -- see that method's
+// comment. Exported so callers that need REAL project ids (the `auriga
+// project` CLI) can tell "core-api has no project listing" apart from a
+// board that genuinely has one project.
+export const PANTHEON_BOARD_SENTINEL = '__pantheon_board__';
 const DEFAULT_VERIFY_DELAY_MS = 6000;
 
 // Real synchronous sleep — ported verbatim from multica/spawn.mjs (same
@@ -123,7 +129,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // issue Pantheon's backlog knows about), just without Auriga needing to
   // understand Multica's project concept to get there.
   function listAllProjectIds() {
-    return ['__pantheon_board__'];
+    return [PANTHEON_BOARD_SENTINEL];
   }
 
   // Board-wide aggregate — REQUIRED by auriga-router.mjs's cycle() (not

@@ -1195,7 +1195,7 @@ test('cascade: skips (logs redispatch-cooldown) when last run completed within r
   const FIXED_NOW = Date.now();
   const doneParent = makeIssue({ project_id: 'cooldown-proj', status: 'done' });
   const blockedChild = makeIssue({ project_id: 'cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
-  const { backlog, spawn, calls, runsByIdentifier, log } = (() => {
+  const { backlog, spawn, calls, log } = (() => {
     const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
     // Seed a completed run that finished 30 s ago — within cooldown
     const recentCompletedAt = new Date(FIXED_NOW - 30_000).toISOString();
@@ -1778,7 +1778,7 @@ test('PANT-569: zombie assign rate-limit populates blockedRuntimes — picks loo
 });
 
 test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequent review dispatch in same cycle is skipped', async () => {
-  // With maxInflight:2 and perCycleReview:2, two review stories are selected.
+  // With maxInflight:2, perCycleReview:2 and a claude-review cap of 2, two review stories are selected.
   // reviewStory1's assignIssue throws 429 → blockedRuntimes gets 'claude-review'.
   // Without fix: reviewStory2 is also dispatched, hitting another rate-limit.
   // With fix: the review loop's blockedRuntimes.has() guard skips reviewStory2.
@@ -1790,6 +1790,8 @@ test('PANT-569: review assign rate-limit populates blockedRuntimes — subsequen
       ...cfg.AGENTS,
       'auriga-review': { ...cfg.AGENTS['auriga-review'], maxInflight: 2 },
     },
+    // chooseReviewAgent enforces the review bucket's RUNTIME_CAP (PANT-814).
+    RUNTIME_CAP: { ...cfg.RUNTIME_CAP, 'claude-review': 2 },
   };
   const reviewStory1 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });
   const reviewStory2 = makeIssue({ project_id: OWN_PROJECT, status: 'in_review', parent_issue_id: 'fake-parent' });

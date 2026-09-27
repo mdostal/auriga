@@ -327,7 +327,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const exclude = opts.exclude || new Set();
 
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...opts.priorAgentCycleAssigns } };
 
   // issueId -> lowercased status, over the WHOLE scanned board (not just candidates) so the
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
@@ -673,6 +673,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const blockedRuntimes = (opts && opts.blockedRuntimes) || new Set();
+  // PANT-814: perCyclePerAgent applies to review agents too, counting what earlier
+  // passes this cycle already dispatched (opts.priorAgentCycleAssigns).
+  const maxPerAgent = opts.maxPerAgent ?? (cfg.CAPS && cfg.CAPS.perCyclePerAgent) ?? Infinity;
+  const perAgentCycle = { ...opts.priorAgentCycleAssigns };
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -756,6 +760,8 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const rerAgentName = idToName[i.assignee_id];
       const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
       if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-588/PANT-666: don't consume the slot re-dispatching into a blocked runtime
+      if ((perAgentCycle[rerAgentName] || 0) >= maxPerAgent) continue; // PANT-814
+      perAgentCycle[rerAgentName] = (perAgentCycle[rerAgentName] || 0) + 1;
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
@@ -779,9 +785,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes);
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes, { perAgentCycle, maxPerAgent });
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
+    perAgentCycle[agent] = (perAgentCycle[agent] || 0) + 1;
     actions.push({
       identifier: i.identifier, issueId: i.id, projectId: i.project_id,
       agent, action: 'dispatch-review', reason: 'needs-review',
@@ -1261,7 +1268,7 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const inflight = opts.inflight || {};
   const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
   const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...opts.priorAgentCycleAssigns } };
 
   const selected = [];
   const skipped = [];

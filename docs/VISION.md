@@ -70,8 +70,9 @@ separable.
   init`/`agent status`, and a read-only MCP server (list board, get story detail, list
   blocked/in-flight) so an operator's own agent session can query Auriga's board directly.
   Deliberately read-only — write capability was scoped out pending its own safety design.
-  Known follow-up, not yet picked up: `auriga_get_story`'s PR-lookup path is slow (~75s) on a
-  board with a large PR count.
+  Since PANT-818 it reads the board only through Pantheon's core-api (same adapter as the router),
+  and `auriga_get_story` takes PRs from the board's linked PRs, which removed the old ~75s GitHub
+  scan.
 - **Real project registry** (epic `p6-project-registry`) — `auriga project scan`/`add`/`remove`/
   `list` replaces the router's old hand-edited project list with a real operator-facing CLI.
 - **MemoryAdapter + orchestrator topology registry** (epic `t010-memory-and-topology`) — a third

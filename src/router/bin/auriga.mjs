@@ -47,6 +47,7 @@ import {
   upsertProject,
   removeProject,
 } from '../lib/project-registry.mjs';
+import { PANTHEON_BOARD_SENTINEL } from '../lib/adapters/pantheon-v2-l2/index.mjs';
 import { createMnemosyneMemoryAdapter } from '../lib/adapters/mnemosyne/memory.mjs';
 import { createStubMemoryAdapter } from '../lib/adapters/stub/memory.mjs';
 import {
@@ -125,9 +126,9 @@ function printReport(label, names, report) {
 // double / registry reader / writer with zero real filesystem or subprocess
 // access, exactly mirroring agentInit/agentStatus's injected-execFileSync
 // pattern above. Production callers (main(), below) call these with no
-// `deps` override, so the real backlog adapter (selectBacklogAdapter(),
-// honoring AURIGA_BACKLOG_ADAPTER=stub) and the real registry file
-// (readRealRegistryFile/writeRealRegistryFile, honoring
+// `deps` override, so the real backlog adapter (selectBacklogAdapter():
+// Pantheon core-api by default, AURIGA_BACKLOG_ADAPTER=stub for tests) and
+// the real registry file (readRealRegistryFile/writeRealRegistryFile, honoring
 // AURIGA_PROJECTS_REGISTRY_PATH) are used.
 
 /**
@@ -181,10 +182,9 @@ function parseChildFlag(argv) {
  * (comma-separated ids) is also set, the stub is seeded with those ids
  * instead of createStubBacklogAdapter()'s always-empty default. This is what
  * lets test/project-cli.test.mjs exercise `project add`'s real board-
- * validation path via an actual spawned `auriga` CLI process without ever
- * calling the live Multica CLI (standing rule: no live Multica testing —
- * verify with in-memory fixtures only). Unset in normal operation, so
- * production behavior is identical to calling selectBacklogAdapter() alone.
+ * validation path via an actual spawned `auriga` CLI process without any
+ * live backend (standing rule: verify with in-memory fixtures only). Unset
+ * in normal operation, so production behavior is identical to calling selectBacklogAdapter() alone.
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {object}
  */
@@ -194,6 +194,26 @@ function resolveProjectBacklog(env = process.env) {
     return { listAllProjectIds: () => ids };
   }
   return selectBacklogAdapter(env);
+}
+
+/**
+ * Pantheon core-api has no project-listing endpoint today, so the
+ * pantheon-v2-l2 adapter's listAllProjectIds() returns one board-wide
+ * sentinel instead of real project ids (see that adapter's own comment).
+ * `project scan` and `project add`'s board validation need real ids, so they
+ * report that plainly instead of treating the sentinel as a project or
+ * falling back to a direct Multica call.
+ * @param {object} backlog
+ * @returns {string|null} an error message, or null when real ids are available
+ */
+function projectListingUnavailable(backlog) {
+  if (typeof backlog.listAllProjects === 'function') return null;
+  const ids = backlog.listAllProjectIds();
+  if (ids.length === 1 && ids[0] === PANTHEON_BOARD_SENTINEL) {
+    return 'error: board project listing is not available through Pantheon core-api yet ' +
+      '(no project-list endpoint); edit projects.json directly for now\n';
+  }
+  return null;
 }
 
 /**
@@ -234,13 +254,15 @@ function formatListOutput(data) {
 /**
  * `auriga project scan` — READ-ONLY, never mutates the registry.
  * @param {{ backlog?: object, readRegistry?: () => object }} [deps]
- * @returns {string}
+ * @returns {{ ok: boolean, message: string }}
  */
 export function runProjectScan(deps = {}) {
   const backlog = deps.backlog || resolveProjectBacklog();
+  const unavailable = projectListingUnavailable(backlog);
+  if (unavailable) return { ok: false, message: unavailable };
   const readRegistry = deps.readRegistry || readRealRegistryFile;
   const data = readRegistry();
-  return formatScanOutput(scanUnregisteredProjects(backlog, data));
+  return { ok: true, message: formatScanOutput(scanUnregisteredProjects(backlog, data)) };
 }
 
 /**
@@ -275,6 +297,10 @@ export function runProjectAdd(id, flags, deps = {}) {
 
   const data = readRegistry();
   const alreadyRegistered = ((data && data.projects) || []).some((p) => p && p.id === id);
+  if (!alreadyRegistered) {
+    const unavailable = projectListingUnavailable(backlog);
+    if (unavailable) return { ok: false, message: unavailable };
+  }
   if (!alreadyRegistered && !isKnownBoardProject(backlog, id)) {
     return {
       ok: false,
@@ -519,7 +545,9 @@ async function main() {
   }
 
   if (cmd === 'project' && sub === 'scan') {
-    process.stdout.write(runProjectScan());
+    const result = runProjectScan();
+    (result.ok ? process.stdout : process.stderr).write(result.message);
+    if (!result.ok) process.exitCode = 1;
     return;
   }
 

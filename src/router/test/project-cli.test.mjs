@@ -222,6 +222,27 @@ test('CLI: `auriga project add` rejects a typo/nonexistent id with a clear error
   }
 });
 
+test('CLI (PANT-818): on the default core-api adapter, `project scan` and a new `project add` fail clearly (no project-list endpoint) and never touch the registry', () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), 'auriga-projects-coreapi-'));
+  const registryPath = join(tmpDir, 'projects.json');
+  const seed = { dispatch_order: [], projects: [] };
+  writeFileSync(registryPath, JSON.stringify(seed, null, 2) + '\n', 'utf8');
+  // Default adapter (AURIGA_BACKLOG_ADAPTER unset). No HTTP call is made:
+  // the guard fires on listAllProjectIds()'s board sentinel.
+  const env = { AURIGA_PROJECTS_REGISTRY_PATH: registryPath, AURIGA_BACKLOG_ADAPTER: '', PANTHEON_API_URL: 'http://127.0.0.1:9' };
+  try {
+    for (const args of [['project', 'scan'], ['project', 'add', 'some-new-id']]) {
+      const result = runCli(args, env);
+      assert.notEqual(result.code, 0, `${args.join(' ')} should fail`);
+      assert.match(result.stderr, /not available through Pantheon core-api/);
+      assert.doesNotMatch(result.stdout, /__pantheon_board__/);
+    }
+    assert.deepEqual(readRegistryFileDirect(registryPath), seed);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('REAL END-TO-END: add (new) -> list -> add again (idempotent update) -> remove -> list, each step confirmed by reading the throwaway file back off disk', () => {
   const tmpDir = mkdtempSync(join(tmpdir(), 'auriga-projects-e2e-'));
   const registryPath = join(tmpDir, 'projects.json');
