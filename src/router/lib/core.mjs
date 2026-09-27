@@ -958,6 +958,12 @@ export function agentIdSet(agents = {}) {
 // pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
+  // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
+  // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
+  const reviewLaneIds = new Set(
+    (cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean)
+  );
   const actions = [];
   for (const i of todoIssues) {
     if ((i.status || '').toLowerCase() !== 'todo') continue;
@@ -973,6 +979,21 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
+
+    if (reviewLaneIds.has(i.assignee_id)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({

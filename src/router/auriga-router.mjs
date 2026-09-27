@@ -629,12 +629,22 @@ export async function cycle(opts = {}) {
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
+    // PANT-736: unassign actions (review-lane agent on todo) bypass the capacity gate —
+    // they don't dispatch a run so must not consume a slot or count against inflight.
+    const idleUnassigns = idleActions.filter((a) => a.action === 'unassign');
+    const idleStartActions = idleActions.filter((a) => a.action !== 'unassign');
+    for (const a of idleUnassigns) {
+      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, applied: !dryRun });
+      if (!dryRun) {
+        try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+      }
+    }
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
     // additions made this cycle (those update inflight[] directly). Omitting it here
     // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
     // the per-runtime cap the correct view. Same fix as PANT-331 bug 2 for the cascade
     // and zombie passes; see capacity.mjs:computeRuntimeInflight.
-    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleStartActions, cfgImpl, {
       inflight,
       blockedRuntimes,
       priorAgentCycleAssigns,
