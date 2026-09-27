@@ -851,6 +851,61 @@ test('review dispatch loop respects maxAssign cap — PANT-516', async () => {
     `review dispatch must not exceed maxAssign=2, got ${calls.assign.length}`);
 });
 
+// ---- PANT-726: dispatch-review must not double-dispatch (assign + unconditional rerun) ----
+// When Multica enqueues a run on assignment, dispatch-review was calling assignIssue()
+// and then unconditionally calling rerunIssue(), producing two runs ~6s apart.
+// Fix: check runs after the post-assign sleep; only rerun if assignment did not
+// auto-enqueue. One dispatch must equal exactly one run.
+
+test('PANT-726: dispatch-review does NOT call rerunIssue when assignIssue auto-enqueued a run', async () => {
+  // Standard mock: assignIssue synthesizes an active run. dispatch-review must
+  // detect this and skip the rerun call entirely.
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant726-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts: 10, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const inReviewIssue = makeIssue({ project_id: 'pant726-proj', status: 'in_review' });
+  const { backlog, spawn, calls } = createMockAdapters([inReviewIssue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 1, 'review dispatch must count as one assignment');
+  assert.equal(calls.assign.length, 1, 'assignIssue must be called exactly once');
+  assert.equal(calls.assign[0].identifier, inReviewIssue.identifier);
+  assert.equal(calls.rerun.filter((r) => r.identifier === inReviewIssue.identifier).length, 0,
+    'rerunIssue must NOT be called when assignIssue already enqueued a run (PANT-726)');
+  assert.equal(log.byEvent('review_assign_enqueued').length, 1,
+    'review_assign_enqueued must be logged when assignment auto-enqueued');
+});
+
+test('PANT-726: dispatch-review DOES call rerunIssue when assignIssue did not enqueue a run (dead-zone fallback)', async () => {
+  // noRunFor prevents auto-enqueue — simulates the legacy dead-zone where
+  // assignment alone did not reliably start a run. The fallback rerun must fire.
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant726-fallback-proj': ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts: 10, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const inReviewIssue = makeIssue({ project_id: 'pant726-fallback-proj', status: 'in_review' });
+  const { backlog, spawn, calls } = createMockAdapters([inReviewIssue], fixtureCfg.AGENTS, {
+    noRunFor: new Set([inReviewIssue.identifier]),
+  });
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(result.assigned, 1, 'review dispatch must still count as one assignment');
+  assert.equal(calls.assign.length, 1, 'assignIssue must be called exactly once');
+  assert.equal(calls.rerun.filter((r) => r.identifier === inReviewIssue.identifier).length, 1,
+    'rerunIssue must be called once as a fallback when assignment did not enqueue a run');
+  const noRunLog = log.byEvent('review_verify_no_run').find(
+    (e) => e.identifier === inReviewIssue.identifier && e.action === 'rerun',
+  );
+  assert.ok(noRunLog, 'review_verify_no_run(action:rerun) must be logged for the dead-zone fallback');
+});
+
 test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
   // A cascade candidate exists (done parent + blocked child with metadata dep),
   // but the child's most recent run completed only 30 s ago — well within the
