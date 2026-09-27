@@ -1455,6 +1455,25 @@ test('descDepsSatisfied resolves "p1-<name>" slug deps by exact `id:` match, not
   assert.equal(core.descDepsSatisfied(bulkReassign, [bulkReassign, capRoutingDone, stateMachineDone]), true);
 });
 
+// Regression (PANT-446): top-level issues (parent_issue_id === null) had an always-empty
+// sibling list because the filter required s.parent_issue_id to be truthy before comparing
+// it to null, making null === null unreachable.
+test('descDepsSatisfied resolves p1-style deps for top-level issues (no parent_issue_id)', () => {
+  const depDone = {
+    id: 'x', status: 'done', parent_issue_id: null,
+    title: '[p1-routing-capability] Routing capability',
+    description: 'id: p1-routing-capability\n',
+  };
+  const depTodo = { ...depDone, id: 'x2', status: 'todo' };
+  const issue = {
+    id: 'y', status: 'blocked', parent_issue_id: null,
+    title: '[p1-dependent-story] Dependent story',
+    description: 'id: p1-dependent-story\ndepends_on: [p1-routing-capability]\n',
+  };
+  assert.equal(core.descDepsSatisfied(issue, [issue, depDone]), true);
+  assert.equal(core.descDepsSatisfied(issue, [issue, depTodo]), false);
+});
+
 test('detectUnblocks fires on a blocked story whose DESCRIPTION dep (not metadata) is done', () => {
   const parent = 'P';
   const m01 = { id: 'a', identifier: 'PAN-6439', project_id: 'MEM', title: '[m-01-core-recall-interface] x', status: 'done', parent_issue_id: parent };
