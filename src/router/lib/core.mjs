@@ -189,11 +189,12 @@ export function depsSatisfied(issue, statusById) {
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
 // load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set()) {
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
   const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
     agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
+    (projected.perAgentCycle?.[name] || 0) < maxPerAgent
   );
   if (!eligible.length) return null;
   // Prefer lane order but break by lowest projected load.
