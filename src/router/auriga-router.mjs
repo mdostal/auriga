@@ -291,6 +291,26 @@ export async function cycle(opts = {}) {
   // DISPATCH-scoped (feeds review-dispatch further down) — see the blocked->todo pass above.
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
 
+  // ---- state-machine: in_review -> done on a verified merged PR ----
+  // Each in_review issue is checked for a real merged PR via getIssuePullRequests.
+  // detectVerifiedDone requires a real merge (state=merged or merged_at set) — never
+  // fires on an open/closed PR, never fires on smoke/scratch issues or human-owned stories.
+  {
+    const prsByIssue = {};
+    for (const i of inReview) {
+      try { prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier); }
+      catch (e) { prsByIssue[i.identifier] = []; logImpl('prs_fetch_error', { identifier: i.identifier, error: e.message }); }
+    }
+    const verifiedDone = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
+    for (const vd of verifiedDone) {
+      logImpl('advance', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, kind: 'verified-done', applied: !dryRun });
+      if (!dryRun) {
+        try { backlog.setIssueStatus(vd.identifier, ISSUE_STATUS.DONE); }
+        catch (e) { logImpl('advance_error', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
+      }
+    }
+  }
+
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
   // the router owns the todo transition + unassign so a build lane can pick
@@ -497,16 +517,10 @@ export async function cycle(opts = {}) {
             '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
           );
         } catch (e) { logImpl('review_comment_error', { identifier: r.identifier, error: e.message }); }
-        // reassign the in_review story to the review agent, then force-enqueue a
-        // fresh run for it (assignee-mutation alone does not reliably enqueue —
-        // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
-        // sleep first to let the new assignee propagate before rerun).
-        // NOT routed through spawn.dispatch() (a real, tested method with a
-        // genuinely different contract here — see spawn-adapter.mjs's typedef):
-        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
-        // branch, which never assigns at all) rather than verifying a run started
-        // first — a different contract than dispatch()'s verify-then-conditionally-
-        // rerun, not a stale duplicate of it.
+        // Reassign the in_review story to the review agent, then verify a run
+        // started (Multica enqueues a run on assignment); force-rerun only if
+        // the assignment did not auto-enqueue one (dead-zone fallback).
+        // NOT routed through spawn.dispatch() (different contract — see spawn-adapter.mjs).
         if (typeof spawn.selectRoute === 'function') {
           try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
         }
@@ -516,17 +530,33 @@ export async function cycle(opts = {}) {
           catch (e) { logImpl('assign_metadata_error', { identifier: r.identifier, error: e.message }); }
         }
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+        const postAssignRuns = backlog.getIssueRuns(r.identifier);
+        const assignEnqueued = postAssignRuns.some((run) => {
+          const rc = coreImpl.classifyRun(run, now);
+          return rc.active || rc.done || rc.failed;
+        });
+        if (!assignEnqueued) {
+          logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: 'rerun' });
+          try { spawn.rerunIssue(r.identifier); } catch (e) { logImpl('rerun_error', { identifier: r.identifier, error: e.message }); }
+        } else {
+          const lr = coreImpl.latestRun(postAssignRuns);
+          const rc = lr ? coreImpl.classifyRun(lr, now) : {};
+          logImpl('review_assign_enqueued', { identifier: r.identifier, agent: r.agent, runStatus: rc.status });
+        }
+      } else {
+        // rerun-review: no assign happened, always force-enqueue.
+        spawn.rerunIssue(r.identifier);
       }
-      spawn.rerunIssue(r.identifier);
       assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
-      // For dispatch-review this is the SECOND sleep (first was pre-rerunIssue); for
-      // rerun-review there was no prior sleep, so this is the only one. Both cases end
-      // with a run-presence check that logs review_verify_ok / review_verify_no_run —
-      // the latter is the clearest early signal that the hang is happening THIS cycle
-      // (not 30 minutes later when idle_watchdog fires).
+      // For dispatch-review this is the SECOND sleep (first was pre-verify inside the
+      // dispatch-review block); for rerun-review there was no prior sleep, so this is
+      // the only one. Both cases end with a run-presence check that logs
+      // review_verify_ok / review_verify_no_run — the latter is the clearest early
+      // signal that the hang is happening THIS cycle (not 30 minutes later when
+      // idle_watchdog fires).
       await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
       const reviewRunStarted = reviewVerifyRuns.some((run) => {
@@ -629,12 +659,22 @@ export async function cycle(opts = {}) {
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
+    // PANT-736: unassign actions (review-lane agent on todo) bypass the capacity gate —
+    // they don't dispatch a run so must not consume a slot or count against inflight.
+    const idleUnassigns = idleActions.filter((a) => a.action === 'unassign');
+    const idleStartActions = idleActions.filter((a) => a.action !== 'unassign');
+    for (const a of idleUnassigns) {
+      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, applied: !dryRun });
+      if (!dryRun) {
+        try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+      }
+    }
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
     // additions made this cycle (those update inflight[] directly). Omitting it here
     // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
     // the per-runtime cap the correct view. Same fix as PANT-331 bug 2 for the cascade
     // and zombie passes; see capacity.mjs:computeRuntimeInflight.
-    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleStartActions, cfgImpl, {
       inflight,
       blockedRuntimes,
       priorAgentCycleAssigns,

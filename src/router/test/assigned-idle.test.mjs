@@ -270,6 +270,56 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
 });
 
 
+// PANT-736: review-lane agent on a todo ticket must be unassigned, not re-dispatched.
+const CFG_WITH_REVIEW = {
+  ...CFG,
+  AGENTS: {
+    ...CFG.AGENTS,
+    'auriga-review': { id: 'AR', runtime: 'claude', maxInflight: 2 },
+  },
+  REVIEW_LANE: ['auriga-review'],
+};
+
+test('PANT-736: detectAssignedIdle emits unassign (not start) when assignee is a review-lane agent on a todo ticket', () => {
+  const issue = assignedTodo('PAN-1', 'AR');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'unassign');
+  assert.equal(actions[0].reason, 'review-lane-on-todo');
+  assert.equal(actions[0].identifier, 'PAN-1');
+});
+
+test('PANT-736: detectAssignedIdle still emits start for build-lane agents when REVIEW_LANE is configured', () => {
+  const issue = assignedTodo('PAN-1', 'A'); // auriga-dev, not in REVIEW_LANE
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+});
+
+test('PANT-736: review-lane unassign action is excluded from limitAssignedIdleRecoveries capacity gate', () => {
+  // Both a review-lane (AR) and a build-lane (A) issue are idle.
+  // The review-lane issue must produce an unassign, and the build-lane must produce start.
+  // limitAssignedIdleRecoveries should only see the start action (unassign is filtered before the call).
+  const reviewIssue = assignedTodo('PAN-review', 'AR');
+  const buildIssue = assignedTodo('PAN-build', 'A');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const allActions = core.detectAssignedIdle([reviewIssue, buildIssue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  const startActions = allActions.filter((a) => a.action !== 'unassign');
+  const unassignActions = allActions.filter((a) => a.action === 'unassign');
+  assert.equal(unassignActions.length, 1, 'review-lane issue emits one unassign');
+  assert.equal(unassignActions[0].identifier, 'PAN-review');
+  const { selected } = core.limitAssignedIdleRecoveries(startActions, CFG_WITH_REVIEW, {
+    agents: CFG_WITH_REVIEW.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 1, 'only the build-lane issue reaches limitAssignedIdleRecoveries');
+  assert.equal(selected[0].identifier, 'PAN-build');
+  assert.equal(selected[0].action, 'start');
+});
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),

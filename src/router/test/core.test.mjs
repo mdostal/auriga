@@ -299,14 +299,16 @@ test('detectRunCompletions: done+non-failed run -> advance-in-review; active/fai
   assert.equal(actions[0].action, 'advance-in-review');
 });
 
-test('detectRunCompletions: seed issue with done run is NOT advanced to in_review', () => {
+test('detectRunCompletions: explicitly-labeled seed is NOT advanced; unlabeled top-level issue IS advanced (isSeedByLabel, not heuristic)', () => {
   const now = Date.now();
   const seedWithLabel = {
     id: 'seed1', identifier: 'seed1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'plan something', parent_issue_id: null,
     labels: [{ id: 'l1', name: 'idea', color: '#000' }],
   };
-  const seedChildless = {
+  // top-level + childless but no explicit seed label: NOT filtered by isSeedByLabel
+  // (the heuristic is too broad here — a real in_progress story has no children yet)
+  const unlabeledTopLevel = {
     id: 'seed2', identifier: 'seed2', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'top level childless', parent_issue_id: null, labels: [],
   };
@@ -314,17 +316,15 @@ test('detectRunCompletions: seed issue with done run is NOT advanced to in_revie
     id: 'impl1', identifier: 'impl1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'implement the thing', parent_issue_id: 'seed1', labels: [],
   };
-  const inProgress = [seedWithLabel, seedChildless, notSeed];
-  // allIssues includes notSeed as a child of seed1, so seed1 is NOT childless
-  // but has an explicit label — it's still a seed. seed2 is childless+top-level.
-  const allIssues = [seedWithLabel, seedChildless, notSeed];
+  const inProgress = [seedWithLabel, unlabeledTopLevel, notSeed];
+  const allIssues = [seedWithLabel, unlabeledTopLevel, notSeed];
   const runs = {
     seed1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     seed2: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     impl1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
   };
   const actions = core.detectRunCompletions(inProgress, runs, now, {}, allIssues);
-  assert.deepEqual(actions.map((a) => a.identifier), ['impl1']);
+  assert.deepEqual(actions.map((a) => a.identifier), ['seed2', 'impl1']);
 });
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {

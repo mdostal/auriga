@@ -45,7 +45,7 @@ function makeCurlMock(t, handler) {
     const bodyText = result.body === undefined ? '' : JSON.stringify(result.body);
     return `${bodyText}\n${result.status}`;
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: fn } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: fn } });
   return calls;
 }
 
