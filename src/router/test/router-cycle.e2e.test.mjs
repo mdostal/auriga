@@ -1954,3 +1954,54 @@ test('PANT-661: review dispatch still reserves capacity when rerunIssue throws �
   assert.ok(reviewErrors.some((e) => e.identifier === issueA.identifier),
     'review_error must be logged when rerunIssue throws for issueA — PANT-661');
 });
+
+// ---- PANT-379: cascade cap + exclusion must be committed before rerunIssue ----
+
+test('PANT-379: a cascade rerun failure still counts toward perCycleCascade', async () => {
+  // Before fix: cascadeFired++ ran after rerunIssue, so a failed rerun left the cap
+  // under-counted and the loop assigned another cascade past perCycleCascade.
+  const lanes = withFixtureLanes({ 'pant379-cap-proj': ['auriga-dev'] });
+  const fixtureCfg = { ...lanes, CAPS: { ...lanes.CAPS, perCycleCascade: 1 } };
+  const doneA = makeIssue({ project_id: 'pant379-cap-proj', status: 'done' });
+  const doneB = makeIssue({ project_id: 'pant379-cap-proj', status: 'done' });
+  const childA = makeIssue({ project_id: 'pant379-cap-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneA.id } });
+  const childB = makeIssue({ project_id: 'pant379-cap-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneB.id } });
+  const { backlog, spawn, calls } = createMockAdapters([doneA, doneB, childA, childB], fixtureCfg.AGENTS);
+  // Non-rate-limit error so blockedRuntimes stays empty and only the cap can stop childB.
+  spawn.rerunIssue = (identifier) => { calls.rerun.push({ identifier }); throw new Error('multica: 502 bad gateway'); };
+  const log = createLogSink();
+
+  const result = await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  // childB may still be routed by the picks loop as an ordinary todo; the cap only
+  // bounds how many stories the cascade pass itself fires.
+  const cascadeDispatches = log.byEvent('cascade_dispatch');
+  assert.equal(cascadeDispatches.length, 1,
+    `perCycleCascade=1 must hold even when the rerun fails — got ${cascadeDispatches.length} cascade dispatches`);
+  assert.ok(log.byEvent('cascade_error').length === 1, 'the failed rerun must be logged as cascade_error');
+  // Only childB's picks-loop dispatch counts; childA's failed rerun is not a dispatch (PANT-677).
+  assert.equal(result.assigned, 1, `only childB's picks dispatch should count toward assigned — got ${result.assigned}`);
+});
+
+test('PANT-379: a cascade rerun failure keeps the story out of selectAssignments this cycle', async () => {
+  // Before fix: cascaded.add ran after rerunIssue, so a failed rerun left the story
+  // (now todo) eligible for a second dispatch by the picks loop in the same cycle.
+  const fixtureCfg = withFixtureLanes({ 'pant379-excl-proj': ['auriga-dev'] });
+  const done = makeIssue({ project_id: 'pant379-excl-proj', status: 'done' });
+  const child = makeIssue({ project_id: 'pant379-excl-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: done.id } });
+  const { backlog, spawn, calls } = createMockAdapters([done, child], fixtureCfg.AGENTS);
+  // Rerun fails without enqueuing a run and the assignee is dropped, so nothing but
+  // the `cascaded` exclusion set stops the picks loop from re-dispatching the story.
+  spawn.rerunIssue = (identifier) => {
+    calls.rerun.push({ identifier });
+    const issue = [done, child].find((i) => i.identifier === identifier);
+    if (issue) issue.assignee_id = null;
+    throw new Error('multica: 502 bad gateway');
+  };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const assigns = calls.assign.filter((a) => a.identifier === child.identifier);
+  assert.equal(assigns.length, 1, `story must be dispatched once per cycle — got ${assigns.length} assigns`);
+});
