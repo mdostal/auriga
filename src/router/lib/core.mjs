@@ -749,7 +749,7 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = []) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = [], mergedPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
@@ -797,7 +797,9 @@ export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = 
     // to done off the merged PR while detectFalseDone immediately demotes it again off
     // the unrelated open one, and the two detectors thrash done<->in_review forever.
     // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
-    const mergedPr = (openPrs || []).find((p) => {
+    // PANT-656: an open-only `openPrs` never holds merged PRs, so merged ones must come in
+    // via `mergedPrs`; `openPrs` is still searched in case the caller passed a mixed-state list.
+    const mergedPr = [...(mergedPrs || []), ...(openPrs || [])].find((p) => {
       if (!isPrMerged(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false;
       return repoQualifies(p);
