@@ -347,6 +347,35 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     return created;
   }
 
+  // Merge key-value pairs into an EXISTING issue's metadata (PANT-437 /
+  // PAN-8245 — the router records router_assignment_fingerprint/_agent after
+  // every assignIssue so isRouterManagedAssignment() can see its own
+  // assignments). `multica issue metadata set` writes ONE key per call and
+  // leaves other keys untouched, so looping over the object is a merge, not a
+  // replace. String values are sent with `--type string`: the CLI otherwise
+  // JSON-sniffs the value, and a hex fingerprint like "1234e5..." or an
+  // all-digit one would come back as a number and never match on re-read.
+  // Best-effort, same convention as commentOnIssue: never throws, one key
+  // failing does not stop the others, returns null if any key failed.
+  function setIssueMetadata(identifier, metadataObj) {
+    if (!identifier || !metadataObj || typeof metadataObj !== 'object') return null;
+    let ok = true;
+    for (const [key, value] of Object.entries(metadataObj)) {
+      const args = ['issue', 'metadata', 'set', identifier, '--key', key];
+      if (typeof value === 'string') args.push('--value', value, '--type', 'string');
+      else if (typeof value === 'number' || typeof value === 'boolean') args.push('--value', String(value));
+      else args.push('--value', JSON.stringify(value));
+      args.push('--output', 'json');
+      try {
+        run(args);
+      } catch (e) {
+        ok = false;
+        process.stderr.write(`setIssueMetadata(${identifier}): "${key}" failed: ${e.message}\n`);
+      }
+    }
+    return ok ? { ok: true } : null;
+  }
+
   return Object.freeze({
     listIssues,
     listAllProjectIds,
@@ -355,6 +384,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     setIssueStatus,
     commentOnIssue,
     createIssue,
+    setIssueMetadata,
 
     // ---- ported/adapter-specific extras, NOT part of the BacklogAdapter
     // contract (see the doc comments on listAllIssues/
