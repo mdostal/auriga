@@ -995,6 +995,35 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
   return actions;
 }
 
+// Detect `todo` issues assigned to an agent that is no longer in cfg.AGENTS
+// (archived or removed agent). These slip through every dispatch pass:
+//   - selectAssignments: has an assignee that is not router-managed → skipped
+//   - detectZombies: status is todo, not in_progress → skipped
+//   - detectAssignedIdle: knownAgentIds.has(i.assignee_id) is false → skipped
+// The only fix is to unassign them so they re-enter the normal candidate pool
+// as fresh, unassigned todos for selectAssignments to route next cycle.
+// (PANT-684)
+export function detectArchivedAssignments(todoIssues, cfg, knownAgentIds = agentIdSet(cfg.AGENTS)) {
+  const actions = [];
+  for (const i of todoIssues) {
+    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!i.assignee_id || knownAgentIds.has(i.assignee_id)) continue;
+    if (isSmokeScratch(i.title)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+    actions.push({
+      identifier: i.identifier,
+      issueId: i.id,
+      assigneeId: i.assignee_id,
+      projectId: i.project_id,
+      lane: cfg.PROJECT_NAMES?.[i.project_id] || i.project_id,
+      action: 'unassign',
+      reason: 'archived-agent',
+    });
+  }
+  return actions;
+}
+
 // Select this cycle's assigned-idle recoveries — oldest-idle-first, bounded by
 // the SAME capacity math as fresh routing (per-agent maxInflight, per-runtime
 // cap, blocked/rate-limited runtimes) instead of a flat 1-per-agent throttle.
