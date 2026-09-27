@@ -143,6 +143,28 @@ function isSeedByLabel(issue) {
   return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
 }
 
+// The planning lane every seed routes to (PAN-6646).
+export const PLANNING_AGENT = 'minerva-dev';
+
+// Does this tenant's config include the planning lane? A cfg with no AGENTS map
+// at all (bare {} in pure-function tests/callers) is "unknown" and keeps the
+// historical behaviour, so only a real agent roster lacking minerva-dev counts.
+export function hasPlanningAgent(cfg) {
+  return !cfg || !cfg.AGENTS || !!cfg.AGENTS[PLANNING_AGENT];
+}
+
+// isSeed, scoped to what this tenant can actually do with a seed (PANT-772).
+// The top-level+childless heuristic exists to steer un-planned work to Minerva;
+// on a tenant with no planning agent (e.g. firefly-events/Flayr) that steer
+// has nowhere to go and silently disabled every top-level ticket. There, a
+// heuristic-only seed is just a build ticket. Explicitly-labeled seeds
+// ('idea'/'needs-plan'/'consus-idea') stay seeds — a human asked for planning.
+export function isSeedForTenant(issue, allIssues = [], cfg) {
+  if (!isSeed(issue, allIssues)) return false;
+  if (hasPlanningAgent(cfg)) return true;
+  return isSeedByLabel(issue);
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -297,8 +319,6 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     return (a.number || 0) - (b.number || 0);
   });
 
-  const PLANNING_AGENT = 'minerva-dev';
-
   // t015 — orchestrator hand-up: decisions are returned as DATA (never
   // acted on here — core.mjs stays pure/no-I/O, same invariant t011's
   // decomposition preserved everywhere else). auriga-router.mjs's cycle()
@@ -308,6 +328,11 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // every existing caller that treats this return value as a plain array
   // (`.length`, `for...of`, etc.) is unaffected.
   const handUps = [];
+  // PANT-772: seeds seen on a tenant with no planning agent — returned as data
+  // (like handUps) so the router can log them instead of skipping silently.
+  // fallback=true: heuristic-only seed, routed to the build lane below.
+  // fallback=false: explicitly-labeled seed, held (nothing can plan it here).
+  const seedNoPlanning = [];
 
   const chosen = [];
   for (const issue of candidates) {
@@ -319,7 +344,11 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     // PANT-518: when the planning lane is unavailable, fall through to the
     // isHandUp check (below) rather than always continuing — a seed with the
     // hand-up label and no planning route must escalate, not silently defer.
-    if (isSeed(issue, issues) && !isHiveStory(issue)) {
+    const seed = isSeed(issue, issues) && !isHiveStory(issue);
+    if (seed && !hasPlanningAgent(cfg)) {
+      seedNoPlanning.push({ identifier: issue.identifier, issueId: issue.id, fallback: !isSeedByLabel(issue) });
+    }
+    if (seed && isSeedForTenant(issue, issues, cfg)) {
       let seedHandled = false;
       if (cfg.AGENTS[PLANNING_AGENT]
           && agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) {
@@ -386,6 +415,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     });
   }
   chosen.handUps = handUps;
+  chosen.seedNoPlanning = seedNoPlanning;
   return chosen;
 }
 
@@ -425,7 +455,7 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}, allIssu
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // seeds have planning PRs that must not advance the epic to done
+    if (isSeedForTenant(i, allIssues, cfg)) continue; // seeds have planning PRs that must not advance the epic to done
     const prs = prsByIssue[i.identifier] || [];
     // AUTHORITATIVE PATH (PANT-373): when the story records its OWN PR url, ONLY
     // that exact PR being merged can advance it. A stray merged PR that merely
@@ -774,7 +804,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
-    if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
+    if (isSeedForTenant(i, allIssues, cfg)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
@@ -821,7 +851,7 @@ export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = 
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (allIssues.length > 0 && isSeed(i, allIssues)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
+    if (allIssues.length > 0 && isSeedForTenant(i, allIssues, cfg)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and

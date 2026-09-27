@@ -848,6 +848,13 @@ export async function cycle(opts = {}) {
     priorAgentCycleAssigns,
   });
 
+  // PANT-772: seeds on a tenant with no planning agent. Heuristic-only seeds
+  // were already routed to the build lane (they appear in picks); explicitly
+  // labeled ones are held. Log both every cycle so neither is ever silent.
+  for (const s of picks.seedNoPlanning || []) {
+    logImpl('seed_no_planning_agent', { identifier: s.identifier, planningAgent: coreImpl.PLANNING_AGENT, fallback: s.fallback ? 'build_lane' : 'held' });
+  }
+
   for (const p of picks) {
     if (assigned >= maxAssign) break;
     if (blockedRuntimes.has(p.runtime)) {
