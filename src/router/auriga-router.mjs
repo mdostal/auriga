@@ -134,10 +134,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // s14: builds a fresh {backlog, spawn} adapter pair scoped to one tenant's
 // merged config -- mirrors defaultBacklog/defaultSpawn's own construction
 // above exactly, just parameterized per tenant instead of module-scope-once.
-function buildAdaptersForTenant(tenantId, tenantCfg) {
+function buildAdaptersForTenant(tenantId, tenantCfg, { decisions } = {}) {
   const backlog = createPantheonV2L2BacklogAdapter({ tenantId });
   const spawn = createPantheonV2L2SpawnAdapter({
     tenantId,
+    decisions,
     verifyDelayMs: tenantCfg.CAPS.verifyDelayMs,
     projectLane: tenantCfg.PROJECT_LANE,
     defaultLane: tenantCfg.DEFAULT_LANE,
@@ -146,6 +147,34 @@ function buildAdaptersForTenant(tenantId, tenantCfg) {
     runtimeCap: tenantCfg.RUNTIME_CAP,
   });
   return { backlog, spawn };
+}
+
+// PANT-388: the spawn adapter's _decisions store (selectRoute() at dispatch
+// in cycle N -> reportRouteOutcome() once the run is verified in cycle N+K)
+// must outlive a single cycle, exactly like defaultSpawn does in main().
+// mainMultiTenant() therefore keeps one adapter pair per tenant across
+// cycles, rebuilding it only when the tenant config the adapters capture at
+// construction time changes -- and even then the same per-tenant decisions
+// Map is handed to the rebuilt spawn adapter, so no pending outcome is lost.
+function tenantAdapterFingerprint(tenantCfg) {
+  return JSON.stringify([
+    tenantCfg.CAPS?.verifyDelayMs,
+    tenantCfg.PROJECT_LANE,
+    tenantCfg.DEFAULT_LANE,
+    tenantCfg.HIVE_LANE,
+    tenantCfg.REVIEW_LANE,
+    tenantCfg.RUNTIME_CAP,
+  ]);
+}
+
+function getTenantAdapters(cache, tenantId, tenantCfg, build = buildAdaptersForTenant) {
+  const fingerprint = tenantAdapterFingerprint(tenantCfg);
+  const cached = cache.get(tenantId);
+  if (cached && cached.fingerprint === fingerprint) return cached.adapters;
+  const decisions = cached ? cached.decisions : new Map();
+  const adapters = build(tenantId, tenantCfg, { decisions });
+  cache.set(tenantId, { fingerprint, decisions, adapters });
+  return adapters;
 }
 
 // s14: wraps the module-level log() with a fixed tenant_id, so per-tenant
@@ -996,6 +1025,8 @@ async function mainMultiTenant() {
   let rotation = 0;
   let iterations = 0;
   let totalAssigned = 0;
+  // PANT-388: per-tenant adapters live across cycles -- see getTenantAdapters().
+  const tenantAdapters = new Map();
   do {
     let tenants = [];
     try {
@@ -1010,7 +1041,7 @@ async function mainMultiTenant() {
         if (totalAssigned >= MAX_ASSIGN) break;
         const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
         try {
-          const { backlog, spawn } = buildAdaptersForTenant(tenantId, tenantCfg);
+          const { backlog, spawn } = getTenantAdapters(tenantAdapters, tenantId, tenantCfg);
           const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining });
           totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
@@ -1037,4 +1068,4 @@ if (isMainModule) {
   if (MULTI_TENANT) { mainMultiTenant(); } else { main(); }
 }
 
-export { buildAdaptersForTenant, mainMultiTenant };
+export { buildAdaptersForTenant, getTenantAdapters, mainMultiTenant };
