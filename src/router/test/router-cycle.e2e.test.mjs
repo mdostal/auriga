@@ -1124,7 +1124,7 @@ test('cascade: skips (logs redispatch-cooldown) when last run completed within r
   const FIXED_NOW = Date.now();
   const doneParent = makeIssue({ project_id: 'cooldown-proj', status: 'done' });
   const blockedChild = makeIssue({ project_id: 'cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
-  const { backlog, spawn, calls, runsByIdentifier, log } = (() => {
+  const { backlog, spawn, calls, log } = (() => {
     const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
     // Seed a completed run that finished 30 s ago — within cooldown
     const recentCompletedAt = new Date(FIXED_NOW - 30_000).toISOString();
