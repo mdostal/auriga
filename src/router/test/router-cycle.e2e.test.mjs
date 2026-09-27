@@ -217,76 +217,6 @@ test('AC3: per-agent(2) and per-runtime (claude 2 / codex 4) caps hold within on
   }
 });
 
-// ---- regression coverage for an independent adversarial review's two findings
-// against this epic's diff: (1) a PR matching a story ONLY via its short slug
-// key (never the raw ticket identifier) was silently dropped before
-// core.mjs's prMatchesStory ever got a chance to find it, because
-// backlog.getIssuePullRequests pre-filtered with its own narrower
-// prMatchesIdentifier heuristic; (2) the repo-wide gh PR scan re-ran per
-// issue per call site instead of once per cycle(). Both fixed by
-// auriga-router.mjs's cycle() calling backlog.listCandidatePullRequests()
-// ONCE and filtering that cached, unfiltered list via coreImpl.prMatchesStory
-// itself.
-
-test('a PR matching ONLY via the story\'s short slug key (never the raw ticket identifier) is found via the cached board-wide scan + prMatchesStory', async () => {
-  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
-  const story = makeIssue({
-    project_id: AURIGA,
-    title: '[m-01-core] Wire the recall interface',
-    status: 'in_review',
-  });
-  // Deliberately carries the story's short slug key ("m-01") in its branch,
-  // but NEVER the raw ticket identifier (e.g. "PAN-1042") anywhere in title/
-  // branch/body — the exact shape prMatchesIdentifier (the adapter's old,
-  // narrower per-identifier heuristic) cannot match, but prMatchesStory's
-  // short-key regex can.
-  const slugOnlyPr = {
-    number: 5,
-    title: 'feat: service wiring',
-    headRefName: 'feat/m-01-service',
-    body: '',
-    state: 'merged',
-    merged_at: new Date().toISOString(),
-    url: 'https://github.com/acme/widgets/pull/5',
-  };
-  const idNeedle = story.identifier.toLowerCase();
-  assert.ok(![slugOnlyPr.title, slugOnlyPr.headRefName, slugOnlyPr.body].some((s) => s.toLowerCase().includes(idNeedle)),
-    'fixture sanity: the PR must not literally contain the raw ticket identifier anywhere');
-
-  const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS);
-  let scanCalls = 0;
-  backlog.listCandidatePullRequests = () => { scanCalls++; return [slugOnlyPr]; };
-  const log = createLogSink();
-
-  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
-
-  const advanced = log.byEvent('advance').find((e) => e.identifier === story.identifier && e.to === 'done');
-  assert.ok(advanced, 'the slug-only-matching merged PR should have advanced the in_review story to done (detectVerifiedDone via prMatchesStory)');
-  assert.equal(scanCalls, 1, 'listCandidatePullRequests should have been called exactly once for this cycle');
-});
-
-test('the board-wide PR candidate scan runs a BOUNDED number of times per cycle(), not once per in_review/done issue', async () => {
-  const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
-  // 5 in_review + 5 done issues: every one of them independently needs a
-  // "does this issue have a matching PR" answer across several passes
-  // (verified-done, cascade guard, review-dispatch openPrIds, false-done).
-  // Pre-fix, backlog.getIssuePullRequests re-ran its own full repo scan on
-  // EVERY one of those lookups (O(issues) scans); post-fix, the scan must
-  // happen once, at the top of cycle(), and be reused for all of them.
-  const issues = [
-    ...Array.from({ length: 5 }, () => makeIssue({ project_id: AURIGA, status: 'in_review', parent_issue_id: 'fake-parent' })),
-    ...Array.from({ length: 5 }, () => makeIssue({ project_id: AURIGA, status: 'done', parent_issue_id: 'fake-parent' })),
-  ];
-  const { backlog, spawn } = createMockAdapters(issues, cfg.AGENTS);
-  let scanCalls = 0;
-  backlog.listCandidatePullRequests = () => { scanCalls++; return []; };
-  const log = createLogSink();
-
-  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
-
-  assert.equal(scanCalls, 1, `expected the board-wide PR scan to run exactly once per cycle() regardless of issue count (10 issues), got ${scanCalls} calls`);
-});
-
 // ---- review-dispatch tenant scoping (2026-09-13) --------------------------
 // Regression for a real cross-tenant leak found live while removing the
 // GitHub PR-gate from reviewEligible/selectReviewDispatch: `inReview` (used
@@ -847,46 +777,6 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
   assert.ok(skipLog, 'cascade_skip(no-capacity) must be logged when skipping due to full inflight');
 });
 
-test('cascade: calls rerunIssue (without reassigning) for BLOCKED issue with existing assignee when no agent has capacity', async () => {
-  // PANT-341: the blanket !agent guard was over-broad. A previously-assigned
-  // blocked story whose deps cleared should get re-enqueued immediately, not
-  // wait for the assigned-idle recovery pass (~10 min). When !agent but
-  // assignee_id is set, rerunIssue must fire and assignIssue must NOT fire.
-  //
-  // Key setup: the dep is in_review (not done) at cycle start. The unblock
-  // pass sees it as non-terminal and skips blockedChild. detectVerifiedDone
-  // then advances the dep to done (via merged PR), so the CASCADE pass is the
-  // FIRST pass that sees blockedChild with satisfied deps — and blockedChild
-  // still has its original assignee_id intact at that point.
-  const fixtureCfg = withFixtureLanes({ 'cascade-proj-341': ['auriga-dev'] });
-  const tightCfg = {
-    ...fixtureCfg,
-    AGENTS: { ...fixtureCfg.AGENTS, 'auriga-dev': { ...fixtureCfg.AGENTS['auriga-dev'], maxInflight: 1 } },
-  };
-  const existingAgent = tightCfg.AGENTS['auriga-dev'].id;
-  const saturatingIssue = makeIssue({ project_id: 'cascade-proj-341', status: 'in_progress', assignee_id: existingAgent });
-  // The dep starts as in_review so the unblock pass doesn't convert blockedChild.
-  // detectVerifiedDone will advance it to done (via the merged PR below).
-  const inReviewParent = makeIssue({ project_id: 'cascade-proj-341', status: 'in_review' });
-  // blocked child already assigned to the agent — this is the PANT-341 case
-  const blockedChild = makeIssue({ project_id: 'cascade-proj-341', status: 'blocked', assignee_id: existingAgent, metadata: { depends_on: inReviewParent.id } });
-  const { backlog, spawn, calls } = createMockAdapters([saturatingIssue, inReviewParent, blockedChild], tightCfg.AGENTS);
-  // Merged PR for the dep: detectVerifiedDone advances inReviewParent to done,
-  // satisfying blockedChild's dep for the cascade pass.
-  backlog.getIssuePullRequests = (identifier) =>
-    identifier === inReviewParent.identifier ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
-  const log = createLogSink();
-
-  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
-
-  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
-    'cascade MUST call rerunIssue for a blocked child that already has an assignee, even when no new agent has capacity');
-  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
-    'cascade must NOT call assignIssue when re-enqueueing a previously-assigned blocked child');
-  assert.ok(!log.byEvent('cascade_skip').some((e) => e.identifier === blockedChild.identifier),
-    'cascade_skip must NOT be logged for a blocked child with an existing assignee');
-});
-
 test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxTotal=0 not perCycleTotal)', async () => {
   // maxAssign:0 means no assignments should happen. Before the fix,
   // remaining=0 would fall back to perCycleTotal via the || operator, passing
@@ -1012,62 +902,6 @@ test('cascade: dispatches normally when last run completed beyond redispatchCool
     'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
 });
 
-// PANT-431: detectVerifiedDone + selectReviewDispatch same-cycle stale-snapshot
-// regression. When a merged PR advances an in_review issue to done in the same
-// cycle that its review run has gone stale, selectReviewDispatch must NOT emit
-// a rerun-review dispatch for it — the issue is already done.
-test('an in_review issue advanced to done by a merged PR in the same cycle is never re-dispatched for review (PANT-431)', async () => {
-  const AURIGA = projectId('Pantheon Core');
-  const FIXED_NOW = Date.now();
-  const reviewAgentId = cfg.AGENTS['auriga-review'].id;
-  const story = makeIssue({
-    project_id: AURIGA,
-    status: 'in_review',
-    assignee_id: reviewAgentId,
-  });
-  // Stale run: completed well beyond zombieStaleMs ago so selectReviewDispatch
-  // would hit the rerun-review branch if the issue were still present.
-  const staleAge = (cfg.CAPS.zombieStaleMs ?? 20 * 60 * 1000) + 60 * 60 * 1000;
-  const staleAt = new Date(FIXED_NOW - staleAge).toISOString();
-  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS);
-  backlog.listCandidatePullRequests = () => [{
-    number: 99,
-    title: `fix: ${story.identifier} implementation`,
-    headRefName: `fix/${story.identifier.toLowerCase()}-impl`,
-    body: story.identifier,
-    state: 'merged',
-    merged_at: new Date(FIXED_NOW - 5000).toISOString(),
-    url: `https://github.com/acme/repo/pull/99`,
-  }];
-  // Seed the stale run so selectReviewDispatch sees it; it must NOT act on it.
-  backlog.getIssueRuns = (identifier) => {
-    if (identifier === story.identifier) {
-      return [{ status: 'completed', completed_at: staleAt, created_at: staleAt }];
-    }
-    return [];
-  };
-  const log = createLogSink();
-
-  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
-
-  const advanced = log.byEvent('advance').find(
-    (e) => e.identifier === story.identifier && e.to === 'done'
-  );
-  assert.ok(advanced, 'detectVerifiedDone must advance the in_review story to done via the merged PR');
-
-  const reviewEvents = log.byEvent('review').filter((e) => e.identifier === story.identifier);
-  assert.equal(reviewEvents.length, 0,
-    'selectReviewDispatch must not emit a review event for an issue already advanced to done this cycle');
-
-  const reviewDispatched = log.byEvent('review_dispatched').filter((e) => e.identifier === story.identifier);
-  assert.equal(reviewDispatched.length, 0,
-    'must not fire a review_dispatched log event for a just-done ticket');
-
-  const reruns = calls.rerun.filter((r) => r.identifier === story.identifier);
-  assert.equal(reruns.length, 0,
-    'spawn.rerunIssue must not be called for an issue that was advanced to done in the same cycle');
-});
-
 test('cascade: per-runtime cap is enforced across multiple cascade iterations (loopRtProjected accumulates)', async () => {
   // Three separate blocked stories that can all cascade (each depends on a different done
   // parent) in a tight codex lane (RUNTIME_CAP.codex = 1 via fixture override; auriga-dev
@@ -1147,57 +981,4 @@ test('PANT-549: a rate-limit error on the first pick blocks all subsequent picks
   const skips = log.byEvent('skip_blocked_runtime');
   assert.equal(skips.length, 1, 'the second pick must log skip_blocked_runtime once');
   assert.equal(skips[0].identifier, issueB.identifier);
-});
-
-test('cascade: existing-assignee rerun updates priorAgentCycleAssigns, blocking assigned-idle double-dispatch (PANT-545)', async () => {
-  // Bug: cascade fires existing-assignee rerun but priorAgentCycleAssigns not
-  // updated → assigned-idle double-dispatches the same agent within the same cycle.
-  //
-  // Setup: RUNTIME_CAP.codex=1, saturatingIssue (auriga-dev / codex) fills
-  // runtimeInflight['codex']=1=cap. blockedChild has existing assignee auriga-build
-  // (claude runtime), in a codex-only lane project — cascade returns agent=null
-  // (codex full) but fires existing-assignee rerun. idleTodo is also assigned to
-  // auriga-build (claude, not blocked by codex cap).
-  //
-  // Without fix: priorAgentCycleAssigns['auriga-build']=0 after cascade → assigned-
-  // idle sees perAgentCycle=0 < perCyclePerAgent=1 and double-dispatches idleTodo.
-  // With fix: priorAgentCycleAssigns['auriga-build']=1 after cascade → assigned-idle
-  // sees perAgentCycle=1 >= 1 and skips idleTodo.
-  const fixtureCfg = withFixtureLanes({ 'cascade-proj-545': ['auriga-dev', 'heimdall-dev-codex'] });
-  const tightCfg = {
-    ...fixtureCfg,
-    CAPS: { ...fixtureCfg.CAPS, perCyclePerAgent: 1 },
-    RUNTIME_CAP: { ...fixtureCfg.RUNTIME_CAP, codex: 1 },
-  };
-  const aurigaBuildId = tightCfg.AGENTS['auriga-build'].id;
-  const aurigaDevId = tightCfg.AGENTS['auriga-dev'].id;
-  // Fills runtimeInflight['codex']=1=runtimeCap.codex so cascade returns agent=null.
-  const saturatingIssue = makeIssue({ project_id: 'cascade-proj-545', status: 'in_progress', assignee_id: aurigaDevId });
-  // Dep starts in_review so detectUnblocks skips blockedChild; detectVerifiedDone
-  // advances it to done via merged PR (PANT-341 pattern) before the cascade pass.
-  const inReviewParent = makeIssue({ project_id: 'cascade-proj-545', status: 'in_review' });
-  // blockedChild: existing assignee auriga-build (claude), codex-only lane is full.
-  const blockedChild = makeIssue({
-    project_id: 'cascade-proj-545', status: 'blocked',
-    assignee_id: aurigaBuildId, metadata: { depends_on: inReviewParent.id },
-  });
-  // idleTodo: assigned to auriga-build (claude, not blocked by codex cap), no active runs.
-  const idleTodo = makeIssue({ project_id: 'cascade-proj-545', status: 'todo', assignee_id: aurigaBuildId });
-  const { backlog, spawn, calls } = createMockAdapters(
-    [saturatingIssue, inReviewParent, blockedChild, idleTodo], tightCfg.AGENTS,
-  );
-  backlog.getIssuePullRequests = (identifier) =>
-    identifier === inReviewParent.identifier
-      ? [{ state: 'MERGED', title: inReviewParent.identifier }] : [];
-  const log = createLogSink();
-
-  await cycle({ backlog, spawn, cfg: tightCfg, log, sleep: NOOP_SLEEP });
-
-  assert.ok(calls.rerun.some((r) => r.identifier === blockedChild.identifier),
-    'cascade must rerun blockedChild via existing-assignee path (codex lane full, auriga-build already assigned)');
-  assert.ok(!calls.assign.some((a) => a.identifier === blockedChild.identifier),
-    'cascade must NOT reassign blockedChild in the existing-assignee path');
-  assert.ok(!calls.rerun.some((r) => r.identifier === idleTodo.identifier),
-    'assigned-idle must NOT dispatch idleTodo — cascade rerun consumed the perCyclePerAgent=1 ' +
-    'slot for auriga-build; without PANT-545 fix priorAgentCycleAssigns is stale and double-dispatch fires');
 });

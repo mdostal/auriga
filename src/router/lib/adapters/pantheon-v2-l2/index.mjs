@@ -32,19 +32,9 @@
 // backend-agnostic in practice (despite the adapter interface's own
 // aspiration to be), so this adapter preserves that shape rather than
 // silently changing it and risking a subtle behavior break.
-//
-// GitHub-based PR discovery: routes through Pantheon's own GitHub facade
-// (core/api/github.ts, Story 1 of the Pantheon-native GitHub plugin epic) via
-// the same `run` HTTP runner this adapter already uses for backlog calls.
-// GITHUB_TOKEN is held centrally in Pantheon -- Auriga's container needs no
-// GH_TOKEN and no gh/git binaries. See ../pantheon-github.mjs for the
-// makePantheonGhListRepos / makePantheonGhPrs factories that replace the old
-// gh-CLI-based makeGhRun/makeGhListRepos/makeGhPrs from github-cli.mjs.
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
-import { gatherReviewRepos, makeListCandidatePullRequests } from '../github-cli.mjs';
-import { makePantheonGhListRepos, makePantheonGhPrs } from '../pantheon-github.mjs';
 import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
@@ -52,8 +42,6 @@ import {
   HIVE_LANE as SUBSTRATE_HIVE_LANE,
   REVIEW_LANE as SUBSTRATE_REVIEW_LANE,
   RUNTIME_CAP as SUBSTRATE_RUNTIME_CAP,
-  REVIEW_REPO_OWNER as SUBSTRATE_REVIEW_REPO_OWNER,
-  REVIEW_SEARCH_REPOS as SUBSTRATE_REVIEW_SEARCH_REPOS,
 } from '../../config-substrate.mjs';
 
 const DEFAULT_BASE_URL = 'http://core-api:3012';
@@ -97,14 +85,11 @@ function toRawIssue(issue) {
 
 /**
  * @param {{
- *   baseUrl?: string, exec?: Function,
- *   reviewRepoOwner?: string, reviewSearchRepos?: string[], project?: string,
+ *   baseUrl?: string, exec?: Function, project?: string,
  * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
- *   inject a fake execFileSync for all HTTP calls (both backlog and GitHub
- *   facade). reviewRepoOwner/reviewSearchRepos default to
- *   config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS.
+ *   inject a fake execFileSync for all HTTP calls.
  *   project is createIssue's default target project (t015) -- lets a caller
  *   stand up a whole adapter instance pointed at a specific board+project
  *   (e.g. a hand-up target) without repeating the project on every createIssue
@@ -116,21 +101,6 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
     TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
-
-  const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
-  const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
-
-  // PR discovery now routes through Pantheon's GitHub facade (GET
-  // /api/github/repos and GET /api/github/repos/:owner/:repo/pulls) via the
-  // same `run` HTTP runner used for backlog calls. GITHUB_TOKEN is held
-  // centrally in Pantheon -- no gh binary or GH_TOKEN env var needed here.
-  // gatherReviewRepos / makeListCandidatePullRequests are pure logic from
-  // github-cli.mjs and are reused unchanged.
-  const ghListRepos = makePantheonGhListRepos(run);
-  const ghPrs = makePantheonGhPrs(run);
-  const listCandidatePullRequests = makeListCandidatePullRequests(
-    ghListRepos, ghPrs, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
-  );
 
   // Per-project issue list. NOT called by auriga-router.mjs's own cycle()
   // today (it uses listAllIssues below instead) but part of the
@@ -273,10 +243,6 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's
     // own comment above.
     listAllIssues,
-
-    // "Ported extra" -- see this file's header comment + listCandidatePullRequests's
-    // own comment above for why this exists again.
-    listCandidatePullRequests,
   });
 }
 
