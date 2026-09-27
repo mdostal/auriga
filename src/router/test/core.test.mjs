@@ -1101,90 +1101,84 @@ test('selectReviewDispatch: rerun-review fires normally when runtime is NOT bloc
   assert.equal(picks[0].action, 'rerun-review');
 });
 
-// ---- PANT-658: removed-agent issues must not be re-dispatched every cycle ----------
+// ---- PANT-658: review-phase accounting across a REVIEW_LANE change ---------------
 
-test('selectReviewDispatch: removed review agent — assigned issue with stale run gets rerun-review, not dispatch-review', () => {
-  // Scenario: auriga-review-v1 (id 'OLD') was replaced by auriga-review (id 'RV') in REVIEW_LANE.
-  // A stale issue is still assigned to 'OLD'. OLD is gone from cfg.AGENTS entirely.
-  // Before fix: reviewAgentIds.has('OLD') = false → fresh-dispatch branch → dispatch-review.
-  // After fix: OLD appears in the issue's run history → expanded into reviewAgentIds → stale/give-up branch → rerun-review.
-  const oldId = 'OLD-AGENT-ID';
-  const staleRunByOld = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString(), agent_id: oldId };
-  const issue = inReview('PANT-658A', 658, oldId); // assigned to removed agent
-  const picks = core.selectReviewDispatch(
-    [issue],
-    { 'PANT-658A': [staleRunByOld] },
-    CFG, {}, { now: NOW },
-  );
-  assert.equal(picks.length, 1, 'must produce exactly one action');
-  assert.equal(picks[0].action, 'rerun-review', 'stale removed-agent issue must get rerun-review, not dispatch-review');
-  assert.equal(picks[0].identifier, 'PANT-658A');
+const OLD_RV = 'OLD-RV';
+const CFG_FORMER = { ...CFG, FORMER_REVIEW_AGENT_IDS: [OLD_RV] };
+const runBy = (agentId, minsAgo, status = 'completed') => {
+  const at = new Date(NOW - minsAgo * 60_000).toISOString();
+  return status === 'running'
+    ? { status, started_at: at, agent_id: agentId }
+    : { status, started_at: at, completed_at: at, agent_id: agentId };
+};
+const runsBy = (agentId, n, fromMinsAgo = 60) => Array.from({ length: n }, (_, k) => runBy(agentId, fromMinsAgo + k * 60));
+
+test('selectReviewDispatch: builder still assigned after handoff gets dispatch-review to a lane reviewer — PANT-658', () => {
+  // Normal build->review handoff: builder AB (registered, not in REVIEW_LANE) is still the
+  // assignee and has a recent build run. It must NOT be treated as a (former) reviewer.
+  const i = inReview('PANT-658-BLD', 700, 'AB');
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-BLD': [runBy('AB', 10)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
 });
 
-test('selectReviewDispatch: removed review agent — issue with exhausted runs gets give-up-review, not dispatch-review', () => {
-  const oldId = 'OLD-AGENT-ID';
-  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
-  const exhaustedByOld = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
-    status: 'completed',
-    completed_at: new Date(NOW - (k + 2) * 60 * 60_000).toISOString(),
-    agent_id: oldId,
-  }));
-  const issue = inReview('PANT-658B', 659, oldId);
+test('selectReviewDispatch: builder runs never count toward reviewRunCount or fairness — PANT-658/PANT-531', () => {
+  const heavy = inReview('PANT-658-HEAVYBLD', 701, 'AB'); // 5 build runs, never reviewed
+  const fresh = inReview('PANT-658-FRESH', 702);
   const picks = core.selectReviewDispatch(
-    [issue],
-    { 'PANT-658B': exhaustedByOld },
-    CFG, {}, { now: NOW },
+    [heavy, fresh], { 'PANT-658-HEAVYBLD': runsBy('AB', 5), 'PANT-658-FRESH': [] }, CFG_FORMER, {}, { now: NOW },
   );
-  const giveUps = picks.filter((p) => p.action === 'give-up-review');
-  assert.equal(giveUps.length, 1, 'exhausted removed-agent issue must get give-up-review, not dispatch-review');
-  assert.equal(giveUps[0].identifier, 'PANT-658B');
+  assert.equal(picks.filter((p) => p.action === 'give-up-review').length, 0, 'never-reviewed ticket must not be given up');
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-HEAVYBLD', 'build runs must not deprioritize it behind the fresh ticket');
+  assert.equal(picks[0].action, 'dispatch-review');
 });
 
-test('selectReviewDispatch: removed review agent — historical runs count toward fairness, deprioritizing the issue', () => {
-  // An issue with 3+ review runs from a removed agent should be treated as above the
-  // fairness threshold and sorted after a fresh ticket with 0 runs.
-  const oldId = 'OLD-AGENT-ID';
+test('selectReviewDispatch: issue held by a former reviewer is re-dispatched to a current lane reviewer, not rerun on it — PANT-658', () => {
+  const i = inReview('PANT-658-FORMER', 703, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-FORMER': [runBy(OLD_RV, 30)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: former reviewer with a live run is left alone — PANT-658', () => {
+  const i = inReview('PANT-658-LIVE', 704, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-LIVE': [runBy(OLD_RV, 1, 'running')] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: former reviewer with exhausted runs gets give-up-review with a string agent — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-EXHA', 705, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-EXHA': runsBy(OLD_RV, max) }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  assert.equal(typeof picks[0].agent, 'string');
+});
+
+test('selectReviewDispatch: give-up cap counts former + current reviewer runs together — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-MIX', 706, 'RV');
+  const runs = [...runsBy(OLD_RV, max - 1, 120), runBy('RV', 30)];
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG_FORMER, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  // Without the former-reviewer list the old runs don't count: plain rerun-review.
+  const plain = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(plain[0].action, 'rerun-review');
+});
+
+test('selectReviewDispatch: former-reviewer runs count toward fairness — PANT-658', () => {
   const fairnessMax = CFG.CAPS.reviewFairnessMaxAttempts ?? 3;
-  const oldRuns = Array.from({ length: fairnessMax }, (_, k) => ({
-    status: 'completed',
-    completed_at: new Date(NOW - (k + 1) * 60 * 60_000).toISOString(),
-    agent_id: oldId,
-  }));
-  const staleRunByOld = { ...oldRuns[0] };
-  const stalePlusOld = [...oldRuns, staleRunByOld]; // extra stale to trigger rerun, total > fairnessMax
-  const heavyIssue = inReview('PANT-658C-HEAVY', 660, oldId); // many old runs, stale
-  const freshIssue = inReview('PANT-658C-FRESH', 661); // unassigned, no runs
+  const heavy = inReview('PANT-658-FAIRH', 707, OLD_RV);
+  const fresh = inReview('PANT-658-FAIRF', 708);
   const picks = core.selectReviewDispatch(
-    [heavyIssue, freshIssue], // heavy is listed first but should be deprioritized
-    { 'PANT-658C-HEAVY': stalePlusOld, 'PANT-658C-FRESH': [] },
-    CFG, {}, { now: NOW },
+    [heavy, fresh], { 'PANT-658-FAIRH': runsBy(OLD_RV, fairnessMax), 'PANT-658-FAIRF': [] }, CFG_FORMER, {}, { now: NOW },
   );
-  // With perCycleReview=1, only one dispatch fires. It should be the fresh issue.
-  const dispatched = picks.filter((p) => p.action === 'dispatch-review');
-  assert.equal(dispatched.length, 1, 'fresh issue must win the slot over the heavy removed-agent issue');
-  assert.equal(dispatched[0].identifier, 'PANT-658C-FRESH');
-});
-
-test('selectReviewDispatch: removed review agent — give-up and rerun actions carry a string agent value, not undefined', () => {
-  const oldId = 'OLD-AGENT-ID';
-  const staleRunByOld = { status: 'completed', completed_at: new Date(NOW - 30 * 60 * 1000).toISOString(), agent_id: oldId };
-  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
-  const exhaustedByOld = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
-    status: 'completed',
-    completed_at: new Date(NOW - (k + 2) * 60 * 60_000).toISOString(),
-    agent_id: oldId,
-  }));
-  const staleIssue = inReview('PANT-658D-STALE', 662, oldId);
-  const exhaustedIssue = inReview('PANT-658D-EXHA', 663, oldId);
-  const picks = core.selectReviewDispatch(
-    [staleIssue, exhaustedIssue],
-    { 'PANT-658D-STALE': [staleRunByOld], 'PANT-658D-EXHA': exhaustedByOld },
-    CFG, {}, { now: NOW },
-  );
-  for (const p of picks) {
-    assert.ok(typeof p.agent === 'string' && p.agent.length > 0,
-      `action ${p.action} for ${p.identifier} must have a non-empty string agent, got: ${JSON.stringify(p.agent)}`);
-  }
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-FAIRF');
 });
 
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
