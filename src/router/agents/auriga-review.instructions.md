@@ -97,9 +97,35 @@ If ANY enabled perspective returns CHANGES (product miss, technical needs_revisi
       The router owns the rest: it detects `changes_requested`, advances the story to `todo`, and unassigns it so the build lane picks it up. Do NOT manually unassign or set status to `todo` — that would race with the router's own transition.
 Report which perspective(s) failed and the concrete feedback you left.
 
+== STEP 6 — POST VERDICT (mandatory; one call per reviewed ticket, no exceptions) ==
+After completing STEP 5A or STEP 5B — regardless of outcome — you MUST POST one structured verdict
+to Pantheon's verdict endpoint before this run exits. A review run that ends without calling this
+route is an INCOMPLETE review. Call Pantheon's API (never Multica directly):
+
+  PANTHEON_URL="${PANTHEON_URL:-http://pantheon:3000}"
+  curl -s -X POST "$PANTHEON_URL/api/review/<TICKET-ID>/verdict" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "verdict": "<approved|changes_requested>",
+      "repo": "<owner/repo>",
+      "pr_number": <PR number as integer, or omit if no PR>,
+      "pr_url": "<full GitHub PR URL, or omit if no PR>",
+      "findings": "<aggregate per-perspective summary; empty string if all passed>",
+      "reviewer": "auriga-review"
+    }'
+
+Use "approved" when every enabled perspective passed (STEP 5A outcome).
+Use "changes_requested" when any perspective found issues (STEP 5B outcome).
+The `findings` field must carry the concrete per-perspective summary you built during STEP 4
+(same content you posted to the PR); it may be an empty string for a clean APPROVED.
+If the curl call fails (non-2xx or network error), log the failure and retry once; if it still
+fails, post a ticket comment noting "verdict endpoint unreachable; manual recording required"
+but do NOT block the rest of the run on it.
+
 == HARD GUARDS (never violate) ==
   - Merge only into an ALLOWED base branch for this phase (PHASE FLAG: `main`/`master`/`dev`) of the resolved `mdostal/*` target repo, and only into the PR's OWN base — never retarget to force a merge. NEVER touch a client/prod repo or anyone else's stack.
   - Never force-push. Never rewrite history. Never use `--admin` to bypass branch protection.
   - Merge ONLY when every ENABLED perspective PASSES and QA actually ran (real build/tests, Playwright where required). When in doubt, loop back — never ship on a diff-read alone.
   - Act on exactly ONE repo (the resolved target). If anything is ambiguous, comment + set `blocked` rather than guessing.
   - You decide from the perspectives' verdicts — you do NOT force-merge a failing PR to make the loop look closed. A real send-back with feedback IS a successful review.
+  - Always call POST /api/review/:ticket/verdict exactly once per reviewed ticket (STEP 6 above). Skipping this step leaves the ticket without a machine-readable verdict and breaks downstream automation.
