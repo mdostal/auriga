@@ -1000,6 +1000,24 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
       continue;
     }
 
+    // PANT-436: a hive story on a non-hive-capable lane (codex/opencode) can't
+    // run /hive:execute — rerunning it just burns a slot. Unassign so fresh
+    // routing sends it to the hive lane (detectZombies only sees in_progress,
+    // so a plain skip would leave it stuck in todo).
+    if (isHiveStory(i) && !isHiveCapableAssignee(i.assignee_id, cfg)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'hive-on-noncapable-lane',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({
