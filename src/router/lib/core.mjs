@@ -541,6 +541,22 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
 
+  // PANT-658: extend reviewAgentIds to cover agents removed from REVIEW_LANE that still
+  // hold an in_review assignee. The ID must appear in BOTH the issue's assignee field AND
+  // its own run history as the actual runner — this prevents any build-phase agent ID from
+  // being pulled in (preserving the PANT-531 invariant: only review-phase agent IDs count
+  // toward the stale/give-up logic). Without this expansion, removed-agent issues fall into
+  // the fresh-dispatch branch on every cycle indefinitely.
+  for (const i of inReviewIssues) {
+    if (i.assignee_id && !reviewAgentIds.has(i.assignee_id)) {
+      const runs = runsByIssue[i.identifier] || [];
+      if (runs.some((r) => r.agent_id === i.assignee_id)) {
+        reviewAgentIds.add(i.assignee_id);
+        idToName[i.assignee_id] = idToName[i.assignee_id] ?? `<removed:${i.assignee_id.slice(0, 8)}>`;
+      }
+    }
+  }
+
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
   // (e.g. a planning-only ticket with no PR ever coming, or one detectFalseDone
