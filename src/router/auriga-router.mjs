@@ -320,7 +320,7 @@ export async function cycle(opts = {}) {
   // blocked->todo pass above.
   {
     const changesRequested = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.CHANGES_REQUESTED && cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl);
+    const changeBacks = coreImpl.detectChangesRequested(changesRequested, cfgImpl, issues);
     for (const cb of changeBacks) {
       logImpl('advance', { identifier: cb.identifier, from: ISSUE_STATUS.CHANGES_REQUESTED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -434,6 +434,7 @@ export async function cycle(opts = {}) {
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
           if (existingAgentName) priorAgentCycleAssigns[existingAgentName] = (priorAgentCycleAssigns[existingAgentName] || 0) + 1;
+          assigned++;
         }
         spawn.rerunIssue(c.identifier);
         cascadeFired++;
@@ -581,7 +582,7 @@ export async function cycle(opts = {}) {
   // never fire a build run into an unscanned/unaligned project.
   if (!noZombie) {
     const inProgressDispatch = inProgress.filter((i) => cfgImpl.PROJECT_IDS.includes(i.project_id));
-    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now);
+    const zombies = coreImpl.detectZombies(inProgressDispatch, runsByIssue, cfgImpl, now, issues);
     for (const z of zombies) {
       if (assigned >= maxAssign) break;
       if (z.action === 'give-up') {
@@ -609,8 +610,22 @@ export async function cycle(opts = {}) {
         if (zombieRt && blockedRuntimes.has(zombieRt)) {
           logImpl('zombie_skip', { ...z, reason: 'assignee-runtime-blocked', runtime: zombieRt }); continue;
         }
+        const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
+        if (zombieAgentName && (priorAgentCycleAssigns[zombieAgentName] || 0) >= maxPerAgentZombie) {
+          logImpl('zombie_skip', { ...z, reason: 'per-cycle-per-agent-cap', agent: zombieAgentName }); continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
-        if (!dryRun) { try { spawn.rerunIssue(z.identifier); assigned++; } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); } }
+        if (!dryRun) {
+          try {
+            spawn.rerunIssue(z.identifier);
+            assigned++;
+            if (zombieAgentName) {
+              inflight[zombieAgentName] = (inflight[zombieAgentName] || 0) + 1;
+              priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
+            }
+            if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;
+          } catch (e) { logImpl('zombie_error', { identifier: z.identifier, error: e.message }); }
+        }
       } else {
         // needs (re)routing — route via its lane
         const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive, blockedRuntimes);

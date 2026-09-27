@@ -256,6 +256,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
     .filter((i) => !isHumanTodo(i, cfg))
+    .filter((i) => !isAgentParked(i))
     .filter((i) => allDepsSatisfied(i, statusById, issues));
 
   // Stable ordering: by project scan order, then by issue number ascending
@@ -411,7 +412,7 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
   return false;
 }
 
-export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now()) {
+export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
@@ -933,12 +934,13 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 // status as the formal "send back" signal; the router owns the transition to
 // todo + unassign (the router must never rely solely on agent free-text for a
 // status mutation the state machine should handle).
-export function detectChangesRequested(changesRequestedIssues, cfg = {}) {
+export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of changesRequestedIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeedByLabel(i)) continue; // never override a human changes_requested on a labeled planning seed
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;

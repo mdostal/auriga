@@ -270,6 +270,17 @@ test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guar
 });
 
 
+test('PANT-577: detectAssignedIdle skips seed issues (isSeed guard)', () => {
+  // An explicitly-labelled seed assigned to an agent must not enter idle recovery —
+  // seeds should only be re-dispatched through the planning lane, not via assigned-idle.
+  const seed = { ...assignedTodo('PAN-seed', 'M'), labels: ['idea'], parent_issue_id: null };
+  const nonSeed = assignedTodo('PAN-child', 'M'); // has parent_issue_id → not a seed
+  const allIssues = [seed, nonSeed];
+  const actions = core.detectAssignedIdle(allIssues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
+  assert.equal(actions.length, 1, 'seed must be excluded; non-seed child must still be detected');
+  assert.equal(actions[0].identifier, 'PAN-child');
+});
+
 // PANT-736: review-lane agent on a todo ticket must be unassigned, not re-dispatched.
 const CFG_WITH_REVIEW = {
   ...CFG,
