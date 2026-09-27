@@ -581,6 +581,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
+    if (isSeedByLabel(i)) continue; // PANT-737: seeds are planning-lane; never dispatch a review run for them
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
