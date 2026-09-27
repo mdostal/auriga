@@ -560,29 +560,23 @@ test('detectZombies skips explicitly-labeled seed issues (isSeedByLabel guard) �
 });
 
 
-test('detectZombies skips seed issues — never zombie-dispatch to a build lane', () => {
+test('detectZombies skips labeled seed issues — never zombie-dispatch to a build lane', () => {
   const now = Date.now();
   const seedLabeled = {
     id: 'sz1', identifier: 'sz1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: null, title: 'plan something', parent_issue_id: null,
     labels: [{ id: 'l1', name: 'idea', color: '#000' }], metadata: {},
   };
-  const seedChildless = {
-    id: 'sz2', identifier: 'sz2', project_id: 'AURIGA', status: 'in_progress',
-    assignee_id: null, title: 'top level childless seed', parent_issue_id: null,
-    labels: [], metadata: {},
-  };
   const notSeed = {
     id: 'sz3', identifier: 'sz3', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: null, title: 'implement the plan', parent_issue_id: 'sz1',
     labels: [], metadata: {},
   };
-  const allIssues = [seedLabeled, seedChildless, notSeed];
-  const runs = { sz1: [], sz2: [], sz3: [] };
-  const z = core.detectZombies([seedLabeled, seedChildless, notSeed], runs, CFG, now, allIssues);
+  const allIssues = [seedLabeled, notSeed];
+  const runs = { sz1: [], sz3: [] };
+  const z = core.detectZombies([seedLabeled, notSeed], runs, CFG, now, allIssues);
   const ids = z.map((a) => a.identifier);
   assert.ok(!ids.includes('sz1'), 'seed with idea label must be skipped');
-  assert.ok(!ids.includes('sz2'), 'childless+top-level seed must be skipped');
   assert.ok(ids.includes('sz3'), 'non-seed stale issue must still be recovered');
 });
 

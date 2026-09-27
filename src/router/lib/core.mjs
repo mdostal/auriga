@@ -940,7 +940,7 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssu
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // never override a human changes_requested on a planning seed
+    if (isSeedByLabel(i)) continue; // never override a human changes_requested on a labeled planning seed
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
