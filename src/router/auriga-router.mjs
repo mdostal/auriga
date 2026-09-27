@@ -823,6 +823,37 @@ export async function cycle(opts = {}) {
   // cfgImpl.PROJECT_IDS — never fire into an unscanned/unaligned project.
   {
     const agentIds = coreImpl.agentIdSet(cfgImpl.AGENTS);
+
+    // PANT-684: unassign todo issues whose assignee is an archived/removed agent.
+    // selectAssignments skips them (non-router-managed assignee), detectZombies
+    // skips them (todo, not in_progress), and detectAssignedIdle skips them
+    // (assignee not in knownAgentIds). Unassigning lets them re-enter the normal
+    // candidate pool as fresh todos so selectAssignments routes them this cycle.
+    {
+      const todoArchivedAssigned = issues.filter(
+        (i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO &&
+          i.assignee_id && !agentIds.has(i.assignee_id) &&
+          cfgImpl.PROJECT_IDS.includes(i.project_id)
+      );
+      const archivedActions = coreImpl.detectArchivedAssignments(todoArchivedAssigned, cfgImpl, agentIds);
+      const archivedCap = cfgImpl.CAPS.archivedAgentPerCycle ?? 5;
+      let archivedFired = 0;
+      for (const a of archivedActions) {
+        if (archivedFired >= archivedCap) break;
+        logImpl('archived_agent_unassign', { identifier: a.identifier, assigneeId: a.assigneeId, applied: !dryRun });
+        if (!dryRun) {
+          try {
+            spawn.unassignIssue(a.identifier);
+            archivedFired++;
+          } catch (e) {
+            logImpl('archived_agent_unassign_error', { identifier: a.identifier, error: e.message });
+          }
+        } else {
+          archivedFired++;
+        }
+      }
+    }
+
     const todoAssigned = issues.filter(
       (i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO &&
         i.assignee_id && agentIds.has(i.assignee_id) &&
