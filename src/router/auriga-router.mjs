@@ -497,16 +497,10 @@ export async function cycle(opts = {}) {
             '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
           );
         } catch (e) { logImpl('review_comment_error', { identifier: r.identifier, error: e.message }); }
-        // reassign the in_review story to the review agent, then force-enqueue a
-        // fresh run for it (assignee-mutation alone does not reliably enqueue —
-        // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
-        // sleep first to let the new assignee propagate before rerun).
-        // NOT routed through spawn.dispatch() (a real, tested method with a
-        // genuinely different contract here — see spawn-adapter.mjs's typedef):
-        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
-        // branch, which never assigns at all) rather than verifying a run started
-        // first — a different contract than dispatch()'s verify-then-conditionally-
-        // rerun, not a stale duplicate of it.
+        // Reassign the in_review story to the review agent, then verify a run
+        // started (Multica enqueues a run on assignment); force-rerun only if
+        // the assignment did not auto-enqueue one (dead-zone fallback).
+        // NOT routed through spawn.dispatch() (different contract — see spawn-adapter.mjs).
         if (typeof spawn.selectRoute === 'function') {
           try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
         }
@@ -516,17 +510,33 @@ export async function cycle(opts = {}) {
           catch (e) { logImpl('assign_metadata_error', { identifier: r.identifier, error: e.message }); }
         }
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+        const postAssignRuns = backlog.getIssueRuns(r.identifier);
+        const assignEnqueued = postAssignRuns.some((run) => {
+          const rc = coreImpl.classifyRun(run, now);
+          return rc.active || rc.done || rc.failed;
+        });
+        if (!assignEnqueued) {
+          logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: 'rerun' });
+          try { spawn.rerunIssue(r.identifier); } catch (e) { logImpl('rerun_error', { identifier: r.identifier, error: e.message }); }
+        } else {
+          const lr = coreImpl.latestRun(postAssignRuns);
+          const rc = lr ? coreImpl.classifyRun(lr, now) : {};
+          logImpl('review_assign_enqueued', { identifier: r.identifier, agent: r.agent, runStatus: rc.status });
+        }
+      } else {
+        // rerun-review: no assign happened, always force-enqueue.
+        spawn.rerunIssue(r.identifier);
       }
-      spawn.rerunIssue(r.identifier);
       assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
-      // For dispatch-review this is the SECOND sleep (first was pre-rerunIssue); for
-      // rerun-review there was no prior sleep, so this is the only one. Both cases end
-      // with a run-presence check that logs review_verify_ok / review_verify_no_run —
-      // the latter is the clearest early signal that the hang is happening THIS cycle
-      // (not 30 minutes later when idle_watchdog fires).
+      // For dispatch-review this is the SECOND sleep (first was pre-verify inside the
+      // dispatch-review block); for rerun-review there was no prior sleep, so this is
+      // the only one. Both cases end with a run-presence check that logs
+      // review_verify_ok / review_verify_no_run — the latter is the clearest early
+      // signal that the hang is happening THIS cycle (not 30 minutes later when
+      // idle_watchdog fires).
       await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
       const reviewRunStarted = reviewVerifyRuns.some((run) => {
