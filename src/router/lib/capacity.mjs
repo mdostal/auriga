@@ -79,12 +79,24 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   return true;
 }
 
+// Seed-label check (mirrors core.mjs's isSeedByLabel, kept local to avoid
+// a circular import — capacity.mjs is imported by core.mjs).
+function isSeedLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 // In-flight review count per review-lane agent — an issue assigned to a
 // review agent = that agent is (or should be) reviewing it, so it holds a
 // slot until it leaves in_review (merged->done) or is sent back. This caps
 // concurrent reviews at each agent's maxInflight without touching the
 // build lanes' claude RUNTIME_CAP accounting (review agents use their own
 // bucket).
+//
+// Seed-labeled issues are excluded: they are skipped by selectReviewDispatch
+// and must not occupy a capacity slot — a seed accidentally landing in
+// in_review would otherwise deadlock all review dispatch (PANT-737).
 export function computeReviewInflight(inReviewIssues, cfg) {
   const lane = cfg.REVIEW_LANE || [];
   const idToName = {};
@@ -92,6 +104,7 @@ export function computeReviewInflight(inReviewIssues, cfg) {
   const counts = {};
   for (const n of lane) counts[n] = 0;
   for (const i of inReviewIssues) {
+    if (isSeedLabel(i)) continue;
     const name = idToName[i.assignee_id];
     if (name) counts[name] += 1;
   }

@@ -309,14 +309,16 @@ test('detectRunCompletions: done+non-failed run -> advance-in-review; active/fai
   assert.equal(actions[0].action, 'advance-in-review');
 });
 
-test('detectRunCompletions: seed issue with done run is NOT advanced to in_review', () => {
+test('detectRunCompletions: explicitly-labeled seed is NOT advanced; unlabeled top-level issue IS advanced (isSeedByLabel, not heuristic)', () => {
   const now = Date.now();
   const seedWithLabel = {
     id: 'seed1', identifier: 'seed1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'plan something', parent_issue_id: null,
     labels: [{ id: 'l1', name: 'idea', color: '#000' }],
   };
-  const seedChildless = {
+  // top-level + childless but no explicit seed label: NOT filtered by isSeedByLabel
+  // (the heuristic is too broad here — a real in_progress story has no children yet)
+  const unlabeledTopLevel = {
     id: 'seed2', identifier: 'seed2', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'top level childless', parent_issue_id: null, labels: [],
   };
@@ -324,17 +326,15 @@ test('detectRunCompletions: seed issue with done run is NOT advanced to in_revie
     id: 'impl1', identifier: 'impl1', project_id: 'AURIGA', status: 'in_progress',
     assignee_id: 'A', title: 'implement the thing', parent_issue_id: 'seed1', labels: [],
   };
-  const inProgress = [seedWithLabel, seedChildless, notSeed];
-  // allIssues includes notSeed as a child of seed1, so seed1 is NOT childless
-  // but has an explicit label — it's still a seed. seed2 is childless+top-level.
-  const allIssues = [seedWithLabel, seedChildless, notSeed];
+  const inProgress = [seedWithLabel, unlabeledTopLevel, notSeed];
+  const allIssues = [seedWithLabel, unlabeledTopLevel, notSeed];
   const runs = {
     seed1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     seed2: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
     impl1: [{ status: 'completed', completed_at: new Date(now).toISOString(), error: null }],
   };
   const actions = core.detectRunCompletions(inProgress, runs, now, {}, allIssues);
-  assert.deepEqual(actions.map((a) => a.identifier), ['impl1']);
+  assert.deepEqual(actions.map((a) => a.identifier), ['seed2', 'impl1']);
 });
 
 test('detectVerifiedDone: only a real merged PR (state or merged_at) advances to done', () => {
@@ -476,6 +476,30 @@ test('chooseAgentForProject: isHive=true bypasses PROJECT_LANE entirely, even fo
   assert.ok(CFG.HIVE_LANE.includes(agent));
 });
 
+// PANT-585: when the lowest-load agent is on a blocked runtime, chooseAgentForProject
+// must skip it and return the next eligible agent rather than returning a blocked one.
+test('chooseAgentForProject: skips agents on blockedRuntimes, returns next eligible (PANT-585)', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  // HEIMDALL lane: ['heimdall-dev' (opencode), 'heimdall-dev-codex' (codex)]
+  // heimdall-dev has load 0 (lowest), heimdall-dev-codex has load 1.
+  // Block the opencode runtime — heimdall-dev must be excluded.
+  const blocked = new Set(['opencode']);
+  const inflight = { 'heimdall-dev-codex': 1 };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, inflight, {}, empty, false, blocked);
+  assert.equal(agent, 'heimdall-dev-codex', 'must pick the unblocked codex agent, not the lower-load blocked one');
+});
+
+// PANT-585: selectAssignments must not skip the issue when the lowest-load agent
+// is on a blocked runtime — it should fall back to an unblocked agent instead.
+test('selectAssignments: issue gets assigned to unblocked agent when lowest-load agent runtime is blocked (PANT-585)', () => {
+  // HEIMDALL lane: heimdall-dev (opencode, load 0), heimdall-dev-codex (codex, load 1).
+  // Block opencode — heimdall-dev is the preferred pick but must be skipped.
+  const issues = [story('b1', 'HEIMDALL', 1, 'EPIC1')];
+  const picks = core.selectAssignments(issues, CFG, { 'heimdall-dev-codex': 1 }, { blockedRuntimes: new Set(['opencode']) });
+  assert.equal(picks.length, 1, 'issue must be assigned, not dropped');
+  assert.equal(picks[0].agent, 'heimdall-dev-codex', 'must fall back to the unblocked codex agent');
+});
+
 test('detectZombies flags isHive on the zombie action so re-routing respects HIVE_LANE', () => {
   const now = Date.now();
   const inProgress = [
@@ -515,6 +539,24 @@ test('detectZombies skips human-todo in_progress issues regardless of staleness 
   assert.ok(!ids.includes('ht2'), 'human-todo (object label) must be skipped');
   assert.ok(!ids.includes('ht3'), 'human-todo with no assignee must be skipped');
   assert.ok(ids.includes('ag1'), 'non-human-todo stale issue must still be recovered');
+});
+
+test('detectZombies skips explicitly-labeled seed issues (isSeedByLabel guard) — PANT-519', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'sd1', identifier: 'sd1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea', labels: ['idea'], metadata: {} },
+    { id: 'sd2', identifier: 'sd2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'needs plan', labels: ['needs-plan'], metadata: {} },
+    { id: 'sd3', identifier: 'sd3', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'my idea obj', labels: [{ name: 'idea' }], metadata: {} },
+    { id: 'ag1', identifier: 'ag1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'regular stalled story', labels: [], metadata: {} },
+    { id: 'ag2', identifier: 'ag2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', title: 'not-a-seed idea', labels: ['idea', 'not-a-seed'], metadata: {} },
+  ];
+  const z = core.detectZombies(inProgress, { sd1: [], sd2: [], sd3: [], ag1: [], ag2: [] }, CFG, now);
+  const ids = z.map((a) => a.identifier);
+  assert.ok(!ids.includes('sd1'), 'idea-labeled (string) seed must be skipped');
+  assert.ok(!ids.includes('sd2'), 'needs-plan-labeled seed must be skipped');
+  assert.ok(!ids.includes('sd3'), 'idea-labeled (object) seed must be skipped');
+  assert.ok(ids.includes('ag1'), 'unlabeled stale story must still be recovered');
+  assert.ok(ids.includes('ag2'), 'not-a-seed escape hatch must bypass the seed guard');
 });
 
 
@@ -867,6 +909,35 @@ test('selectReviewDispatch: human-todo label suppresses rerun-review on stale re
   assert.deepEqual(picks, []);
 });
 
+// ---- PANT-737: seed-labeled tickets must not dispatch or hold inflight -----
+
+test('selectReviewDispatch: idea-labeled seed in in_review is skipped — no dispatch — PANT-737', () => {
+  // A seed (label 'idea') accidentally landing in in_review must never receive a review dispatch.
+  const seed = inReview('PANT-179', 179, null, { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179': [] }, CFG, {}, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: idea seed already assigned to review agent is skipped — no rerun — PANT-737', () => {
+  const seed = inReview('PANT-179B', 180, 'RV', { labels: [{ name: 'idea' }] });
+  const picks = core.selectReviewDispatch([seed], { 'PANT-179B': [doneStale] }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.deepEqual(picks, []);
+});
+
+test('selectReviewDispatch: seed assigned to review agent (maxInflight=1) does not block other reviews — PANT-737 regression', () => {
+  // Live scenario: PANT-179 (idea label) assigned to auriga-review, in_review.
+  // computeReviewInflight used to count it -> reviewInflight['auriga-review'] = 1 ->
+  // chooseReviewAgent returned null -> 26 other tickets blocked for over an hour.
+  // With the fix: the seed is excluded from inflight, so the normal ticket gets dispatched.
+  const seed = inReview('PANT-179', 179, 'RV', { labels: [{ name: 'idea' }] });
+  const normal = inReview('PANT-255', 255);
+  const reviewInflight = core.computeReviewInflight([seed, normal], CFG);
+  assert.equal(reviewInflight['auriga-review'], 0, 'seed must not hold the inflight slot');
+  const picks = core.selectReviewDispatch([seed, normal], { 'PANT-179': [], 'PANT-255': [] }, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-255', 'normal ticket gets the review slot');
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
@@ -970,6 +1041,72 @@ test('selectReviewDispatch: 5 build-phase runs do not trigger give-up-review on 
   assert.equal(picks[0].identifier, 'PANT-531C');
 });
 
+test('selectReviewDispatch: give-up-review does not consume a perCycleReview slot — PANT-584', () => {
+  // Scenario: perCycleReview=1, two issues both exhausted (reviewRunCount >= reviewMaxAttempts).
+  // Before fix: A's give-up-review pushed to actions[] -> actions.length reaches cap -> break,
+  // B's give-up-review never queued.
+  // After fix: give-ups go to giveUps[] (not actions[]), so both A and B get give-up-review
+  // and the actions[] budget is still free for any real dispatch in the same cycle.
+  const reviewMaxAttempts = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const exhaustedRuns = Array.from({ length: reviewMaxAttempts }, (_, k) => ({
+    status: 'completed',
+    completed_at: new Date(NOW - (k + 2) * 30 * 60_000).toISOString(),
+    created_at: new Date(NOW - (k + 2) * 30 * 60_000).toISOString(),
+    agent_id: 'RV',
+  }));
+  const issueA = inReview('PANT-584A', 100, 'RV');
+  const issueB = inReview('PANT-584B', 101, 'RV');
+  // Both A and B are exhausted AND above the fairness threshold, so they sort last.
+  // No fresh-unassigned issue ahead of them: both give-ups must fire despite perCycleReview=1.
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB],
+    { 'PANT-584A': exhaustedRuns, 'PANT-584B': exhaustedRuns },
+    CFG, {}, { now: NOW },
+  );
+  const giveUps = picks.filter((p) => p.action === 'give-up-review');
+  // Both exhausted issues must produce give-up-review regardless of perCycleReview cap
+  assert.equal(giveUps.length, 2);
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-584A'));
+  assert.ok(giveUps.some((p) => p.identifier === 'PANT-584B'));
+});
+
+
+// ---- PANT-588: blocked-runtime rerun-review must not starve healthy dispatch-review ----
+
+test('selectReviewDispatch: rerun-review for blocked-runtime agent does not consume the slot — PANT-588', () => {
+  // Issue A: already assigned to auriga-review (runtime: claude-review), run stale.
+  // Issue B: unassigned, eligible for dispatch-review.
+  // blockedRuntimes includes 'claude-review'.
+  // With fix: A's rerun-review is skipped (slot not consumed), B gets dispatch-review.
+  // Without fix: A consumes the sole perCycleReview=1 slot; B is never evaluated.
+  const issueA = inReview('PANT-588A', 588, 'RV'); // assigned to auriga-review
+  const issueB = inReview('PANT-588B', 589);        // unassigned
+  const picks = core.selectReviewDispatch(
+    [issueA, issueB],
+    { 'PANT-588A': [doneStale], 'PANT-588B': [] },
+    CFG,
+    {},
+    { now: NOW, blockedRuntimes: new Set(['claude-review']) },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-588B');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('selectReviewDispatch: rerun-review fires normally when runtime is NOT blocked — PANT-588', () => {
+  // Same setup but blockedRuntimes is empty: A should still get rerun-review.
+  const issueA = inReview('PANT-588C', 590, 'RV');
+  const picks = core.selectReviewDispatch(
+    [issueA],
+    { 'PANT-588C': [doneStale] },
+    CFG,
+    { 'auriga-review': 1 },
+    { now: NOW, blockedRuntimes: new Set() },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'rerun-review');
+});
+
 test('computeReviewInflight: counts in_review issues held by review agents', () => {
   const held = inReview('PAN-7', 7, 'RV');
   const other = inReview('PAN-8', 8, 'AB'); // held by a non-review agent
@@ -1028,7 +1165,7 @@ test('selectReviewDispatch: dispatches an in_review story regardless of any PR s
 // ---- blocked -> todo auto-unblock (PAN-6662) --------------------------------
 test('detectUnblocks: blocked story with satisfied declared deps -> unblock', () => {
   const statusById = new Map([['dep1', 'done'], ['dep2', 'done']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'EPIC', metadata: { depends_on: 'dep1,dep2' } };
   const acts = core.detectUnblocks([b], statusById);
   assert.equal(acts.length, 1);
   assert.equal(acts[0].action, 'unblock-to-todo');
@@ -1037,12 +1174,12 @@ test('detectUnblocks: blocked story with satisfied declared deps -> unblock', ()
 
 test('detectUnblocks: an unsatisfied declared dep keeps the story blocked', () => {
   const statusById = new Map([['dep1', 'done'], ['dep2', 'in_progress']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1,dep2' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'EPIC', metadata: { depends_on: 'dep1,dep2' } };
   assert.equal(core.detectUnblocks([b], statusById).length, 0);
 });
 
 test('detectUnblocks: blocked story with NO declared deps is left untouched', () => {
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', metadata: {} };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'parked by human', parent_issue_id: 'EPIC', metadata: {} };
   assert.equal(core.detectUnblocks([b], new Map()).length, 0);
 });
 
@@ -1054,8 +1191,14 @@ test('detectUnblocks: smoke/scratch blocked story ignored even with satisfied de
 
 test('detectUnblocks: cancelled dep counts as satisfied (terminal)', () => {
   const statusById = new Map([['dep1', 'cancelled']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', metadata: { depends_on: 'dep1' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'EPIC', metadata: { depends_on: 'dep1' } };
   assert.equal(core.detectUnblocks([b], statusById).length, 1);
+});
+
+test('detectUnblocks: seed issue with all deps satisfied is NOT unblocked', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const seed = { id: 'S2', identifier: 'PAN-2', project_id: 'PCORE', status: 'blocked', title: 'epic plan', labels: ['needs-plan'], metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([seed], statusById, [seed]).length, 0);
 });
 
 // ---- parent roll-up (all children terminal -> parent done) ------------------

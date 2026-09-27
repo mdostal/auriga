@@ -133,6 +133,15 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// isSeed limited to the explicit-label legs only — used in detect* functions where
+// the childless+top-level heuristic is too broad (an in_progress story has no children
+// in that set, so the heuristic would fire on every top-level ticket).
+function isSeedByLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -179,10 +188,11 @@ export function depsSatisfied(issue, statusById) {
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
 // order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
 // load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false) {
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set()) {
   const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
   const eligible = lane.filter((name) =>
-    agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)
+    agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
+    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
   );
   if (!eligible.length) return null;
   // Prefer lane order but break by lowest projected load.
@@ -303,7 +313,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue));
+    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -353,7 +363,7 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    if (isSeedByLabel(i)) continue; // label-only: heuristic fires on any top-level in_progress story
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
@@ -408,7 +418,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // never zombie-dispatch a seed to a build lane
+    if (isSeedByLabel(i)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -523,6 +533,7 @@ export function reviewEligible(_issue = {}) {
 export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
+  const blockedRuntimes = (opts && opts.blockedRuntimes) || new Set();
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -561,12 +572,18 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   });
 
   const actions = [];
+  // PANT-584: give-up-review is an administrative action, not a dispatch — it must
+  // not consume a perCycleReview slot. Collect give-ups separately so they don't
+  // increment actions.length and starve real dispatches. Mirrors how zombie give-ups
+  // bypass the maxAssign counter in the router's zombie loop.
+  const giveUps = [];
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal) break;
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
+    if (isSeedByLabel(i)) continue; // PANT-737: seeds are planning-lane; never dispatch a review run for them
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -583,12 +600,14 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
       const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
       if (reviewRunCount >= reviewMaxAttempts) {
-        actions.push({
+        giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
         });
         continue;
       }
+      const agentRt = cfg.AGENTS[idToName[i.assignee_id]]?.runtime;
+      if (agentRt && blockedRuntimes.has(agentRt)) continue; // PANT-588: don't consume the slot
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: idToName[i.assignee_id], action: 'rerun-review', reason: 'review-stale',
@@ -609,7 +628,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       agent, action: 'dispatch-review', reason: 'needs-review',
     });
   }
-  return actions;
+  return [...giveUps, ...actions];
 }
 
 // ============================================================================
@@ -686,6 +705,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds must not be auto-unblocked into selectAssignments' planning lane re-dispatch
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -900,6 +920,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeedByLabel(i)) continue; // seeds belong to the planning lane — never cascade to build
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;
@@ -943,6 +964,12 @@ export function agentIdSet(agents = {}) {
 // pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
+  // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
+  // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
+  const reviewLaneIds = new Set(
+    (cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean)
+  );
   const actions = [];
   for (const i of todoIssues) {
     if ((i.status || '').toLowerCase() !== 'todo') continue;
@@ -958,6 +985,21 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
+
+    if (reviewLaneIds.has(i.assignee_id)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({

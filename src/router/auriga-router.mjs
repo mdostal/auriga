@@ -28,6 +28,7 @@ import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
+import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
@@ -49,17 +50,6 @@ import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
 // ./lib/adapters/pantheon-v2-l2/README.md for the full rationale and its
 // documented, deliberate scope boundaries.
 //
-// KNOWN GAP, carried over from that cutover, not silently absorbed: the
-// pantheon-v2-l2 backlog adapter's getIssuePullRequests() returns Multica's
-// native issue<->PR linkage only -- it does NOT port the old adapter's
-// GitHub-based gh-scan fallback (a separate, non-Multica integration, out
-// of this epic's scope). That native linkage was previously described as
-// "empty in practice" -- so PR-based verification (false-done detection,
-// review-dispatch's PR matching) may find fewer/no PRs until a follow-up
-// story ports GitHub discovery into this adapter too. Does not block board
-// reading, status transitions, or initial dispatch -- only later-lifecycle
-// PR-verification steps, which tonight's freshly-filed board items don't
-// reach yet.
 const defaultBacklog = createPantheonV2L2BacklogAdapter();
 const defaultSpawn = createPantheonV2L2SpawnAdapter({
   verifyDelayMs: cfg.CAPS.verifyDelayMs,
@@ -222,35 +212,6 @@ export async function cycle(opts = {}) {
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
-  // ---- BOARD-WIDE PR candidate scan (ONCE per cycle) ----
-  // Restores the pre-cutover router's own top-level ghListRepos/ghOpenPrs/
-  // ghPrs gather (which ran once per cycle and was reused across every
-  // issue): backlog.listCandidatePullRequests(), when the adapter provides it
-  // (the real Multica adapter does; simpler test/stub adapters generally
-  // don't), does the raw repo-wide gh scan HERE, ONCE, and every call site
-  // below that needs "does issue X have a matching PR" filters this SAME
-  // cached, unfiltered list via matchedPrs() — using core.mjs's real
-  // prMatchesStory/prIdentityMatchesStory, never a narrower per-adapter
-  // heuristic. This fixes two regressions an independent review found in this
-  // epic's diff: (1) a PR matching only via a story's short slug key (not the
-  // raw ticket identifier) is found again, and (2) the repo-wide gh scan no
-  // longer re-runs per issue per call site (an O(issues x repos) subprocess
-  // explosion), it runs once per cycle like it always did pre-cutover.
-  let candidatePrs = null;
-  if (typeof backlog.listCandidatePullRequests === 'function') {
-    try { candidatePrs = backlog.listCandidatePullRequests(); }
-    catch (e) { logImpl('candidate_pr_scan_error', { error: e.message }); }
-  }
-  // Returns the PRs in `candidatePrs` matching `issueObj` via `matcher`
-  // (coreImpl.prMatchesStory or coreImpl.prIdentityMatchesStory). Falls back
-  // to backlog.getIssuePullRequests's own per-identifier lookup (filtered by
-  // the SAME rich matcher) only when the adapter has no board-wide scan —
-  // e.g. stub/mock adapters used by unit tests.
-  function matchedPrs(identifier, issueObj, matcher) {
-    if (candidatePrs) return candidatePrs.filter((pr) => matcher(pr, issueObj));
-    return backlog.getIssuePullRequests(identifier).filter((pr) => matcher(pr, issueObj));
-  }
-
   const todo = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
   logImpl('scan', {
     total: issues.length,
@@ -282,23 +243,6 @@ export async function cycle(opts = {}) {
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
     const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl);
     for (const u of unblocks) {
-      // Guard: never re-dispatch a story that already produced a PR — an OPEN PR
-      // means it is already in review, a MERGED PR means it already shipped. A
-      // merely-stale or failed run from earlier churn must NOT block the unblock
-      // (that is exactly the cm-02/cm-03 case: one refused run each from the
-      // pre-target_repo churn, but never actually built). So gate on a real PR,
-      // discovered via gh in the story's own target repo, not on run count.
-      const issueObj = blockedIssues.find((b) => b.id === u.issueId) || {};
-      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
-      let hasPr = false;
-      if (slug) {
-        // Matches against the per-cycle cached board-wide PR scan (see
-        // matchedPrs above) via the real prMatchesStory — not a narrower
-        // per-adapter heuristic.
-        try { hasPr = matchedPrs(u.identifier, issueObj, coreImpl.prMatchesStory).length > 0; }
-        catch (e) { logImpl('unblock_pr_lookup_error', { identifier: u.identifier, repo: slug, error: e.message }); }
-      }
-      if (hasPr) { logImpl('unblock_skip', { identifier: u.identifier, reason: 'existing-pr', repo: slug }); continue; }
       logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
         try {
@@ -344,28 +288,28 @@ export async function cycle(opts = {}) {
     }
   }
 
-  // DISPATCH-scoped (writes setIssueStatus via detectVerifiedDone below, and
-  // feeds review-dispatch further down) — see the blocked->todo pass above.
+  // DISPATCH-scoped (feeds review-dispatch further down) — see the blocked->todo pass above.
   const inReview = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.IN_REVIEW && cfgImpl.PROJECT_IDS.includes(i.project_id));
-  const prsByIssue = {};
-  for (const i of inReview) prsByIssue[i.identifier] = matchedPrs(i.identifier, i, coreImpl.prMatchesStory);
-  const verified = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
-  for (const v of verified) {
-    logImpl('advance', { identifier: v.identifier, to: ISSUE_STATUS.DONE, applied: !dryRun });
-    if (!dryRun) {
-      try { backlog.setIssueStatus(v.identifier, ISSUE_STATUS.DONE); } catch (e) { logImpl('advance_error', { identifier: v.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
-      if (typeof spawn.reportRouteOutcome === 'function') {
-        try { spawn.reportRouteOutcome(v.identifier, 'success'); } catch (e) { logImpl('route_outcome_error', { identifier: v.identifier, error: e.message }); }
+
+  // ---- state-machine: in_review -> done on a verified merged PR ----
+  // Each in_review issue is checked for a real merged PR via getIssuePullRequests.
+  // detectVerifiedDone requires a real merge (state=merged or merged_at set) — never
+  // fires on an open/closed PR, never fires on smoke/scratch issues or human-owned stories.
+  {
+    const prsByIssue = {};
+    for (const i of inReview) {
+      try { prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier); }
+      catch (e) { prsByIssue[i.identifier] = []; logImpl('prs_fetch_error', { identifier: i.identifier, error: e.message }); }
+    }
+    const verifiedDone = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl);
+    for (const vd of verifiedDone) {
+      logImpl('advance', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, kind: 'verified-done', applied: !dryRun });
+      if (!dryRun) {
+        try { backlog.setIssueStatus(vd.identifier, ISSUE_STATUS.DONE); }
+        catch (e) { logImpl('advance_error', { identifier: vd.identifier, to: ISSUE_STATUS.DONE, error: e.message }); }
       }
     }
   }
-  // Exclude just-advanced issues from the review-dispatch snapshot so a stale
-  // run on a now-done ticket does not trigger a spurious rerun-review in this
-  // same cycle (mirrors the `cascaded` exclusion in selectAssignments below).
-  const _verifiedThisCycle = new Set(verified.map((v) => v.identifier));
-  const inReviewForDispatch = _verifiedThisCycle.size
-    ? inReview.filter((i) => !_verifiedThisCycle.has(i.identifier))
-    : inReview;
 
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
   // The review lane sets changes_requested as the formal "send back" signal;
@@ -440,19 +384,6 @@ export async function cycle(opts = {}) {
           continue;
         }
       }
-      // Idempotency 2: never re-dispatch a story that already produced a PR (open =
-      // in review, merged = shipped) — same gh-based guard the unblock pass uses,
-      // matched against the per-cycle cached board-wide PR scan (see matchedPrs
-      // above).
-      const slug = coreImpl.normalizeRepoSlug(coreImpl.targetRepoValue(issueObj) || '');
-      if (slug) {
-        try {
-          if (matchedPrs(c.identifier, issueObj, coreImpl.prMatchesStory).length > 0) {
-            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-pr', repo: slug });
-            continue;
-          }
-        } catch (e) { logImpl('cascade_pr_lookup_error', { identifier: c.identifier, repo: slug, error: e.message }); }
-      }
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
       if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
       try {
@@ -466,7 +397,7 @@ export async function cycle(opts = {}) {
         // path instead treats rerun as ALWAYS required (assign never enqueues on
         // its own) and always force-reruns, whether or not a run already exists —
         // a genuinely different semantics, not a stale duplicate of the same logic.
-        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj));
+        const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, coreImpl.isHiveStory(issueObj), blockedRuntimes);
         // Skip only when no agent has capacity AND the issue has no existing assignee.
         // If the issue already has an assignee, rerunIssue re-enqueues it without a
         // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
@@ -481,12 +412,24 @@ export async function cycle(opts = {}) {
             try { spawn.selectRoute(c.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: c.identifier, error: e.message }); }
           }
           spawn.assignIssue(c.identifier, agent);
+          if (typeof backlog.setIssueMetadata === 'function') {
+            try { backlog.setIssueMetadata(c.identifier, assignmentMetadata(issueObj, agent, cfgImpl, { now })); }
+            catch (e) { logImpl('assign_metadata_error', { identifier: c.identifier, error: e.message }); }
+          }
           inflight[agent] = (inflight[agent] || 0) + 1;
           const cAgentRt = cfgImpl.AGENTS[agent]?.runtime;
           if (cAgentRt) loopRtProjected[cAgentRt] = (loopRtProjected[cAgentRt] || 0) + 1;
           priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
           assigned++;
+        } else if (!agent && issueObj.assignee_id) {
+          const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
+          const existingRt = existingAgentName && cfgImpl.AGENTS[existingAgentName]?.runtime;
+          if (existingRt && blockedRuntimes.has(existingRt)) {
+            logImpl('cascade_skip', { identifier: c.identifier, reason: 'existing-assignee-runtime-blocked', runtime: existingRt });
+            continue;
+          }
+          if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
         }
         if (!agent && issueObj.assignee_id) {
           const existingAgentName = Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === issueObj.assignee_id)?.[0];
@@ -503,79 +446,18 @@ export async function cycle(opts = {}) {
     }
   }
 
-  // ---- BACK-HALF: review / ship dispatch on in_review stories ----
-  // detectVerifiedDone only advances a story once its PR is ALREADY merged; it
-  // never merges anything. This block dispatches the Claude+plugin-hive REVIEW
-  // lane onto in_review stories that have (or should have) an open PR: the agent
-  // runs /hive:review + /hive:test on the PR branch, then merges to dev + sets
-  // the story done, OR comments the required changes + sends it back to todo.
+  // ---- BACK-HALF: review dispatch on in_review stories ----
   // Assignment to the review agent is the idempotency marker (see
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
   for (const i of inReview) inReviewRuns[i.identifier] = backlog.getIssueRuns(i.identifier);
 
-  // Per-story PR gather (shared by false-done + review dispatch), drawn from
-  // the SAME per-cycle cached board-wide scan (candidatePrs, gathered once
-  // near the top of cycle() — see matchedPrs above). Matching stays
-  // slug-aware via core's prIdentityMatchesStory/detectFalseDone (matches the
-  // story's short key, e.g. m-01, not only the PAN id, so slug-branched PRs
-  // are still found).
-  // DISPATCH-scoped (feeds detectFalseDone below, which writes setIssueStatus)
-  // — see the blocked->todo pass above.
-  const doneIssues = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.DONE && cfgImpl.PROJECT_IDS.includes(i.project_id));
-
-  // ---- STATUS TRUTH: demote wrongly-"done" stories that still have an OPEN PR ----
-  // "done" must mean MERGED. A story a build/ship agent marked done while its PR is
-  // still open is a lie; demote it back to in_review (capped, so never a mass flip)
-  // so the review lane truly reviews+merges it (or loops it back). PR-gated: a done
-  // story with no open PR is left alone (may be a legit non-code done task).
-  {
-    // detectFalseDone itself applies the prIsOpen/ownPrUrl/repo-qualified/
-    // prIdentityMatchesStory matching per doneIssue against a BOARD-WIDE
-    // candidate list (exactly like the pre-cutover router's own openPrsAll),
-    // so the full unfiltered candidatePrs scan is passed straight through
-    // when available. Only adapters with no board-wide scan (e.g. stub/test
-    // adapters) fall back to unioning each done issue's own per-identifier
-    // lookup, de-duplicated by PR url — the pre-fix per-issue gather shape,
-    // kept only as that fallback's approximation of a board-wide list.
-    let donePrs;
-    if (candidatePrs) {
-      donePrs = candidatePrs;
-    } else {
-      donePrs = [];
-      const seenPr = new Set();
-      for (const i of doneIssues) {
-        let prs = [];
-        try { prs = backlog.getIssuePullRequests(i.identifier); }
-        catch (e) { logImpl('false_done_pr_lookup_error', { identifier: i.identifier, error: e.message }); }
-        for (const pr of prs) {
-          const key = pr.url || pr.html_url || `${pr._repo || ''}#${pr.number}`;
-          if (seenPr.has(key)) continue;
-          seenPr.add(key);
-          donePrs.push(pr);
-        }
-      }
-    }
-    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl);
-    const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
-    let n = 0;
-    for (const f of falseDone) {
-      if (n >= cap) { logImpl('false_done_capped', { remaining: falseDone.length - n }); break; }
-      n++;
-      logImpl('advance', { identifier: f.identifier, from: ISSUE_STATUS.DONE, to: ISSUE_STATUS.IN_REVIEW, kind: 'false-done', prUrl: f.prUrl, applied: !dryRun });
-      if (!dryRun) {
-        try { backlog.setIssueStatus(f.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: f.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
-      }
-    }
-  }
-
   // inReview is already PROJECT_IDS-scoped at its own definition above (2026-09-13
   // fix — a firefly-events instance was confirmed live trying to dispatch review
   // for a real PANT-* dostal-tech ticket to its own review-lane agent, before
   // this and the whole board-wide-status-pass audit that followed it).
-  const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
-  const reviewMaxTotal = Math.min((cfgImpl.CAPS && cfgImpl.CAPS.perCycleReview) ?? 1, Math.max(0, maxAssign - assigned));
-  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal });
+  const reviewInflight = coreImpl.computeReviewInflight(inReview, cfgImpl);
+  const reviewPicks = coreImpl.selectReviewDispatch(inReview, inReviewRuns, cfgImpl, reviewInflight, { now, blockedRuntimes });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     if (assigned >= maxAssign) break;
@@ -636,32 +518,46 @@ export async function cycle(opts = {}) {
             '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
           );
         } catch (e) { logImpl('review_comment_error', { identifier: r.identifier, error: e.message }); }
-        // reassign the in_review story to the review agent, then force-enqueue a
-        // fresh run for it (assignee-mutation alone does not reliably enqueue —
-        // the dispatch dead-zone; rerun re-enqueues the CURRENT assignment, so we
-        // sleep first to let the new assignee propagate before rerun).
-        // NOT routed through spawn.dispatch() (a real, tested method with a
-        // genuinely different contract here — see spawn-adapter.mjs's typedef):
-        // this ALWAYS force-reruns unconditionally (even on the non-dispatch-review
-        // branch, which never assigns at all) rather than verifying a run started
-        // first — a different contract than dispatch()'s verify-then-conditionally-
-        // rerun, not a stale duplicate of it.
+        // Reassign the in_review story to the review agent, then verify a run
+        // started (Multica enqueues a run on assignment); force-rerun only if
+        // the assignment did not auto-enqueue one (dead-zone fallback).
+        // NOT routed through spawn.dispatch() (different contract — see spawn-adapter.mjs).
         if (typeof spawn.selectRoute === 'function') {
           try { spawn.selectRoute(r.identifier, 'review'); } catch (e) { logImpl('route_select_error', { identifier: r.identifier, error: e.message }); }
         }
         spawn.assignIssue(r.identifier, r.agent);
+        if (typeof backlog.setIssueMetadata === 'function') {
+          try { backlog.setIssueMetadata(r.identifier, assignmentMetadata(issueObj, r.agent, cfgImpl, { now })); }
+          catch (e) { logImpl('assign_metadata_error', { identifier: r.identifier, error: e.message }); }
+        }
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
+        const postAssignRuns = backlog.getIssueRuns(r.identifier);
+        const assignEnqueued = postAssignRuns.some((run) => {
+          const rc = coreImpl.classifyRun(run, now);
+          return rc.active || rc.done || rc.failed;
+        });
+        if (!assignEnqueued) {
+          logImpl('review_verify_no_run', { identifier: r.identifier, agent: r.agent, action: 'rerun' });
+          try { spawn.rerunIssue(r.identifier); } catch (e) { logImpl('rerun_error', { identifier: r.identifier, error: e.message }); }
+        } else {
+          const lr = coreImpl.latestRun(postAssignRuns);
+          const rc = lr ? coreImpl.classifyRun(lr, now) : {};
+          logImpl('review_assign_enqueued', { identifier: r.identifier, agent: r.agent, runStatus: rc.status });
+        }
+      } else {
+        // rerun-review: no assign happened, always force-enqueue.
+        spawn.rerunIssue(r.identifier);
       }
-      spawn.rerunIssue(r.identifier);
       assigned++;
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
       // PANT-262: post-dispatch verification — mirrors plain dispatch's own verify step
       // (auriga-router.mjs "route new todos") to detect the zero-output startup hang early.
-      // For dispatch-review this is the SECOND sleep (first was pre-rerunIssue); for
-      // rerun-review there was no prior sleep, so this is the only one. Both cases end
-      // with a run-presence check that logs review_verify_ok / review_verify_no_run —
-      // the latter is the clearest early signal that the hang is happening THIS cycle
-      // (not 30 minutes later when idle_watchdog fires).
+      // For dispatch-review this is the SECOND sleep (first was pre-verify inside the
+      // dispatch-review block); for rerun-review there was no prior sleep, so this is
+      // the only one. Both cases end with a run-presence check that logs
+      // review_verify_ok / review_verify_no_run — the latter is the clearest early
+      // signal that the hang is happening THIS cycle (not 30 minutes later when
+      // idle_watchdog fires).
       await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       const reviewVerifyRuns = backlog.getIssueRuns(r.identifier);
       const reviewRunStarted = reviewVerifyRuns.some((run) => {
@@ -732,7 +628,7 @@ export async function cycle(opts = {}) {
         }
       } else {
         // needs (re)routing — route via its lane
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive);
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected }, z.isHive, blockedRuntimes);
         if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
         const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
         if ((priorAgentCycleAssigns[agent] || 0) >= maxPerAgentZombie) {
@@ -745,7 +641,12 @@ export async function cycle(opts = {}) {
             if (typeof spawn.selectRoute === 'function') {
               try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
             }
+            const zombieIssueObj = issues.find((i) => i.identifier === z.identifier) || { identifier: z.identifier };
             spawn.assignIssue(z.identifier, agent);
+            if (typeof backlog.setIssueMetadata === 'function') {
+              try { backlog.setIssueMetadata(z.identifier, assignmentMetadata(zombieIssueObj, agent, cfgImpl, { now })); }
+              catch (e) { logImpl('assign_metadata_error', { identifier: z.identifier, error: e.message }); }
+            }
             assigned++;
             inflight[agent] = (inflight[agent] || 0) + 1;
             priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
@@ -773,12 +674,22 @@ export async function cycle(opts = {}) {
     const todoRunsByIssue = {};
     for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
+    // PANT-736: unassign actions (review-lane agent on todo) bypass the capacity gate —
+    // they don't dispatch a run so must not consume a slot or count against inflight.
+    const idleUnassigns = idleActions.filter((a) => a.action === 'unassign');
+    const idleStartActions = idleActions.filter((a) => a.action !== 'unassign');
+    for (const a of idleUnassigns) {
+      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, applied: !dryRun });
+      if (!dryRun) {
+        try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+      }
+    }
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie
     // additions made this cycle (those update inflight[] directly). Omitting it here
     // causes limitAssignedIdleRecoveries to recompute from the updated inflight, giving
     // the per-runtime cap the correct view. Same fix as PANT-331 bug 2 for the cascade
     // and zombie passes; see capacity.mjs:computeRuntimeInflight.
-    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleActions, cfgImpl, {
+    const { selected: idleSelected } = coreImpl.limitAssignedIdleRecoveries(idleStartActions, cfgImpl, {
       inflight,
       blockedRuntimes,
       priorAgentCycleAssigns,
@@ -814,6 +725,10 @@ export async function cycle(opts = {}) {
 
   for (const p of picks) {
     if (assigned >= maxAssign) break;
+    if (blockedRuntimes.has(p.runtime)) {
+      logImpl('skip_blocked_runtime', { identifier: p.identifier, agent: p.agent, runtime: p.runtime });
+      continue;
+    }
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
     if (dryRun) continue;
     try {
@@ -828,6 +743,13 @@ export async function cycle(opts = {}) {
       // If a lane errors with a limit/quota, block that runtime for the rest of this cycle.
       if (/limit|quota|rate|429|exhaust/i.test(msg)) blockedRuntimes.add(p.runtime);
       continue;
+    }
+    // Write the assignment fingerprint so isRouterManagedAssignment() returns true for this
+    // issue on the next cycle — enabling idempotent re-routing (PAN-8245).
+    if (typeof backlog.setIssueMetadata === 'function') {
+      const pickIssueObj = issues.find((i) => i.identifier === p.identifier) || { identifier: p.identifier };
+      try { backlog.setIssueMetadata(p.identifier, assignmentMetadata(pickIssueObj, p.agent, cfgImpl, { now })); }
+      catch (e) { logImpl('assign_metadata_error', { identifier: p.identifier, error: e.message }); }
     }
     // verify a run started; force-enqueue if not (dead-zone fix).
     //

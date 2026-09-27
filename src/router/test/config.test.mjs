@@ -78,12 +78,10 @@ import * as cfg from ${JSON.stringify(new URL('../lib/config.mjs', import.meta.u
 console.log(JSON.stringify({
   PROJECT_IDS: cfg.PROJECT_IDS,
   HIVE_LANE: cfg.HIVE_LANE,
-  REVIEW_REPO_OWNER: cfg.REVIEW_REPO_OWNER,
 }));
 `;
 
 const DEFAULT_HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
-const DEFAULT_REVIEW_REPO_OWNER = 'mdostal';
 
 test('AC2: partial config naming only PROJECT_IDS overrides that key, others use defaults', () => {
   const overrideIds = ['override-id-1', 'override-id-2'];
@@ -92,7 +90,6 @@ test('AC2: partial config naming only PROJECT_IDS overrides that key, others use
   const out = JSON.parse(result.stdout.trim());
   assert.deepEqual(out.PROJECT_IDS, overrideIds, 'PROJECT_IDS should come from config file');
   assert.deepEqual(out.HIVE_LANE, DEFAULT_HIVE_LANE, 'HIVE_LANE should fall back to default');
-  assert.equal(out.REVIEW_REPO_OWNER, DEFAULT_REVIEW_REPO_OWNER, 'REVIEW_REPO_OWNER should fall back to default');
 });
 
 test('AC2: PROJECT_IDS order in override is preserved (array order load-bearing)', () => {
