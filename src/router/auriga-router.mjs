@@ -14,7 +14,10 @@
 //   --max-assign N    hard cap on assignments this process (default: unlimited)
 //   --no-zombie       skip zombie recovery this run
 // Env overrides: AURIGA_PER_CYCLE_TOTAL, AURIGA_PER_CYCLE_PER_AGENT,
-//   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG.
+//   AURIGA_CYCLE_MS, AURIGA_PIDFILE, AURIGA_LOG, AURIGA_HEARTBEAT_FILE.
+// Logging: JSONL to stdout by default; to the AURIGA_LOG file when set.
+// Every cycle ends with one `cycle_summary` event and a heartbeat-file write
+// (see README "Observability").
 //
 // TESTABILITY: `cycle()` is exported and accepts an options bag so tests can
 // inject fixture/stub backlog+spawn adapters (opts.backlog, opts.spawn), a
@@ -30,9 +33,10 @@ import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from 
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { dispatchEligible, isRateLimitError } from './lib/dispatch-guards.mjs';
-import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
+import { loadRealTopology, resolveParentBoardConfig, resolveChildBoardConfigs } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
+import { createCycleCounter, createLogger, defaultHeartbeatFile, DEFAULT_PIDFILE, writeHeartbeat } from './lib/observability.mjs';
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
 // no HTTP call happens until a method is actually invoked), exactly
@@ -70,10 +74,8 @@ const DRY = has('--dry-run');
 const NO_ZOMBIE = has('--no-zombie');
 const MAX_ASSIGN = parseInt(val('--max-assign', '0'), 10) || Infinity;
 
-const PIDFILE = process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
-const LOGFILE = process.env.AURIGA_LOG || '/tmp/auriga-router.jsonl';
-const INSTANCE_ID = process.env.AURIGA_INSTANCE_ID || null;
-const TENANT_ID = process.env.AURIGA_TENANT_ID || null;
+const PIDFILE = process.env.AURIGA_PIDFILE || DEFAULT_PIDFILE;
+const HEARTBEAT_FILE = defaultHeartbeatFile(process.env);
 
 // s14: single-instance multi-tenant consolidation. Off by default -- a
 // deliberate, explicit opt-in per docs/s14-consolidation-design.md's own
@@ -121,14 +123,9 @@ function releaseLock() {
 }
 
 // ---- logging ---------------------------------------------------------------
-function log(event, data) {
-  const rec = { ts: new Date().toISOString(), event, ...data };
-  if (INSTANCE_ID) rec.instance_id = INSTANCE_ID;
-  if (TENANT_ID && !('tenant_id' in rec)) rec.tenant_id = TENANT_ID;
-  const line = JSON.stringify(rec);
-  try { fs.appendFileSync(LOGFILE, line + '\n'); } catch {}
-  console.log(line);
-}
+// JSONL to stdout, or to the AURIGA_LOG file when set; stamps
+// AURIGA_INSTANCE_ID/AURIGA_TENANT_ID on every record (lib/observability.mjs).
+const log = createLogger();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -342,17 +339,59 @@ function unassignArchivedAgents(dc, agentIds, dryRun) {
 }
 
 // ---- one cycle -------------------------------------------------------------
-// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now, initialBlockedRuntimes }
+// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now, initialBlockedRuntimes, heartbeatFile }
 // Every dependency defaults to the live module-level singleton, so calling
 // cycle() with no args (from main()) is exactly the original live behavior.
 // Returns { todo, picked, assigned }.
 // opts.initialBlockedRuntimes: Set<string> — pre-seed blockedRuntimes before any pass runs (tests only).
+// opts.heartbeatFile: rewritten after every cycle_summary. Only main()/
+// mainMultiTenant() pass it, so tests calling cycle() touch no files.
+//
+// PANT-817: exactly one `cycle_summary` closes every cycle, including one
+// that throws part-way (emitted from `finally`, then the error propagates to
+// the caller's cycle_error/tenant_cycle_error handling as before).
 export async function cycle(opts = {}) {
+  const baseLog = opts.log || log;
+  const counter = createCycleCounter();
+  const state = { issuesScanned: 0, blockedRuntimes: null };
+  const startedAt = Date.now();
+  let result = null;
+  let thrown = null;
+  try {
+    result = await runCycle({ ...opts, log: counter.wrap(baseLog) }, state);
+    return result;
+  } catch (e) {
+    thrown = e;
+    throw e;
+  } finally {
+    const summary = {
+      ts: new Date().toISOString(),
+      duration_ms: Date.now() - startedAt,
+      issues_scanned: state.issuesScanned,
+      todo: result ? result.todo : null,
+      picked: result ? result.picked : null,
+      assigned: result ? result.assigned : null,
+      passes: counter.passes(),
+      errors: counter.errors() + (thrown ? 1 : 0),
+      aborted: Boolean(thrown),
+      ...(thrown ? { abort_error: thrown.message } : {}),
+      blocked_runtimes: state.blockedRuntimes ? [...state.blockedRuntimes].sort() : [],
+      dry_run: opts.dryRun ?? DRY,
+    };
+    try { baseLog('cycle_summary', summary); } catch {}
+    if (opts.heartbeatFile) {
+      try { writeHeartbeat(opts.heartbeatFile, { ...summary, pid: process.pid }); }
+      catch (e) { try { baseLog('heartbeat_error', { file: opts.heartbeatFile, error: e.message }); } catch {} }
+    }
+  }
+}
+
+async function runCycle(opts, state) {
   const backlog = opts.backlog || defaultBacklog;
   const spawn = opts.spawn || defaultSpawn;
   const cfgImpl = opts.cfg || cfg;
   const coreImpl = opts.core || core;
-  const logImpl = opts.log || log;
+  const logImpl = opts.log;
   const sleepImpl = opts.sleep || sleep;
   const dryRun = opts.dryRun ?? DRY;
   const noZombie = opts.noZombie ?? NO_ZOMBIE;
@@ -367,7 +406,11 @@ export async function cycle(opts = {}) {
   const loadExternalConfigImpl = opts.loadExternalConfig || loadExternalConfig;
   const createRemoteBacklog = opts.createRemoteBacklog || createPantheonV2L2BacklogAdapter;
   const topology = loadTopologyImpl();
-  const parentBoardConfig = resolveParentBoardConfig(topology, loadExternalConfigImpl());
+  const externalConfig = loadExternalConfigImpl();
+  const parentBoardConfig = resolveParentBoardConfig(topology, externalConfig);
+  // t016 — orchestrator hand-down: every registered child's board config
+  // (null when unreachable), resolved from the same per-cycle reads.
+  const childBoards = resolveChildBoardConfigs(topology, externalConfig);
 
   // `issues` itself is fetched board-wide (scanIds spans every known project, not
   // just this tenant's own cfgImpl.PROJECT_IDS) because dependency-graph resolution
@@ -389,6 +432,7 @@ export async function cycle(opts = {}) {
   const discovered = backlog.listAllProjectIds();
   const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
   const issues = backlog.listAllIssues(scanIds);
+  state.issuesScanned = issues.length;
   const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS);
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
@@ -406,6 +450,7 @@ export async function cycle(opts = {}) {
   });
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
+  state.blockedRuntimes = blockedRuntimes;
 
   // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
   // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
@@ -841,6 +886,7 @@ export async function cycle(opts = {}) {
     exclude: cascaded,
     maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining),
     parentBoardConfig,
+    childBoards,
     priorAgentCycleAssigns,
   });
 
@@ -891,47 +937,79 @@ export async function cycle(opts = {}) {
       applied: !dryRun,
     });
     if (dryRun) continue;
+    handOffToBoard(h.identifier, {
+      board: parentBoardConfig, event: 'hand_up', metadataKey: 'handed_up_from',
+      comment: (created) => `Handed up — created ${created && created.identifier} on the parent board.`,
+    }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
+  }
 
-    const issue = issues.find((i) => i.identifier === h.identifier);
-
-    // Cancel locally BEFORE the remote create. Once CANCELLED the issue is
-    // out of the todo candidate pool, so a later cycle cannot create a second
-    // parent-board issue even if the post-create local mutations below fail
-    // (the original duplicate-on-retry bug). If the cancel itself fails we
-    // skip the remote create entirely and let the next cycle retry.
-    try {
-      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
-    } catch (e) {
-      logImpl('hand_up_pre_cancel_error', { identifier: h.identifier, error: e.message });
-      continue;
-    }
-
-    let createdIssue;
-    try {
-      const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
-      createdIssue = remoteBacklog.createIssue({
-        title: issue ? issue.title : h.identifier,
-        description: issue ? issue.description : undefined,
-        metadata: { handed_up_from: h.identifier },
-      });
-    } catch (e) {
-      // Remote create failed — undo the pre-cancel so the issue re-enters
-      // the candidate pool next cycle rather than being stranded as cancelled.
-      logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
-      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
-      continue;
-    }
-
-    logImpl('hand_up_ok', { identifier: h.identifier, newIdentifier: createdIssue && createdIssue.identifier });
-    try {
-      backlog.commentOnIssue(h.identifier, `Handed up — created ${createdIssue && createdIssue.identifier} on the parent board.`);
-    } catch (e) { logImpl('hand_up_comment_error', { identifier: h.identifier, error: e.message }); }
-    try {
-      spawn.unassignIssue(h.identifier);
-    } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
+  // ---- route hand-downs (t016 — orchestrator hand-down) ----
+  // Explicit project -> child-board routes (projects.json `route`). Same
+  // cross-board createIssue primitive and cancel-first idempotency guard as
+  // hand-up. A route naming an unknown/unreachable child is held for a human
+  // (never dispatched to an agent) and logged loudly every cycle until fixed.
+  for (const r of picks.handDownRejected || []) {
+    logImpl('hand_down_rejected', {
+      identifier: r.identifier, childId: r.childId, reason: r.reason,
+      warning: `project routes to child '${r.childId}' which is ${r.reason === 'unknown-child' ? 'not registered in orchestrator-topology.json' : 'missing baseUrl/projectId reachability config'} — held for a human, not dispatched`,
+    });
+  }
+  for (const d of picks.handDowns || []) {
+    logImpl('hand_down', {
+      identifier: d.identifier, childId: d.childId,
+      targetProjectId: d.board.projectId,
+      applied: !dryRun,
+    });
+    if (dryRun) continue;
+    handOffToBoard(d.identifier, {
+      board: d.board, event: 'hand_down', metadataKey: 'handed_down_from',
+      comment: (created) => `Handed down — created ${created && created.identifier} on child board '${d.childId}'.`,
+    }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
   }
 
   return { todo: todo.length, picked: picks.length, assigned: dc.assigned };
+}
+
+// Cross-board hand-off shared by hand-up (t015) and hand-down (t016): create
+// the issue on another board, then close/comment/unassign it locally.
+//
+// Cancel locally BEFORE the remote create. Once CANCELLED the issue is out of
+// the todo candidate pool, so a later cycle cannot create a second remote
+// issue even if the post-create local mutations fail (the original
+// duplicate-on-retry bug, PANT-397). If the cancel itself fails we skip the
+// remote create entirely and let the next cycle retry.
+function handOffToBoard(identifier, { board, event, metadataKey, comment }, { issues, backlog, spawn, logImpl, createRemoteBacklog }) {
+  const issue = issues.find((i) => i.identifier === identifier);
+  try {
+    backlog.setIssueStatus(identifier, ISSUE_STATUS.CANCELLED);
+  } catch (e) {
+    logImpl(`${event}_pre_cancel_error`, { identifier, error: e.message });
+    return;
+  }
+
+  let createdIssue;
+  try {
+    const remoteBacklog = createRemoteBacklog({ baseUrl: board.baseUrl, project: board.projectId });
+    createdIssue = remoteBacklog.createIssue({
+      title: issue ? issue.title : identifier,
+      description: issue ? issue.description : undefined,
+      metadata: { [metadataKey]: identifier },
+    });
+  } catch (e) {
+    // Remote create failed — undo the pre-cancel so the issue re-enters
+    // the candidate pool next cycle rather than being stranded as cancelled.
+    logImpl(`${event}_error`, { identifier, error: e.message });
+    try { backlog.setIssueStatus(identifier, ISSUE_STATUS.TODO); } catch { /* next cycle retries */ }
+    return;
+  }
+
+  logImpl(`${event}_ok`, { identifier, newIdentifier: createdIssue && createdIssue.identifier });
+  try {
+    backlog.commentOnIssue(identifier, comment(createdIssue));
+  } catch (e) { logImpl(`${event}_comment_error`, { identifier, error: e.message }); }
+  try {
+    spawn.unassignIssue(identifier);
+  } catch (e) { logImpl(`${event}_unassign_error`, { identifier, error: e.message }); }
 }
 
 // ---- main loop (single-tenant, standalone -- unchanged) --------------------
@@ -947,7 +1025,7 @@ async function main() {
   do {
     try {
       const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
-      const result = await cycle({ maxAssign: remaining });
+      const result = await cycle({ maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE });
       totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -989,13 +1067,17 @@ async function mainMultiTenant() {
     }
     if (!tenants.length) {
       log('no_tenants_found', {});
+      // No cycle() ran, but the loop itself is alive: keep the heartbeat fresh
+      // so the healthcheck reports liveness, not tenant availability.
+      try { writeHeartbeat(HEARTBEAT_FILE, { ts: new Date().toISOString(), pid: process.pid, tenants: 0 }); }
+      catch (e) { log('heartbeat_error', { file: HEARTBEAT_FILE, error: e.message }); }
     } else {
       for (const { tenantId, cfg: tenantCfg } of rotate(tenants, rotation)) {
         if (totalAssigned >= MAX_ASSIGN) break;
         const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
         try {
           const { backlog, spawn } = getTenantAdapters(tenantAdapters, tenantId, tenantCfg);
-          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining });
+          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE });
           totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
         } catch (e) {

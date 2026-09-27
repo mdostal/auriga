@@ -1,0 +1,38 @@
+name: t016-orchestrator-hand-down
+title: Orchestrator hand-down — route a project's todos to a registered child board
+description: >
+  The down-direction twin of t015's hand-up. First slice (PANT-820): explicit config
+  only. A projects.json entry may carry `route: { kind: 'child', childId }` alongside
+  today's agent lane (`{ kind: 'agent', lane }`, the implicit default for every
+  existing entry, so the change is backward compatible). Each cycle, core.mjs's pure
+  resolveRouteTarget() resolves a todo to an agent lane, a child board, or (when the
+  childId is not registered in orchestrator-topology.json's children, or has no
+  baseUrl/projectId reachability) the human-todo path with a loud
+  `hand_down_rejected` warning. It never falls back to an agent. Child-routed todos
+  are created on the child's board through t015's cross-board createIssue primitive,
+  then cancelled, commented and unassigned locally with the same cancel-first
+  idempotency guard hand-up uses (PANT-397), so a second cycle cannot duplicate the
+  remote issue. Child-routed dependents are also excluded from cascade dispatch.
+  Set with `auriga project add <id> --child <childId>` (rejected unless the child
+  is registered); `--no-child` clears it. Child reachability comes from the topology
+  child's own baseUrl/projectId, overridable per child via AURIGA_CONFIG
+  `childBoards: { <childId>: { baseUrl, projectId } }` (same precedence as
+  hand-up's `parentBoard`).
+  Out of scope: auto-detecting which child "fits" a ticket, and any operator-chat
+  origination surface.
+target_codebase: mdostal/auriga
+methodology: classic
+version_bump: minor
+sidecar_retention: transient
+
+git_flow:
+  base_branch: dev
+  branch_strategy: per-epic
+
+stories:
+  - id: t016-explicit-child-routing
+    title: Project registry child route + resolveRouteTarget + cycle() hand-down dispatch
+    complexity: medium
+    depends_on: []
+    ticket: PANT-820
+    status: in_review
