@@ -1162,6 +1162,86 @@ test('selectReviewDispatch: rerun-review fires normally when runtime is NOT bloc
   assert.equal(picks[0].action, 'rerun-review');
 });
 
+// ---- PANT-658: review-phase accounting across a REVIEW_LANE change ---------------
+
+const OLD_RV = 'OLD-RV';
+const CFG_FORMER = { ...CFG, FORMER_REVIEW_AGENT_IDS: [OLD_RV] };
+const runBy = (agentId, minsAgo, status = 'completed') => {
+  const at = new Date(NOW - minsAgo * 60_000).toISOString();
+  return status === 'running'
+    ? { status, started_at: at, agent_id: agentId }
+    : { status, started_at: at, completed_at: at, agent_id: agentId };
+};
+const runsBy = (agentId, n, fromMinsAgo = 60) => Array.from({ length: n }, (_, k) => runBy(agentId, fromMinsAgo + k * 60));
+
+test('selectReviewDispatch: builder still assigned after handoff gets dispatch-review to a lane reviewer — PANT-658', () => {
+  // Normal build->review handoff: builder AB (registered, not in REVIEW_LANE) is still the
+  // assignee and has a recent build run. It must NOT be treated as a (former) reviewer.
+  const i = inReview('PANT-658-BLD', 700, 'AB');
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-BLD': [runBy('AB', 10)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: builder runs never count toward reviewRunCount or fairness — PANT-658/PANT-531', () => {
+  const heavy = inReview('PANT-658-HEAVYBLD', 701, 'AB'); // 5 build runs, never reviewed
+  const fresh = inReview('PANT-658-FRESH', 702);
+  const picks = core.selectReviewDispatch(
+    [heavy, fresh], { 'PANT-658-HEAVYBLD': runsBy('AB', 5), 'PANT-658-FRESH': [] }, CFG_FORMER, {}, { now: NOW },
+  );
+  assert.equal(picks.filter((p) => p.action === 'give-up-review').length, 0, 'never-reviewed ticket must not be given up');
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-HEAVYBLD', 'build runs must not deprioritize it behind the fresh ticket');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('selectReviewDispatch: issue held by a former reviewer is re-dispatched to a current lane reviewer, not rerun on it — PANT-658', () => {
+  const i = inReview('PANT-658-FORMER', 703, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-FORMER': [runBy(OLD_RV, 30)] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'dispatch-review');
+  assert.equal(picks[0].agent, 'auriga-review');
+});
+
+test('selectReviewDispatch: former reviewer with a live run is left alone — PANT-658', () => {
+  const i = inReview('PANT-658-LIVE', 704, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-LIVE': [runBy(OLD_RV, 1, 'running')] }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 0);
+});
+
+test('selectReviewDispatch: former reviewer with exhausted runs gets give-up-review with a string agent — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-EXHA', 705, OLD_RV);
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-EXHA': runsBy(OLD_RV, max) }, CFG_FORMER, {}, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  assert.equal(typeof picks[0].agent, 'string');
+});
+
+test('selectReviewDispatch: give-up cap counts former + current reviewer runs together — PANT-658', () => {
+  const max = CFG.CAPS.reviewMaxAttempts ?? 5;
+  const i = inReview('PANT-658-MIX', 706, 'RV');
+  const runs = [...runsBy(OLD_RV, max - 1, 120), runBy('RV', 30)];
+  const picks = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG_FORMER, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].action, 'give-up-review');
+  // Without the former-reviewer list the old runs don't count: plain rerun-review.
+  const plain = core.selectReviewDispatch([i], { 'PANT-658-MIX': runs }, CFG, { 'auriga-review': 1 }, { now: NOW });
+  assert.equal(plain[0].action, 'rerun-review');
+});
+
+test('selectReviewDispatch: former-reviewer runs count toward fairness — PANT-658', () => {
+  const fairnessMax = CFG.CAPS.reviewFairnessMaxAttempts ?? 3;
+  const heavy = inReview('PANT-658-FAIRH', 707, OLD_RV);
+  const fresh = inReview('PANT-658-FAIRF', 708);
+  const picks = core.selectReviewDispatch(
+    [heavy, fresh], { 'PANT-658-FAIRH': runsBy(OLD_RV, fairnessMax), 'PANT-658-FAIRF': [] }, CFG_FORMER, {}, { now: NOW },
+  );
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-658-FAIRF');
+});
+
 // ---- PANT-667: give-up-review must not consume the perCycleReview budget ----
 
 test('selectReviewDispatch: give-up-review does not consume the perCycleReview slot — PANT-667', () => {

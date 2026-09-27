@@ -573,6 +573,16 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
 
+  // PANT-658: agents that used to be in REVIEW_LANE. Run history alone can't tell a former
+  // reviewer from the builder that is still assigned after the build->review handoff, so
+  // this needs an explicit positive signal (cfg.FORMER_REVIEW_AGENT_IDS). Their runs count
+  // as review-phase runs (fairness + give-up cap carry over across a lane change), but an
+  // issue they hold is re-dispatched to a CURRENT lane reviewer, never rerun on them.
+  const formerReviewIds = new Set((cfg.FORMER_REVIEW_AGENT_IDS || []).filter((id) => id && !reviewAgentIds.has(id)));
+  const reviewPhaseIds = new Set([...reviewAgentIds, ...formerReviewIds]);
+  const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
+  const reviewRunsOf = (runs) => runs.filter((r) => reviewPhaseIds.has(r.agent_id)).length;
+
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
   // (e.g. a planning-only ticket with no PR ever coming, or one detectFalseDone
@@ -593,10 +603,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // starved outright, while every other real in_review ticket gets first
   // crack at the slot.
   const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
-  // PANT-531: count only review-phase runs (agent_id in reviewAgentIds). Build-phase runs
+  // PANT-531: count only review-phase runs (current or former review agents). Build-phase runs
   // must not inflate this counter — a story needing 3+ build iterations would otherwise be
   // deprioritized the moment it enters in_review, before any review run has ever fired.
-  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).filter((r) => reviewAgentIds.has(r.agent_id)).length;
+  const attemptsOf = (i) => reviewRunsOf(runsByIssue[i.identifier] || []);
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
@@ -629,9 +639,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
       // give-up-review on its very first review dispatch. The give-up action sets the issue
       // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
-      const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
-      const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
-      if (reviewRunCount >= reviewMaxAttempts) {
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
         giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
@@ -646,6 +654,17 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
         agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
       });
       continue;
+    }
+
+    if (formerReviewIds.has(i.assignee_id)) {
+      if (hasActiveRun(runs, now, staleMs)) continue; // let the former reviewer's live run finish
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
+        giveUps.push({
+          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+          agent: `former-review:${i.assignee_id}`, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
+        });
+        continue;
+      }
     }
 
     // not yet under review — pick a review agent with free capacity. Dispatch is
