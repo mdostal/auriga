@@ -302,17 +302,30 @@ export function createMulticaBacklogAdapter(cfg = {}) {
   // Set one or more metadata keys on an existing issue (BacklogAdapter contract,
   // see ../backlog-adapter.mjs). Best-effort: degrades gracefully (returns null
   // on any key failure) — a metadata write must never abort a dispatch. Mirrors
-  // the key-at-a-time `multica issue metadata set` pattern used by createIssue.
+  // the key-at-a-time `multica issue metadata set` pattern used by createIssue;
+  // the CLI merges per key, so other keys are preserved.
+  //
+  // String values are sent with `--type string` (PANT-437): the CLI otherwise
+  // JSON-sniffs --value, so a hex router_assignment_fingerprint like "1234e5"
+  // or an all-digit one would be stored as a number and never match on
+  // re-read. Objects are JSON-encoded; numbers/booleans keep their type.
   function setIssueMetadata(identifier, metadataObj) {
-    if (!metadataObj || typeof metadataObj !== 'object') return null;
+    if (!identifier || !metadataObj || typeof metadataObj !== 'object') return null;
+    let ok = true;
     for (const [key, value] of Object.entries(metadataObj)) {
+      const args = ['issue', 'metadata', 'set', identifier, '--key', key];
+      if (typeof value === 'string') args.push('--value', value, '--type', 'string');
+      else if (value !== null && typeof value === 'object') args.push('--value', JSON.stringify(value));
+      else args.push('--value', String(value));
+      args.push('--output', 'json');
       try {
-        run(['issue', 'metadata', 'set', identifier, '--key', key, '--value', String(value), '--output', 'json']);
+        run(args);
       } catch (e) {
+        ok = false;
         process.stderr.write(`setIssueMetadata(${identifier}): key "${key}" failed: ${e.message}\n`);
       }
     }
-    return null;
+    return ok ? { ok: true } : null;
   }
 
   // Create a NEW issue (t015 — orchestrator hand-up). Genuinely new
@@ -362,6 +375,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
     return created;
   }
+
 
   return Object.freeze({
     listIssues,
