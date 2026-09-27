@@ -185,6 +185,45 @@ export function isHandUp(issue) {
   return labelNames.includes('hand-up');
 }
 
+// Where does this todo go (t016 — orchestrator hand-down)? Pure: a project's
+// route is either an agent lane (today's behaviour, and the implicit default
+// for every registry entry without a `route`) or a registered child board
+// (cfg.PROJECT_ROUTE, from projects.json). `childBoards` is
+// orchestrator-topology.mjs's resolveChildBoardConfigs() output: every
+// registered child id -> its reachability config, or null when it has none.
+//
+// Returns one of:
+//   { kind: 'agent', lane }               — dispatch to a local agent lane
+//   { kind: 'child', childId, board }     — create it on that child's board
+//   { kind: 'human', reason, childId }    — the project names a child that is
+//     not registered in the topology ('unknown-child') or has no reachability
+//     config ('child-unreachable'). The config is rejected: the issue is held
+//     for a human (the same human-todo path an unroutable ticket takes) and is
+//     NEVER dispatched to an agent — falling back to the agent lane would
+//     silently build work the operator explicitly routed elsewhere.
+export function resolveRouteTarget(issue, cfg, childBoards = {}) {
+  const route = cfg.PROJECT_ROUTE && cfg.PROJECT_ROUTE[issue.project_id];
+  if (!route || route.kind !== 'child') {
+    return { kind: 'agent', lane: (cfg.PROJECT_LANE && cfg.PROJECT_LANE[issue.project_id]) || cfg.DEFAULT_LANE };
+  }
+  const { childId } = route;
+  if (!childId || !childBoards || !Object.hasOwn(childBoards, childId)) {
+    return { kind: 'human', reason: 'unknown-child', childId: childId || null };
+  }
+  const board = childBoards[childId];
+  if (!board) return { kind: 'human', reason: 'child-unreachable', childId };
+  return { kind: 'child', childId, board };
+}
+
+// Does this issue's project route to a child board at all (valid or not)?
+// Used by passes other than selectAssignments that would otherwise assign an
+// agent directly (cascade dispatch) — a child-routed project's todos are
+// never built locally.
+export function isChildRouted(issue, cfg) {
+  const route = cfg && cfg.PROJECT_ROUTE && cfg.PROJECT_ROUTE[issue.project_id];
+  return !!(route && route.kind === 'child');
+}
+
 // Dependency gate: is this issue's declared depends_on satisfied enough to dispatch?
 // Minerva carries a decomposed story's story->story DAG into Multica as a `depends_on`
 // metadata value (comma-separated dependency ISSUE ids — see fileStoriesToMultica). The router
@@ -333,10 +372,27 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // fallback=true: heuristic-only seed, routed to the build lane below.
   // fallback=false: explicitly-labeled seed, held (nothing can plan it here).
   const seedNoPlanning = [];
+  // t016 — orchestrator hand-down: same decisions-as-data contract as
+  // handUps. handDowns are created on a child board by the router;
+  // handDownRejected are held for a human with a logged warning.
+  const handDowns = [];
+  const handDownRejected = [];
 
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
+
+    // Explicit project -> child-board routing wins over every agent route
+    // (seed/planning included): the child instance owns that work end to end.
+    const target = resolveRouteTarget(issue, cfg, opts.childBoards);
+    if (target.kind === 'child') {
+      handDowns.push({ identifier: issue.identifier, issueId: issue.id, childId: target.childId, board: target.board });
+      continue;
+    }
+    if (target.kind === 'human') {
+      handDownRejected.push({ identifier: issue.identifier, issueId: issue.id, childId: target.childId, reason: target.reason });
+      continue;
+    }
 
     // Un-planned seeds MUST route to the Minerva planning lane, never a build
     // lane — and if the planning lane has no capacity this cycle, skip the
@@ -415,6 +471,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     });
   }
   chosen.handUps = handUps;
+  chosen.handDowns = handDowns;
+  chosen.handDownRejected = handDownRejected;
   chosen.seedNoPlanning = seedNoPlanning;
   return chosen;
 }
@@ -1037,6 +1095,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // seeds belong to the planning lane — never cascade to build
+    if (isChildRouted(i, cfg)) continue; // t016: handed down to a child board, never built here
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;

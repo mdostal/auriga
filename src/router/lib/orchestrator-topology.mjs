@@ -181,3 +181,37 @@ export function resolveParentBoardConfig(topology, externalConfig = {}) {
   }
   return null;
 }
+
+/**
+ * Resolves cross-board reachability for EVERY registered child (t016 —
+ * orchestrator hand-down), the mirror of resolveParentBoardConfig above.
+ * Pure function, no I/O. Returns a map keyed by every child id in the
+ * topology: its `{ baseUrl, projectId }` when reachable, or `null` when the
+ * child is registered but has no reachability config. A child id ABSENT
+ * from the returned map is not registered in the topology at all — core.mjs's
+ * resolveRouteTarget() tells those two cases apart for its warning.
+ *
+ * Per-child precedence matches the parent's: `externalConfig.childBoards[id]`
+ * (AURIGA_CONFIG) wins when it supplies both fields, else the topology
+ * child's own `baseUrl`/`projectId`.
+ *
+ * @param {{ children?: {id: string, baseUrl?: string, projectId?: string}[] }} topology
+ * @param {{ childBoards?: Record<string, { baseUrl?: string, projectId?: string }> }} [externalConfig]
+ * @returns {Record<string, { baseUrl: string, projectId: string } | null>}
+ */
+export function resolveChildBoardConfigs(topology, externalConfig = {}) {
+  const overrides = (externalConfig && externalConfig.childBoards) || {};
+  const boards = {};
+  for (const child of (topology && topology.children) || []) {
+    if (!child || !child.id) continue;
+    const fromConfig = overrides[child.id];
+    if (fromConfig && fromConfig.baseUrl && fromConfig.projectId) {
+      boards[child.id] = { baseUrl: fromConfig.baseUrl, projectId: fromConfig.projectId };
+    } else if (child.baseUrl && child.projectId) {
+      boards[child.id] = { baseUrl: child.baseUrl, projectId: child.projectId };
+    } else {
+      boards[child.id] = null;
+    }
+  }
+  return boards;
+}

@@ -21,14 +21,14 @@
 // call site (auriga-router.mjs, tests, scripts) working unchanged during the split.
 import {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
   REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 } from './config-substrate.mjs';
 import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
   REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 };
 

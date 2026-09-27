@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { cycle } from '../auriga-router.mjs';
 import * as cfg from '../lib/config.mjs';
 import { createLogSink } from './support/mock-mca.mjs';
+import { createStubBacklogAdapter } from '../lib/adapters/stub/backlog.mjs';
 
 const NOOP_SLEEP = async () => {};
 
@@ -815,6 +816,76 @@ test('t015: if the pre-cancel fails the remote create is skipped entirely — no
   assert.ok(!calls.comment.some((c) => c.identifier === handUpIssue.identifier), 'no comment when pre-cancel fails');
   assert.equal(log.byEvent('hand_up_pre_cancel_error').length, 1);
   assert.equal(log.byEvent('hand_up_ok').length, 0);
+});
+
+// ---- t016: orchestrator hand-down (real cycle() against a real stub child board) ----
+
+test('t016: a child-routed todo creates exactly one issue on the child board; a second cycle does not duplicate it', async () => {
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'fixture-handdown-project': ['auriga-build'] }),
+    PROJECT_ROUTE: { 'fixture-handdown-project': { kind: 'child', childId: 'firefly-events' } },
+  };
+  const issue = makeIssue({
+    project_id: 'fixture-handdown-project', parent_issue_id: 'fixture-epic',
+    title: 'Build the venue check-in flow', description: 'firefly-owned work',
+  });
+  const { backlog, spawn, calls } = createMockAdapters([issue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  // The child board is the REAL in-memory stub BacklogAdapter, so the
+  // createIssue primitive under test is the production adapter contract.
+  const childBoard = createStubBacklogAdapter();
+  const remoteCfgs = [];
+  const createRemoteBacklog = (remoteCfg) => { remoteCfgs.push(remoteCfg); return childBoard; };
+  const opts = {
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({
+      parent: null,
+      children: [{ id: 'firefly-events', baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' }],
+    }),
+    loadExternalConfig: () => ({}),
+    createRemoteBacklog,
+  };
+
+  await cycle(opts);
+  await cycle(opts);
+
+  assert.equal(childBoard.createdIssues.length, 1, 'exactly one createIssue across two cycles');
+  assert.equal(childBoard.createdIssues[0].title, issue.title);
+  assert.deepEqual(childBoard.createdIssues[0].metadata, { handed_down_from: issue.identifier });
+  assert.deepEqual(remoteCfgs, [{ baseUrl: 'http://firefly-core-api:3012', project: 'firefly-proj-1' }]);
+
+  assert.ok(!calls.assign.some((c) => c.identifier === issue.identifier), 'must NOT be dispatched to a local agent');
+  assert.equal(issue.status, 'cancelled', 'original closed locally');
+  assert.ok(calls.comment.some((c) => c.identifier === issue.identifier && /stub-created-1/.test(c.body)), 'original commented locally');
+  assert.ok(calls.unassign.some((c) => c.identifier === issue.identifier), 'original unassigned locally');
+  assert.equal(log.byEvent('hand_down_ok').length, 1);
+  assert.equal(log.byEvent('hand_up').length, 0);
+});
+
+test('t016: a project routed to an unknown child is held with a hand_down_rejected warning — never dispatched, nothing created', async () => {
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'fixture-handdown-project': ['auriga-build'] }),
+    PROJECT_ROUTE: { 'fixture-handdown-project': { kind: 'child', childId: 'not-in-topology' } },
+  };
+  const issue = makeIssue({ project_id: 'fixture-handdown-project', parent_issue_id: 'fixture-epic' });
+  const { backlog, spawn, calls } = createMockAdapters([issue], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({
+    backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: null, children: [] }),
+    loadExternalConfig: () => ({}),
+    createRemoteBacklog: () => { throw new Error('must never be constructed for an unknown child'); },
+  });
+
+  assert.ok(!calls.assign.some((c) => c.identifier === issue.identifier), 'must NOT fall back to an agent lane');
+  assert.ok(!calls.status.some((c) => c.identifier === issue.identifier));
+  assert.equal(issue.status, 'todo');
+  const rejected = log.byEvent('hand_down_rejected');
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].reason, 'unknown-child');
+  assert.equal(log.byEvent('hand_down').length, 0);
 });
 
 // ---- review changes_requested -> todo (changeback) --------------------------

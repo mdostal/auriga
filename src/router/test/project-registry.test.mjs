@@ -161,7 +161,7 @@ async function captureStderrAsync(asyncFn) {
 test('loadRegistryConfig(): a reader that throws (missing file) does NOT throw — logs a warning, returns empty config', () => {
   const throwing = () => { throw new Error('ENOENT: no such file or directory'); };
   const { result, captured } = captureStderr(() => loadRegistryConfig(throwing, '/does/not/exist.json'));
-  assert.deepEqual(result, { PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {} });
+  assert.deepEqual(result, { PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {}, PROJECT_ROUTE: {} });
   assert.match(captured, /project-registry/i);
   assert.match(captured, /ENOENT/);
 });
@@ -169,7 +169,7 @@ test('loadRegistryConfig(): a reader that throws (missing file) does NOT throw �
 test('loadRegistryConfig(): a reader returning invalid JSON does NOT throw — logs a warning, returns empty config', () => {
   const badJson = () => '{ this is not valid json,,,';
   const { result, captured } = captureStderr(() => loadRegistryConfig(badJson, '/corrupt.json'));
-  assert.deepEqual(result, { PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {} });
+  assert.deepEqual(result, { PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {}, PROJECT_ROUTE: {} });
   assert.match(captured, /project-registry/i);
 });
 
@@ -183,6 +183,7 @@ test('loadRegistryConfig(): a well-formed reader derives real, non-empty config 
     PROJECT_NAMES: { p1: 'Proj One' },
     PROJECT_IDS: ['p1'],
     PROJECT_LANE: { p1: ['lane-1'] },
+    PROJECT_ROUTE: {},
   });
 });
 
