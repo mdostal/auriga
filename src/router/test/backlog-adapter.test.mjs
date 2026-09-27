@@ -304,6 +304,20 @@ test('setIssueMetadata sends one `metadata set` per key, forcing --type string f
   ]);
 });
 
+test('setIssueMetadata: a numeric-looking fingerprint string stays a string (--type string), objects are JSON-encoded', async (t) => {
+  const calls = makeExecMock(t, { multica: () => ({ ok: true }) });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  backlog.setIssueMetadata('PAN-10', { router_assignment_fingerprint: '0123456789', gave_up: true, detail: { n: 1 } });
+
+  assert.deepEqual(metadataSetCalls(calls), [
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'router_assignment_fingerprint', '--value', '0123456789', '--type', 'string', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'gave_up', '--value', 'true', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'detail', '--value', '{"n":1}', '--output', 'json'],
+  ]);
+});
+
 test('setIssueMetadata never throws: one key failing does not stop the others, and returns null', async (t) => {
   const calls = makeExecMock(t, {
     multica: (args) => (args[5] === 'a' ? new Error('multica: metadata write failed') : { ok: true }),
