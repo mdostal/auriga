@@ -51,6 +51,7 @@ export async function loadTenantConfigs({ pantheonApiBaseUrl, baseCfg, fetchImpl
         REVIEW_LANE: c.REVIEW_LANE ?? baseCfg.REVIEW_LANE,
         FORMER_REVIEW_AGENT_IDS: c.FORMER_REVIEW_AGENT_IDS ?? baseCfg.FORMER_REVIEW_AGENT_IDS,
         PROJECT_LANE: c.PROJECT_LANE ?? baseCfg.PROJECT_LANE,
+        PROJECT_ROUTE: c.PROJECT_ROUTE ?? baseCfg.PROJECT_ROUTE,
       },
     };
   });

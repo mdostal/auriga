@@ -216,6 +216,12 @@ export const RUNTIME_CAP = _ext.RUNTIME_CAP ?? {
 // `cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE`).
 export const PROJECT_LANE = _ext.PROJECT_LANE ?? registryConfig.PROJECT_LANE;
 
+// Project UUID -> { kind: 'child', childId } (t016 — orchestrator hand-down).
+// A project listed here routes its todos to that child board instead of an
+// agent lane (core.mjs's resolveRouteTarget). Projects absent from this map
+// keep today's agent-lane routing via PROJECT_LANE/DEFAULT_LANE above.
+export const PROJECT_ROUTE = _ext.PROJECT_ROUTE ?? registryConfig.PROJECT_ROUTE;
+
 // Fallback lane for every other project: spread across the two Codex agents.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
 export const DEFAULT_LANE = _ext.DEFAULT_LANE ?? ['auriga-dev', 'heimdall-dev-codex'];

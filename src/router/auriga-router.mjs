@@ -29,7 +29,7 @@ import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { assignmentMetadata } from './lib/fingerprint.mjs';
-import { loadRealTopology, resolveParentBoardConfig } from './lib/orchestrator-topology.mjs';
+import { loadRealTopology, resolveParentBoardConfig, resolveChildBoardConfigs } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
 
@@ -211,7 +211,11 @@ export async function cycle(opts = {}) {
   const loadExternalConfigImpl = opts.loadExternalConfig || loadExternalConfig;
   const createRemoteBacklog = opts.createRemoteBacklog || createPantheonV2L2BacklogAdapter;
   const topology = loadTopologyImpl();
-  const parentBoardConfig = resolveParentBoardConfig(topology, loadExternalConfigImpl());
+  const externalConfig = loadExternalConfigImpl();
+  const parentBoardConfig = resolveParentBoardConfig(topology, externalConfig);
+  // t016 — orchestrator hand-down: every registered child's board config
+  // (null when unreachable), resolved from the same per-cycle reads.
+  const childBoards = resolveChildBoardConfigs(topology, externalConfig);
 
   let assigned = 0;
 
@@ -845,6 +849,7 @@ export async function cycle(opts = {}) {
     exclude: cascaded,
     maxTotal: Math.min(cfgImpl.CAPS.perCycleTotal, remaining),
     parentBoardConfig,
+    childBoards,
     priorAgentCycleAssigns,
   });
 
@@ -945,47 +950,79 @@ export async function cycle(opts = {}) {
       applied: !dryRun,
     });
     if (dryRun) continue;
+    handOffToBoard(h.identifier, {
+      board: parentBoardConfig, event: 'hand_up', metadataKey: 'handed_up_from',
+      comment: (created) => `Handed up — created ${created && created.identifier} on the parent board.`,
+    }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
+  }
 
-    const issue = issues.find((i) => i.identifier === h.identifier);
-
-    // Cancel locally BEFORE the remote create. Once CANCELLED the issue is
-    // out of the todo candidate pool, so a later cycle cannot create a second
-    // parent-board issue even if the post-create local mutations below fail
-    // (the original duplicate-on-retry bug). If the cancel itself fails we
-    // skip the remote create entirely and let the next cycle retry.
-    try {
-      backlog.setIssueStatus(h.identifier, ISSUE_STATUS.CANCELLED);
-    } catch (e) {
-      logImpl('hand_up_pre_cancel_error', { identifier: h.identifier, error: e.message });
-      continue;
-    }
-
-    let createdIssue;
-    try {
-      const remoteBacklog = createRemoteBacklog({ baseUrl: parentBoardConfig.baseUrl, project: parentBoardConfig.projectId });
-      createdIssue = remoteBacklog.createIssue({
-        title: issue ? issue.title : h.identifier,
-        description: issue ? issue.description : undefined,
-        metadata: { handed_up_from: h.identifier },
-      });
-    } catch (e) {
-      // Remote create failed — undo the pre-cancel so the issue re-enters
-      // the candidate pool next cycle rather than being stranded as cancelled.
-      logImpl('hand_up_error', { identifier: h.identifier, error: e.message });
-      try { backlog.setIssueStatus(h.identifier, ISSUE_STATUS.TODO); } catch (_) {}
-      continue;
-    }
-
-    logImpl('hand_up_ok', { identifier: h.identifier, newIdentifier: createdIssue && createdIssue.identifier });
-    try {
-      backlog.commentOnIssue(h.identifier, `Handed up — created ${createdIssue && createdIssue.identifier} on the parent board.`);
-    } catch (e) { logImpl('hand_up_comment_error', { identifier: h.identifier, error: e.message }); }
-    try {
-      spawn.unassignIssue(h.identifier);
-    } catch (e) { logImpl('hand_up_unassign_error', { identifier: h.identifier, error: e.message }); }
+  // ---- route hand-downs (t016 — orchestrator hand-down) ----
+  // Explicit project -> child-board routes (projects.json `route`). Same
+  // cross-board createIssue primitive and cancel-first idempotency guard as
+  // hand-up. A route naming an unknown/unreachable child is held for a human
+  // (never dispatched to an agent) and logged loudly every cycle until fixed.
+  for (const r of picks.handDownRejected || []) {
+    logImpl('hand_down_rejected', {
+      identifier: r.identifier, childId: r.childId, reason: r.reason,
+      warning: `project routes to child '${r.childId}' which is ${r.reason === 'unknown-child' ? 'not registered in orchestrator-topology.json' : 'missing baseUrl/projectId reachability config'} — held for a human, not dispatched`,
+    });
+  }
+  for (const d of picks.handDowns || []) {
+    logImpl('hand_down', {
+      identifier: d.identifier, childId: d.childId,
+      targetProjectId: d.board.projectId,
+      applied: !dryRun,
+    });
+    if (dryRun) continue;
+    handOffToBoard(d.identifier, {
+      board: d.board, event: 'hand_down', metadataKey: 'handed_down_from',
+      comment: (created) => `Handed down — created ${created && created.identifier} on child board '${d.childId}'.`,
+    }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
   }
 
   return { todo: todo.length, picked: picks.length, assigned };
+}
+
+// Cross-board hand-off shared by hand-up (t015) and hand-down (t016): create
+// the issue on another board, then close/comment/unassign it locally.
+//
+// Cancel locally BEFORE the remote create. Once CANCELLED the issue is out of
+// the todo candidate pool, so a later cycle cannot create a second remote
+// issue even if the post-create local mutations fail (the original
+// duplicate-on-retry bug, PANT-397). If the cancel itself fails we skip the
+// remote create entirely and let the next cycle retry.
+function handOffToBoard(identifier, { board, event, metadataKey, comment }, { issues, backlog, spawn, logImpl, createRemoteBacklog }) {
+  const issue = issues.find((i) => i.identifier === identifier);
+  try {
+    backlog.setIssueStatus(identifier, ISSUE_STATUS.CANCELLED);
+  } catch (e) {
+    logImpl(`${event}_pre_cancel_error`, { identifier, error: e.message });
+    return;
+  }
+
+  let createdIssue;
+  try {
+    const remoteBacklog = createRemoteBacklog({ baseUrl: board.baseUrl, project: board.projectId });
+    createdIssue = remoteBacklog.createIssue({
+      title: issue ? issue.title : identifier,
+      description: issue ? issue.description : undefined,
+      metadata: { [metadataKey]: identifier },
+    });
+  } catch (e) {
+    // Remote create failed — undo the pre-cancel so the issue re-enters
+    // the candidate pool next cycle rather than being stranded as cancelled.
+    logImpl(`${event}_error`, { identifier, error: e.message });
+    try { backlog.setIssueStatus(identifier, ISSUE_STATUS.TODO); } catch (_) {}
+    return;
+  }
+
+  logImpl(`${event}_ok`, { identifier, newIdentifier: createdIssue && createdIssue.identifier });
+  try {
+    backlog.commentOnIssue(identifier, comment(createdIssue));
+  } catch (e) { logImpl(`${event}_comment_error`, { identifier, error: e.message }); }
+  try {
+    spawn.unassignIssue(identifier);
+  } catch (e) { logImpl(`${event}_unassign_error`, { identifier, error: e.message }); }
 }
 
 // ---- main loop (single-tenant, standalone -- unchanged) --------------------

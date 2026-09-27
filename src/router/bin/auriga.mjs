@@ -4,7 +4,7 @@
 //   auriga agent status [--harness claude|codex]
 //   auriga mcp
 //   auriga project scan
-//   auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]]
+//   auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]] [--child <childId> | --no-child]
 //   auriga project remove <id>
 //   auriga project list
 //   auriga memory recall <query> [--scope <id>] [--hits N]
@@ -64,7 +64,7 @@ function usage() {
     '       auriga agent status [--harness claude|codex]',
     '       auriga mcp',
     '       auriga project scan',
-    '       auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]]',
+    '       auriga project add <id> [--name "..."] [--notes "..."] [--lane <agent>[,<agent>...]] [--child <childId> | --no-child]',
     '       auriga project remove <id>',
     '       auriga project list',
     '       auriga memory recall <query> [--scope <id>] [--hits N]',
@@ -158,6 +158,21 @@ function parseLaneFlag(argv) {
 }
 
 /**
+ * `--child <childId>` -> childId, `--no-child` -> null (clear the route),
+ * neither -> undefined (leave it untouched). `--child` with no value is
+ * returned as '' so runProjectAdd can reject it rather than silently
+ * treating it as absent.
+ * @param {string[]} argv
+ * @returns {string|null|undefined}
+ */
+function parseChildFlag(argv) {
+  if (argv.includes('--no-child')) return null;
+  if (!argv.includes('--child')) return undefined;
+  const value = parseFlagValue(argv, '--child');
+  return value && !value.startsWith('--') ? value : '';
+}
+
+/**
  * Resolves the backlog adapter for `project scan`/`project add`'s board
  * validation. Delegates to lib/mcp/server.mjs's selectBacklogAdapter() for
  * every real case (same AURIGA_BACKLOG_ADAPTER=stub switch the MCP server
@@ -208,7 +223,9 @@ function formatListOutput(data) {
   }
   const lines = ['auriga project list'];
   for (const p of projects) {
-    const lane = Array.isArray(p.lane) && p.lane.length ? p.lane.join(',') : '(default)';
+    const lane = p.route && p.route.kind === 'child'
+      ? `child:${p.route.childId}`
+      : (Array.isArray(p.lane) && p.lane.length ? p.lane.join(',') : '(default)');
     lines.push(`  ${p.id}  ${p.name || p.id}  lane=${lane}  notes="${p.notes || ''}"`);
   }
   return lines.join('\n') + '\n';
@@ -227,17 +244,31 @@ export function runProjectScan(deps = {}) {
 }
 
 /**
- * `auriga project add <id> [--name] [--notes] [--lane]` — idempotent:
- * registers a new id, or updates name/notes/lane on an already-registered
- * one. Validates a NEW id against a fresh scan (never validates an update —
- * an already-registered project doesn't need re-proving it's real).
+ * `auriga project add <id> [--name] [--notes] [--lane] [--child|--no-child]`
+ * — idempotent: registers a new id, or updates name/notes/lane/route on an
+ * already-registered one. Validates a NEW id against a fresh scan (never
+ * validates an update — an already-registered project doesn't need
+ * re-proving it's real). `--child` (t016 — orchestrator hand-down) routes
+ * the project's todos to that child board; the child must already be
+ * registered via `auriga orchestrator add-child`, or nothing is written.
  * @param {string|undefined} id
- * @param {{ name?: string, notes?: string, lane?: string[] }} flags
- * @param {{ backlog?: object, readRegistry?: () => object, writeRegistry?: (data: object) => void }} [deps]
+ * @param {{ name?: string, notes?: string, lane?: string[], child?: string|null }} flags
+ * @param {{ backlog?: object, readRegistry?: () => object, writeRegistry?: (data: object) => void, readTopology?: () => object }} [deps]
  * @returns {{ ok: boolean, message: string }}
  */
 export function runProjectAdd(id, flags, deps = {}) {
   if (!id) return { ok: false, message: 'error: auriga project add requires <id>\n' };
+  if (flags.child === '') return { ok: false, message: 'error: --child requires a <childId>\n' };
+  if (flags.child) {
+    const readTopology = deps.readTopology || loadRealTopology;
+    const children = (readTopology().children || []).map((c) => c && c.id);
+    if (!children.includes(flags.child)) {
+      return {
+        ok: false,
+        message: `error: '${flags.child}' is not a registered child in orchestrator-topology.json — add it first with \`auriga orchestrator add-child ${flags.child}\`\n`,
+      };
+    }
+  }
   const backlog = deps.backlog || resolveProjectBacklog();
   const readRegistry = deps.readRegistry || readRealRegistryFile;
   const writeRegistry = deps.writeRegistry || writeRealRegistryFile;
@@ -251,7 +282,7 @@ export function runProjectAdd(id, flags, deps = {}) {
     };
   }
 
-  const updated = upsertProject(data, { id, name: flags.name, notes: flags.notes, lane: flags.lane });
+  const updated = upsertProject(data, { id, name: flags.name, notes: flags.notes, lane: flags.lane, child: flags.child });
   writeRegistry(updated);
   return { ok: true, message: `${alreadyRegistered ? 'updated' : 'registered'} project ${id}\n` };
 }
@@ -498,6 +529,7 @@ async function main() {
       name: parseFlagValue(argv, '--name'),
       notes: parseFlagValue(argv, '--notes'),
       lane: parseLaneFlag(argv),
+      child: parseChildFlag(argv),
     };
     const result = runProjectAdd(id, flags);
     (result.ok ? process.stdout : process.stderr).write(result.message);
