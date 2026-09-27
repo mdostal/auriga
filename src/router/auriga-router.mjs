@@ -452,10 +452,14 @@ export async function cycle(opts = {}) {
           if (existingAgentName) inflight[existingAgentName] = (inflight[existingAgentName] || 0) + 1;
           if (existingRt) loopRtProjected[existingRt] = (loopRtProjected[existingRt] || 0) + 1;
         }
-        spawn.rerunIssue(c.identifier);
-        assigned++;
+        // Commit the cascade slot and exclusion BEFORE rerun (PANT-379): capacity is
+        // already consumed above, so a rerun failure must still count toward the
+        // per-cycle cap and keep selectAssignments from re-dispatching this story.
+        // `assigned` stays after rerun — it counts actual dispatches (PANT-677).
         cascadeFired++;
         cascaded.add(c.identifier);
+        spawn.rerunIssue(c.identifier);
+        assigned++;
         logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
       } catch (e) {
         logImpl('cascade_error', { identifier: c.identifier, error: e.message });
