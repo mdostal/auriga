@@ -299,6 +299,22 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
   }
 
+  // Set one or more metadata keys on an existing issue (BacklogAdapter contract,
+  // see ../backlog-adapter.mjs). Best-effort: degrades gracefully (returns null
+  // on any key failure) — a metadata write must never abort a dispatch. Mirrors
+  // the key-at-a-time `multica issue metadata set` pattern used by createIssue.
+  function setIssueMetadata(identifier, metadataObj) {
+    if (!metadataObj || typeof metadataObj !== 'object') return null;
+    for (const [key, value] of Object.entries(metadataObj)) {
+      try {
+        run(['issue', 'metadata', 'set', identifier, '--key', key, '--value', String(value), '--output', 'json']);
+      } catch (e) {
+        process.stderr.write(`setIssueMetadata(${identifier}): key "${key}" failed: ${e.message}\n`);
+      }
+    }
+    return null;
+  }
+
   // Create a NEW issue (t015 — orchestrator hand-up). Genuinely new
   // capability: every other method above acts on an EXISTING issue.
   // Confirmed real via `multica issue create --help` (2026-09-06, not
@@ -354,6 +370,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    setIssueMetadata,
     createIssue,
 
     // ---- ported/adapter-specific extras, NOT part of the BacklogAdapter
