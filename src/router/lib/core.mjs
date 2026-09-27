@@ -211,15 +211,16 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
 // Hive stories always bypass tree-path routing (HIVE_LANE is unconditional).
 // Falls back to chooseAgentForProject when no tree-path attachment matches or
 // all matched agents are at capacity or on blocked runtimes.
-export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set()) {
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
   if (isHiveStory(issue)) {
-    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes);
+    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes, maxPerAgent);
   }
   const treeLane = getEligibleAgentsByTreePath(issue, cfg);
   if (treeLane.length) {
     const eligible = treeLane.filter((name) =>
       agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-      !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+      !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
+      (projected.perAgentCycle?.[name] || 0) < maxPerAgent
     );
     if (eligible.length) {
       eligible.sort((x, y) => {
@@ -230,7 +231,7 @@ export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, proje
       return eligible[0];
     }
   }
-  return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes);
+  return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent);
 }
 
 // Select this cycle's assignments from the board.
@@ -341,7 +342,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes);
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -355,10 +356,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
     const runtime = cfg.AGENTS[agent].runtime;
-    if (blockedRuntimes.has(runtime)) continue;
     const decision = assignmentDecision(issue, agent, cfg, opts);
     if (decision.action === 'noop') continue;
-    if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
 
     // commit projection
     projected.perAgent[agent] = (projected.perAgent[agent] || 0) + 1;
