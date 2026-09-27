@@ -111,8 +111,13 @@
           </tr>
           <tr>
             <td class="name">AURIGA_LOG</td>
-            <td class="default">/tmp/auriga-router.log</td>
-            <td>Path to the human-readable log file.</td>
+            <td class="default">(unset: stdout)</td>
+            <td>File to append the JSONL log to. Unset, the router writes JSONL to stdout.</td>
+          </tr>
+          <tr>
+            <td class="name">AURIGA_HEARTBEAT_FILE</td>
+            <td class="default">auriga-router.heartbeat next to the pidfile</td>
+            <td>Rewritten after every cycle; read by <code>bin/healthcheck.mjs</code>.</td>
           </tr>
           <tr>
             <td class="name">AURIGA_MEMORY_ADAPTER</td>
@@ -124,7 +129,7 @@
 
       <div class="callout callout-note">
         <p class="callout-title">Log files</p>
-        <p>In addition to <code>AURIGA_LOG</code>, the router also writes a structured JSONL log at <code>/tmp/auriga-router.jsonl</code> (not overridable). The supervisor has its own log at <code>/tmp/auriga-supervisor.log</code> and <code>/tmp/auriga-supervisor.pid</code>.</p>
+        <p>The router writes its JSONL log to stdout, or to <code>AURIGA_LOG</code> when set. Every cycle ends with a <code>cycle_summary</code> event (schema in <code>src/router/README.md</code>). The supervisor logs to stderr, or to <code>SUP_LOG</code> when set; <code>ROUTER_LOG</code> redirects the router's output. Its single-instance lock is <code>auriga-supervisor.lock</code> next to the pidfile.</p>
       </div>
     </section>
 
