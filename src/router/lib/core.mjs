@@ -19,6 +19,7 @@ import {
   computeReviewInflight, chooseReviewAgent,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun };
 export { storyKey, slugKey, descStoryDeps, descStoryId };
@@ -205,6 +206,32 @@ export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight,
   return eligible[0];
 }
 
+// Choose the best agent for an issue, consulting TREE_AGENT_ATTACHMENTS first.
+// Hive stories always bypass tree-path routing (HIVE_LANE is unconditional).
+// Falls back to chooseAgentForProject when no tree-path attachment matches or
+// all matched agents are at capacity or on blocked runtimes.
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set()) {
+  if (isHiveStory(issue)) {
+    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes);
+  }
+  const treeLane = getEligibleAgentsByTreePath(issue, cfg);
+  if (treeLane.length) {
+    const eligible = treeLane.filter((name) =>
+      agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
+      !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
+    );
+    if (eligible.length) {
+      eligible.sort((x, y) => {
+        const lx = (inflight[x] || 0) + (projected.perAgent[x] || 0);
+        const ly = (inflight[y] || 0) + (projected.perAgent[y] || 0);
+        return lx !== ly ? lx - ly : treeLane.indexOf(x) - treeLane.indexOf(y);
+      });
+      return eligible[0];
+    }
+  }
+  return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes);
+}
+
 // Select this cycle's assignments from the board.
 // Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
 // Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
@@ -313,7 +340,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes);
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
