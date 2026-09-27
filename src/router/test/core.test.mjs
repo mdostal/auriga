@@ -623,7 +623,6 @@ test('detectZombies skips agent-parked issues (isAgentParked guard)', () => {
 
 test('detectZombies skips human-todo in_progress issues regardless of staleness or attempt count', () => {
   const now = Date.now();
-  const staleMs = CFG.CAPS.zombieStaleMs + 1;
   const inProgress = [
     { id: 'ht1', identifier: 'ht1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work', labels: ['human-todo'], metadata: {} },
     { id: 'ht2', identifier: 'ht2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-uuid', title: 'human work labeled obj', labels: [{ name: 'human-todo' }], metadata: {} },
