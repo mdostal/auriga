@@ -1817,7 +1817,8 @@ test('selectAssignments: issue without tree_path still routes to PROJECT_LANE af
   const byId = Object.fromEntries(picks.map((p) => [p.identifier, p.agent]));
   assert.equal(byId['c1'], 'consus-dev');
   assert.equal(byId['a1'], 'auriga-dev');
-=======
+});
+
 // ---- PANT-660: isHiveStory label check must handle object labels (API shape) ----
 
 test('isHiveStory: detects hive labels when labels are API objects with .name, not plain strings — PANT-660', () => {
