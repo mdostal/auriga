@@ -489,6 +489,25 @@ test('chooseAgentForProject: skips agents on blockedRuntimes, returns next eligi
   assert.equal(agent, 'heimdall-dev-codex', 'must pick the unblocked codex agent, not the lower-load blocked one');
 });
 
+// PANT-653: when the best lane agent is at its perCyclePerAgent cap, chooseAgentForProject
+// must return the next eligible agent rather than null.
+test('chooseAgentForProject: skips per-cycle-capped agent and returns next eligible (PANT-653)', () => {
+  const empty = { perAgent: {}, perRuntime: {} };
+  // HEIMDALL lane: heimdall-dev (opencode, load 0), heimdall-dev-codex (codex, load 0).
+  // heimdall-dev has 0 inflight — normally first pick. But perAgentCycle says it's at cap.
+  // chooseAgentForProject must skip heimdall-dev and return heimdall-dev-codex.
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 1 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 1);
+  assert.equal(agent, 'heimdall-dev-codex',
+    'must skip heimdall-dev (at perCyclePerAgent cap) and fall back to heimdall-dev-codex — PANT-653');
+});
+
+test('chooseAgentForProject: returns null when all lane agents are at perCyclePerAgent cap (PANT-653)', () => {
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { 'heimdall-dev': 1, 'heimdall-dev-codex': 1 } };
+  const agent = core.chooseAgentForProject('HEIMDALL', CFG, {}, {}, projected, false, new Set(), 1);
+  assert.equal(agent, null, 'must return null when ALL agents are at cap');
+});
+
 // PANT-585: selectAssignments must not skip the issue when the lowest-load agent
 // is on a blocked runtime — it should fall back to an unblocked agent instead.
 test('selectAssignments: issue gets assigned to unblocked agent when lowest-load agent runtime is blocked (PANT-585)', () => {
