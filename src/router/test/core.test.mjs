@@ -1382,7 +1382,8 @@ test('detectFalseDone does NOT demote when a merged identity-matching PR coexist
     state: 'open', _repo: 'mdostal/heimdall',
     url: 'https://github.com/mdostal/heimdall/pull/99',
   };
-  const acts = core.detectFalseDone([pant4], [mergedOwn, strayOpen]);
+  // PANT-656 fix: mergedOwn goes in mergedPrs (5th param); openPrs only has the stray open PR
+  const acts = core.detectFalseDone([pant4], [strayOpen], {}, [], [mergedOwn]);
   assert.equal(acts.length, 0);
 });
 

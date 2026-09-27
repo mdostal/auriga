@@ -31,6 +31,7 @@ test('createStubBacklogAdapter() with no args: every method is callable and retu
   assert.doesNotThrow(() => backlog.setIssueStatus('ANY-1', 'todo'));
   assert.doesNotThrow(() => backlog.commentOnIssue('ANY-1', 'hello'));
   assert.doesNotThrow(() => backlog.createIssue({ title: 'x' }));
+  assert.doesNotThrow(() => backlog.setIssueMetadata('ANY-1', { key: 'value' }));
 });
 
 test('createStubBacklogAdapter().createIssue: fabricates an identifier, is immediately visible to other reads, tracks createdIssues', () => {
@@ -51,6 +52,19 @@ test('createStubBacklogAdapter().createIssue: fabricates an identifier, is immed
   assert.deepEqual(backlog.listIssues('parent-proj'), [created]);
   assert.deepEqual(backlog.getIssueRuns(created.identifier), []);
   assert.deepEqual(backlog.createdIssues, [created]);
+});
+
+test('createStubBacklogAdapter().setIssueMetadata: merges keys into existing metadata without overwriting other keys', () => {
+  const issue = { identifier: 'PAN-10', title: 'x', status: 'todo', project_id: 'p1', metadata: { existing_key: 'keep-me' } };
+  const backlog = createStubBacklogAdapter({ issues: [issue] });
+
+  backlog.setIssueMetadata('PAN-10', { router_assignment_fingerprint: 'abc123', router_assignment_agent: 'codex-dev-1' });
+
+  assert.deepEqual(issue.metadata, {
+    existing_key: 'keep-me',
+    router_assignment_fingerprint: 'abc123',
+    router_assignment_agent: 'codex-dev-1',
+  });
 });
 
 // ---- SpawnAdapter: empty-default shape, called with no arguments ----

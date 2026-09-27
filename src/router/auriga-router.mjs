@@ -589,7 +589,11 @@ export async function cycle(opts = {}) {
         }
       }
     }
-    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl, issues);
+    // PANT-656: pass donePrs as mergedPrs so the anti-thrash guard can find
+    // identity-matching merged PRs. When candidatePrs is available it already
+    // contains all states (open + merged + closed via ghPrs --state all), so
+    // donePrs serves as both the open-check list and the merged-check source.
+    const falseDone = coreImpl.detectFalseDone(doneIssues, donePrs, cfgImpl, issues, donePrs);
     const cap = (cfgImpl.CAPS && cfgImpl.CAPS.perCycleFalseDone) || 3;
     let n = 0;
     for (const f of falseDone) {
@@ -798,6 +802,11 @@ export async function cycle(opts = {}) {
               try { spawn.selectRoute(z.identifier, 'build'); } catch (e) { logImpl('route_select_error', { identifier: z.identifier, error: e.message }); }
             }
             spawn.assignIssue(z.identifier, agent);
+            if (typeof backlog.setIssueMetadata === 'function') {
+              const zombieIssueObj = issues.find((i) => i.identifier === z.identifier) || { identifier: z.identifier };
+              try { backlog.setIssueMetadata(z.identifier, assignmentMetadata(zombieIssueObj, agent, cfgImpl, { now })); }
+              catch (e) { logImpl('assign_metadata_error', { identifier: z.identifier, error: e.message }); }
+            }
             inflight[agent] = (inflight[agent] || 0) + 1;
             priorAgentCycleAssigns[agent] = (priorAgentCycleAssigns[agent] || 0) + 1;
             if (zAgentRt) loopRtProjected[zAgentRt] = (loopRtProjected[zAgentRt] || 0) + 1;

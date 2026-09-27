@@ -133,6 +133,15 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// isSeed limited to the explicit-label legs only — used in detect* functions where
+// the childless+top-level heuristic is too broad (an in_progress story has no children
+// in that set, so the heuristic would fire on every top-level ticket).
+function isSeedByLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -354,7 +363,7 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds have planning PRs that must not advance them to in_review
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
@@ -412,7 +421,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // never zombie-dispatch a seed to a build lane
+    if (isSeed(i, allIssues)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -529,7 +538,6 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
   const blockedRuntimes = opts.blockedRuntimes ?? new Set();
-  const allIssues = opts.allIssues || [];
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
@@ -578,7 +586,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue; // human controls this review
-    if (isSeed(i, allIssues)) continue; // PANT-625: seeds have no PR to review
+    if (isSeedByLabel(i)) continue; // PANT-737: seeds are planning-lane; never dispatch a review run for them
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -603,7 +611,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       }
       const rerAgentName = idToName[i.assignee_id];
       const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
-      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-666: don't re-dispatch into a blocked runtime
+      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-666/PANT-588: don't re-dispatch into a blocked runtime
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
@@ -702,6 +710,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isSeed(i, allIssues)) continue; // seeds must not be auto-unblocked into selectAssignments' planning lane re-dispatch
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
@@ -740,7 +749,7 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = []) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = [], mergedPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
@@ -781,14 +790,14 @@ export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = 
       return repoQualifies(p);
     });
     if (!pr) continue; // no OWN open PR -> either merged or a non-code done task -> leave it
-    // GUARD (GitHub issue #76 / PANT-4 thrash): a stray still-open PR that merely
-    // identity-matches the story (a stale retry, an old draft, anything else
-    // referencing the same ticket id/key) must not out-rank a REAL merged PR for the
-    // same story in the same repo. Without this, detectVerifiedDone advances the story
+    // GUARD (GitHub issue #76 / PANT-4 / PANT-656 thrash): a stray still-open PR that
+    // merely identity-matches the story must not out-rank a REAL merged PR for the same
+    // story in the same repo. Without this guard, detectVerifiedDone advances the story
     // to done off the merged PR while detectFalseDone immediately demotes it again off
-    // the unrelated open one, and the two detectors thrash done<->in_review forever.
-    // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
-    const mergedPr = (openPrs || []).find((p) => {
+    // the unrelated open one, thrashing done<->in_review forever.
+    // FIX (PANT-656): search mergedPrs (a separate --state merged scan), not openPrs
+    // (open-only). isPrMerged on an open-only list is always false — the guard was dead.
+    const mergedPr = (mergedPrs || []).find((p) => {
       if (!isPrMerged(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false;
       return repoQualifies(p);
@@ -937,7 +946,7 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssu
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // PANT-632: seeds in changes_requested must not re-enter build pool
+    if (isSeedByLabel(i)) continue; // never override a human changes_requested on a labeled planning seed
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
@@ -961,6 +970,12 @@ export function agentIdSet(agents = {}) {
 // pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
+  // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
+  // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
+  const reviewLaneIds = new Set(
+    (cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean)
+  );
   const actions = [];
   for (const i of todoIssues) {
     if ((i.status || '').toLowerCase() !== 'todo') continue;
@@ -968,9 +983,6 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    // PANT-643: do NOT guard seeds here — detectAssignedIdle calls rerunIssue (re-enqueues the
-    // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
-    // must be recovered just like any other assigned-idle issue.
 
     const touchedAt = i.updated_at || i.created_at;
     const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
@@ -978,6 +990,21 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
+
+    if (reviewLaneIds.has(i.assignee_id)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({

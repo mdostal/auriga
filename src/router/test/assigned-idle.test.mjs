@@ -26,9 +26,11 @@ const CFG = {
 const NOW = 1_700_000_000_000;
 const OLD = NOW - 60 * 60 * 1000; // 1h idle — well past the 10-min stale threshold
 
+// parent_issue_id marks these as planned stories under an epic (not top-level seeds),
+// matching real work items that can legitimately get stuck in assigned-idle state.
 const assignedTodo = (id, assigneeId, updatedAt = OLD, title = 'work') => ({
   id, identifier: id, status: 'todo', assignee_id: assigneeId, updated_at: new Date(updatedAt).toISOString(), title,
-  parent_issue_id: 'parent-seed', // sub-tasks, not seeds — detectAssignedIdle is for build-agent work
+  parent_issue_id: 'EPIC-0',
 });
 
 test('AC1: a single assignedQueued item is detected as a recovery action once stale', () => {
@@ -229,6 +231,7 @@ test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents e
   assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
 });
 
+
 test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {
   // A todo+assigned issue with metadata.blocked_reason set must never be re-dispatched.
   const parked = {
@@ -252,6 +255,56 @@ test('PANT-643: detectAssignedIdle does NOT skip seed issues — rerunIssue re-e
   assert.equal(actions.length, 2, 'PANT-643: both seed and non-seed must be detected — rerunIssue is safe for both');
   assert.ok(actions.some((a) => a.identifier === 'PAN-seed'), 'explicitly-labelled seed must be recovered');
   assert.ok(actions.some((a) => a.identifier === 'PAN-child'), 'non-seed child must still be detected');
+});
+
+// PANT-736: review-lane agent on a todo ticket must be unassigned, not re-dispatched.
+const CFG_WITH_REVIEW = {
+  ...CFG,
+  AGENTS: {
+    ...CFG.AGENTS,
+    'auriga-review': { id: 'AR', runtime: 'claude', maxInflight: 2 },
+  },
+  REVIEW_LANE: ['auriga-review'],
+};
+
+test('PANT-736: detectAssignedIdle emits unassign (not start) when assignee is a review-lane agent on a todo ticket', () => {
+  const issue = assignedTodo('PAN-1', 'AR');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'unassign');
+  assert.equal(actions[0].reason, 'review-lane-on-todo');
+  assert.equal(actions[0].identifier, 'PAN-1');
+});
+
+test('PANT-736: detectAssignedIdle still emits start for build-lane agents when REVIEW_LANE is configured', () => {
+  const issue = assignedTodo('PAN-1', 'A'); // auriga-dev, not in REVIEW_LANE
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+});
+
+test('PANT-736: review-lane unassign action is excluded from limitAssignedIdleRecoveries capacity gate', () => {
+  // Both a review-lane (AR) and a build-lane (A) issue are idle.
+  // The review-lane issue must produce an unassign, and the build-lane must produce start.
+  // limitAssignedIdleRecoveries should only see the start action (unassign is filtered before the call).
+  const reviewIssue = assignedTodo('PAN-review', 'AR');
+  const buildIssue = assignedTodo('PAN-build', 'A');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const allActions = core.detectAssignedIdle([reviewIssue, buildIssue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  const startActions = allActions.filter((a) => a.action !== 'unassign');
+  const unassignActions = allActions.filter((a) => a.action === 'unassign');
+  assert.equal(unassignActions.length, 1, 'review-lane issue emits one unassign');
+  assert.equal(unassignActions[0].identifier, 'PAN-review');
+  const { selected } = core.limitAssignedIdleRecoveries(startActions, CFG_WITH_REVIEW, {
+    agents: CFG_WITH_REVIEW.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 1, 'only the build-lane issue reaches limitAssignedIdleRecoveries');
+  assert.equal(selected[0].identifier, 'PAN-build');
+  assert.equal(selected[0].action, 'start');
 });
 
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
