@@ -516,7 +516,7 @@ export async function cycle(opts = {}) {
   // this and the whole board-wide-status-pass audit that followed it).
   const reviewInflight = coreImpl.computeReviewInflight(inReviewForDispatch, cfgImpl);
   const reviewMaxTotal = Math.min((cfgImpl.CAPS && cfgImpl.CAPS.perCycleReview) ?? 1, Math.max(0, maxAssign - assigned));
-  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal, blockedRuntimes });
+  const reviewPicks = coreImpl.selectReviewDispatch(inReviewForDispatch, inReviewRuns, cfgImpl, reviewInflight, { now, maxTotal: reviewMaxTotal, blockedRuntimes, priorAgentCycleAssigns });
   const inReviewById = new Map(inReview.map((i) => [i.id, i]));
   for (const r of reviewPicks) {
     if (assigned >= maxAssign) break;
@@ -819,6 +819,12 @@ export async function cycle(opts = {}) {
     });
     for (const a of idleSelected) {
       if (assigned >= maxAssign) break;
+      // PANT-814: idleSelected was chosen before this loop ran, so a 429 on an
+      // earlier recovery must still stop later ones on the same runtime.
+      if (a.runtime && blockedRuntimes.has(a.runtime)) {
+        logImpl('assigned_idle_skip', { identifier: a.identifier, agent: a.agent, reason: 'runtime-blocked', runtime: a.runtime });
+        continue;
+      }
       logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
       if (!dryRun) {
         try {
