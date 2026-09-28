@@ -546,6 +546,66 @@ test('PANT-444: review give-up sets metadata.blocked_reason so isAgentParked ret
     'review give-up must also set status to blocked');
 });
 
+// ---- PANT-930 / GH #244: stale give-up reason cleared, ticket reviewed ----
+
+test('PANT-930: an in_review ticket with a stale zombie give-up reason is cleared and dispatched for review', async () => {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant930-proj': ['auriga-review'] }),
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const reworked = makeIssue({
+    project_id: 'pant930-proj', status: 'in_review', labels: ['not-a-seed'],
+    metadata: { blocked_reason: 'zombie-give-up-max-attempts' },
+  });
+  const stillBlocked = makeIssue({
+    project_id: 'pant930-proj', status: 'blocked', labels: ['not-a-seed'],
+    metadata: { blocked_reason: 'review-give-up-max-attempts' },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([reworked, stillBlocked], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const clears = calls.metadata.filter((m) => m.metadataObj.blocked_reason === '');
+  assert.deepEqual(clears.map((m) => m.identifier), [reworked.identifier], 'only the stale reason is cleared');
+  assert.equal(log.byEvent('stale_park_cleared').length, 1);
+  assert.ok(calls.assign.some((a) => a.identifier === reworked.identifier && a.agentName === 'auriga-review'),
+    'the reworked ticket must be dispatched for review');
+  assert.equal(reworked.assignee_id, REVIEW_AGENT_ID);
+  assert.equal(stillBlocked.metadata.blocked_reason, 'review-give-up-max-attempts', 'a live give-up park is untouched');
+});
+
+test('PANT-930: dry run logs the stale give-up reason but does not clear it', async () => {
+  const fixtureCfg = { ...withFixtureLanes({ 'pant930-dry': ['auriga-review'] }), REVIEW_LANE: ['auriga-review'] };
+  const reworked = makeIssue({
+    project_id: 'pant930-dry', status: 'todo', labels: ['not-a-seed'],
+    metadata: { blocked_reason: 'zombie-give-up-max-attempts' },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([reworked], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, dryRun: true });
+
+  assert.equal(log.byEvent('stale_park_cleared').length, 1);
+  assert.equal(log.byEvent('stale_park_cleared')[0].applied, false);
+  assert.equal(calls.metadata.filter((m) => m.metadataObj.blocked_reason === '').length, 0);
+});
+
+test('PANT-930: a finished seed in in_review is rolled up to done by the cycle', async () => {
+  const fixtureCfg = { ...withFixtureLanes({ 'pant930-seed': ['auriga-review'] }), REVIEW_LANE: ['auriga-review'] };
+  const seed = makeIssue({ project_id: 'pant930-seed', status: 'in_review', labels: [{ name: 'idea' }] });
+  const stage1 = makeIssue({ project_id: 'pant930-seed', status: 'done', parent_issue_id: seed.id });
+  const stage2 = makeIssue({ project_id: 'pant930-seed', status: 'done', parent_issue_id: seed.id });
+  const { backlog, spawn, calls } = createMockAdapters([seed, stage1, stage2], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.ok(calls.status.some((s) => s.identifier === seed.identifier && s.status === 'done'),
+    'the finished seed must be closed by the parent rollup');
+});
+
 // ---- PANT-409: zombie assign path must call rerunIssue after assignIssue ----
 
 test('zombie assign: an unassigned in_progress zombie gets assignIssue then rerunIssue (PANT-409)', async () => {

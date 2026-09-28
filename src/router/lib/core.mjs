@@ -20,7 +20,7 @@ import {
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
 import {
-  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isSeedByLabel, isReviewDispatchSkipped,
+  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isSeedByLabel, isReviewDispatchSkipped,
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
@@ -35,7 +35,7 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
-export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isReviewDispatchSkipped };
+export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
 
 // isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
 // ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
@@ -1014,8 +1014,12 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
-    if (isSeed(parent, issues)) continue; // PANT-627: seed epics with planning labels must not auto-close
     const pst = (parent.status || '').toLowerCase();
+    // PANT-627: a seed epic must not auto-close mid-planning (more stages may still
+    // be added). PANT-930 (GH #244): once the planner moves the seed to in_review it
+    // has declared the plan finished, and seeds are skipped by the review lane
+    // (PANT-625/737), so nothing else would ever close it. Roll that one up.
+    if (isSeed(parent, issues) && pst !== ISSUE_STATUS.IN_REVIEW) continue;
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
     const allDone = kids.every((k) => isTerminalIssueStatus((k.status || '').toLowerCase()));
