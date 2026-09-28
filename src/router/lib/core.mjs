@@ -16,7 +16,7 @@ import {
 } from './pr-matching.mjs';
 import {
   computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
-  computeReviewInflight, chooseReviewAgent,
+  agentCapacityReason, computeReviewInflight, chooseReviewAgent, laneCandidates,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
 import {
@@ -223,57 +223,69 @@ export function depsSatisfied(issue, statusById) {
   return true;
 }
 
-// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
-// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
-// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
-// load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
-  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
-  const eligible = lane.filter((name) =>
-    agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
-    (projected.perAgentCycle?.[name] || 0) < maxPerAgent
-  );
-  if (!eligible.length) return null;
-  // Prefer lane order but break by lowest projected load.
+// Rank a lane: drop agents without capacity, on a blocked runtime or over the
+// per-cycle cap, then prefer lowest current+projected load, lane order breaking
+// ties. Returns { chosen, candidates } (candidates: see laneCandidates).
+function rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent) {
+  const skips = new Map(lane.map((name) => [name,
+    agentCapacityReason(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) ||
+    (blockedRuntimes.has(cfg.AGENTS[name]?.runtime) ? 'runtime_blocked' : null) ||
+    ((projected.perAgentCycle?.[name] || 0) >= maxPerAgent ? 'per_cycle_per_agent_cap' : null),
+  ]));
+  const eligible = lane.filter((name) => skips.get(name) === null);
   eligible.sort((x, y) => {
     const lx = (inflight[x] || 0) + (projected.perAgent[x] || 0);
     const ly = (inflight[y] || 0) + (projected.perAgent[y] || 0);
     if (lx !== ly) return lx - ly;
     return lane.indexOf(x) - lane.indexOf(y);
   });
-  return eligible[0];
+  const chosen = eligible[0] ?? null;
+  return { chosen, candidates: laneCandidates(lane, chosen, skips, cfg.AGENTS) };
+}
+
+// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
+// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
+// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
+// load that still has capacity.
+// trace (optional object): filled with { reason, candidates } for the decision
+// record (PANT-816) — the lane it routed by and every agent it considered.
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null) {
+  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
+  const { chosen, candidates } = rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
+  if (trace) {
+    trace.reason = isHive ? 'hive_story' : (cfg.PROJECT_LANE[projectId] ? 'project_lane' : 'default_lane');
+    trace.candidates = candidates;
+  }
+  return chosen;
 }
 
 // Choose the best agent for an issue, consulting TREE_AGENT_ATTACHMENTS first.
 // Hive stories always bypass tree-path routing (HIVE_LANE is unconditional).
 // Falls back to chooseAgentForProject when no tree-path attachment matches or
-// all matched agents are at capacity or on blocked runtimes.
-export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set(), maxPerAgent = Infinity) {
+// all matched agents are at capacity or on blocked runtimes. `trace` as for
+// chooseAgentForProject; a fallback keeps the rejected tree-path candidates.
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null) {
   if (isHiveStory(issue)) {
-    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes, maxPerAgent);
+    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes, maxPerAgent, trace);
   }
   const treeLane = getEligibleAgentsByTreePath(issue, cfg);
+  let treeCandidates = [];
   if (treeLane.length) {
-    const eligible = treeLane.filter((name) =>
-      agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-      !blockedRuntimes.has(cfg.AGENTS[name]?.runtime) &&
-      (projected.perAgentCycle?.[name] || 0) < maxPerAgent
-    );
-    if (eligible.length) {
-      eligible.sort((x, y) => {
-        const lx = (inflight[x] || 0) + (projected.perAgent[x] || 0);
-        const ly = (inflight[y] || 0) + (projected.perAgent[y] || 0);
-        return lx !== ly ? lx - ly : treeLane.indexOf(x) - treeLane.indexOf(y);
-      });
-      return eligible[0];
+    const tree = rankLane(treeLane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
+    if (tree.chosen) {
+      if (trace) { trace.reason = 'tree_attachment'; trace.candidates = tree.candidates; }
+      return tree.chosen;
     }
+    treeCandidates = tree.candidates;
   }
-  return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent);
+  const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent, trace);
+  if (trace && treeCandidates.length) trace.candidates = [...treeCandidates, ...trace.candidates];
+  return agent;
 }
 
 // Select this cycle's assignments from the board.
-// Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
+// Returns [{ identifier, issueId, projectId, agent, lane, runtime, decisionReason, candidates, ... }]
+// (decisionReason + candidates feed the router's decision record, PANT-816).
 // Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
 // blockedRuntimes: Set of runtime names to skip this cycle (rate-limited lanes).
 function agentNameForAssignee(assigneeId, agents) {
@@ -401,6 +413,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
               runtime,
               assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
               assignmentReason: seedDecision.reason,
+              decisionReason: 'seed_planning',
+              candidates: [{ agent: PLANNING_AGENT, runtime, selected: true }],
             });
           }
           seedHandled = true; // dispatched or noop — either way the issue is handled
@@ -414,7 +428,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
 
-    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
+    const trace = {};
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent, trace);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -445,6 +460,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       runtime,
       assignmentFingerprint: assignmentFingerprint(issue, agent, cfg, opts),
       assignmentReason: decision.reason,
+      decisionReason: trace.reason,
+      candidates: trace.candidates,
     });
   }
   chosen.handUps = handUps;
@@ -785,13 +802,14 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes, { perAgentCycle, maxPerAgent });
+    const trace = {};
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes, { perAgentCycle, maxPerAgent }, trace);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
     perAgentCycle[agent] = (perAgentCycle[agent] || 0) + 1;
     actions.push({
       identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-      agent, action: 'dispatch-review', reason: 'needs-review',
+      agent, action: 'dispatch-review', reason: 'needs-review', candidates: trace.candidates,
     });
   }
   return [...giveUps, ...actions];

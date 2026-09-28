@@ -33,6 +33,7 @@ import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from 
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { dispatchEligible, isRateLimitError } from './lib/dispatch-guards.mjs';
+import { buildDecision, capsSnapshot, createSkipLimiter, laneReason } from './lib/decisions.mjs';
 import { loadRealTopology, resolveParentBoardConfig, resolveChildBoardConfigs } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
@@ -198,7 +199,14 @@ function tenantLog(tenantId) {
 // with no active run, computeInflight no longer counts it (PANT-846).
 // countDispatch: count it against maxAssign (dc.assigned). An assign that a
 // forced rerun follows passes false, so only the rerun counts (PANT-677).
-function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, reserve = 'slot', countDispatch = true }) {
+// decision: { reason, candidates, lane } — pass it on the call that commits a
+// routing choice (not on a follow-up forced rerun) to emit its `decision`
+// record (PANT-816), with caps as they were before this dispatch.
+function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, reserve = 'slot', countDispatch = true, decision = null }) {
+  const caps = decision ? decisionCaps(dc, agent, runtime) : null;
+  const emit = (error) => {
+    if (decision) recordDecision(dc, { identifier, pass, action, agent, runtime, ...decision, caps, error });
+  };
   try {
     if (action === 'assign') {
       if (typeof dc.spawn.selectRoute === 'function') {
@@ -211,8 +219,10 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
     }
   } catch (error) {
     if (runtime && isRateLimitError(error)) dc.blockedRuntimes.add(runtime);
+    emit(error);
     return { ok: false, error };
   }
+  emit(null);
 
   if (reserve !== 'none') {
     if (agent) {
@@ -229,6 +239,39 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
     catch (e) { dc.log('assign_metadata_error', { identifier, error: e.message }); }
   }
   return { ok: true };
+}
+
+// ---- decision records (PANT-816) --------------------------------------------
+// One `decision` event per routing choice, schema in lib/decisions.mjs and
+// src/router/README.md ("Decision records"). A dry-run cycle emits the same
+// records with dry_run: true at the point the live cycle would dispatch.
+function decisionCaps(dc, agent, runtime) {
+  return capsSnapshot({
+    agent, runtime, cfg: dc.cfg, inflight: dc.inflight,
+    priorAgentCycleAssigns: dc.priorAgentCycleAssigns, assigned: dc.assigned, maxAssign: dc.maxAssign,
+  });
+}
+
+function recordDecision(dc, { identifier, pass, action, agent = null, runtime = null, lane, reason, candidates, caps, error = null }) {
+  let laneName = lane;
+  if (laneName === undefined) {
+    const issue = dc.issues.find((i) => i.identifier === identifier);
+    laneName = issue ? (dc.cfg.PROJECT_NAMES?.[issue.project_id] || issue.project_id || null) : null;
+  }
+  const rt = runtime ?? (agent ? dc.cfg.AGENTS?.[agent]?.runtime ?? null : null);
+  dc.log('decision', buildDecision({
+    now: Date.now(), tenantId: dc.tenantId, instanceId: dc.instanceId,
+    identifier, pass, action, agent: agent ?? null, runtime: rt, lane: laneName, reason,
+    candidates: candidates || (agent ? [{ agent, runtime: rt, selected: true }] : []),
+    caps: caps || decisionCaps(dc, agent, rt), dryRun: dc.dryRun, error,
+  }));
+}
+
+// A guard (or no capacity) rejected this issue. Rate-limited to one `skip`
+// record per issue per CAPS.decisionSkipWindowCycles cycles.
+function skipDecision(dc, { identifier, pass, reason, agent = null, runtime = null, candidates }) {
+  if (!dc.skipLimiter.allow(identifier, dc.skipWindow)) return;
+  recordDecision(dc, { identifier, pass, action: 'skip', agent, runtime, reason, candidates: candidates || [] });
 }
 
 // Has any run row appeared for the issue (any row means it dispatched)?
@@ -339,13 +382,16 @@ function unassignArchivedAgents(dc, agentIds, dryRun) {
 }
 
 // ---- one cycle -------------------------------------------------------------
-// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now, initialBlockedRuntimes, heartbeatFile }
+// opts: { backlog, spawn, cfg, core, log, sleep, dryRun, noZombie, maxAssign, now, initialBlockedRuntimes, heartbeatFile, tenantId, skipLimiter }
 // Every dependency defaults to the live module-level singleton, so calling
 // cycle() with no args (from main()) is exactly the original live behavior.
 // Returns { todo, picked, assigned }.
 // opts.initialBlockedRuntimes: Set<string> — pre-seed blockedRuntimes before any pass runs (tests only).
 // opts.heartbeatFile: rewritten after every cycle_summary. Only main()/
 // mainMultiTenant() pass it, so tests calling cycle() touch no files.
+// opts.tenantId: the decision records' tenant_id (default AURIGA_TENANT_ID).
+// opts.skipLimiter: lib/decisions.mjs createSkipLimiter(), kept across cycles
+// so a guarded skip is recorded at most once per issue per window (PANT-816).
 //
 // PANT-817: exactly one `cycle_summary` closes every cycle, including one
 // that throws part-way (emitted from `finally`, then the error propagates to
@@ -623,9 +669,16 @@ async function runCycle(opts, state) {
   const priorAgentCycleAssigns = {};
   // Shared state for commitDispatch(): every dispatch below reserves these
   // counters and propagates rate limits into blockedRuntimes the same way.
+  // skipLimiter persists across cycles when the caller passes one (main() and
+  // mainMultiTenant() do); otherwise it only dedupes skips within this cycle.
+  const skipLimiter = opts.skipLimiter || createSkipLimiter();
+  skipLimiter.tick();
   const dc = {
     spawn, backlog, cfg: cfgImpl, core: coreImpl, log: logImpl, sleep: sleepImpl, now, issues,
     blockedRuntimes, inflight, loopRtProjected, priorAgentCycleAssigns, assigned: 0,
+    dryRun, maxAssign, skipLimiter, skipWindow: cfgImpl.CAPS.decisionSkipWindowCycles ?? 10,
+    tenantId: opts.tenantId ?? process.env.AURIGA_TENANT_ID ?? null,
+    instanceId: process.env.AURIGA_INSTANCE_ID ?? null,
   };
   // Guard inputs for dispatchEligible(), read fresh at each call.
   const guardCtx = (extra = {}) => ({
@@ -647,8 +700,12 @@ async function runCycle(opts, state) {
     for (const c of cascades) {
       const issueObj = issues.find((i) => i.id === c.issueId) || { identifier: c.identifier };
       const pre = dispatchEligible(issueObj, 'cascade', guardCtx({ passCount: cascadeFired, passCap: cfgImpl.CAPS.perCycleCascade }));
-      if (pre.stop) break;
-      if (!pre.ok) { logImpl('cascade_skip', { identifier: c.identifier, reason: pre.reason }); continue; }
+      if (pre.stop) { skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason: pre.reason }); break; }
+      if (!pre.ok) {
+        logImpl('cascade_skip', { identifier: c.identifier, reason: pre.reason });
+        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason: pre.reason });
+        continue;
+      }
       // Idempotency 1: never re-fire a story that already has an active run.
       let issueRuns = [];
       try { issueRuns = backlog.getIssueRuns(c.identifier); }
@@ -670,20 +727,29 @@ async function runCycle(opts, state) {
         }
       }
       logImpl('cascade_dispatch', { identifier: c.identifier, from: c.status, projectId: c.projectId, applied: !dryRun });
-      if (dryRun) { cascadeFired++; cascaded.add(c.identifier); continue; }
-      try {
-        if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
-      } catch (e) { logImpl('cascade_error', { identifier: c.identifier, error: e.message }); continue; }
+      // Dry-run stops just before the first write (the blocked->todo advance
+      // below is live-only) and still picks the agent, so it records the same
+      // decision the live cycle would.
+      if (!dryRun) {
+        try {
+          if (c.status === ISSUE_STATUS.BLOCKED) backlog.setIssueStatus(c.identifier, ISSUE_STATUS.TODO);
+        } catch (e) { logImpl('cascade_error', { identifier: c.identifier, error: e.message }); continue; }
+      }
       // Ensure an assignee on the story's lane, then rerun to FORCE-ENQUEUE (rerun
       // re-enqueues the CURRENT assignment; assignee-mutation alone does not).
       // Unlike verifyAssignStarted (and spawn.dispatch()), cascade always
       // force-reruns, whether or not the assign already enqueued a run.
       const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
-      const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, coreImpl.isHiveStory(issueObj), blockedRuntimes, maxPerAgentCascade);
+      const trace = {};
+      const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, coreImpl.isHiveStory(issueObj), blockedRuntimes, maxPerAgentCascade, trace);
       // Skip only when no agent has capacity AND the issue has no existing assignee.
       // If the issue already has an assignee, rerunIssue re-enqueues it without a
       // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
-      if (!agent && !issueObj.assignee_id) { logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' }); continue; }
+      if (!agent && !issueObj.assignee_id) {
+        logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' });
+        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason: 'no-capacity', candidates: trace.candidates });
+        continue;
+      }
       // PANT-648: with no lane agent, the rerun goes to the existing assignee, and
       // that assignee's runtime is the one a rate limit blocks.
       const target = agent || agentNameById(issueObj.assignee_id);
@@ -691,10 +757,19 @@ async function runCycle(opts, state) {
       const ok = dispatchEligible(issueObj, agent ? 'cascade' : 'cascade-rerun', guardCtx({ agent: target, runtime: targetRt }));
       if (!ok.ok) {
         logImpl('cascade_skip', { identifier: c.identifier, reason: ok.reason, agent: target, runtime: targetRt });
+        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason: ok.reason, agent: target, runtime: targetRt });
         continue;
       }
+      // With no lane agent free, the rerun goes to the existing assignee.
+      const decision = agent
+        ? { reason: trace.reason, candidates: trace.candidates }
+        : { reason: 'existing_assignee' };
+      if (dryRun) {
+        recordDecision(dc, { identifier: c.identifier, pass: 'cascade', action: agent ? 'assign' : 'rerun', agent: target, runtime: targetRt, ...decision });
+        cascadeFired++; cascaded.add(c.identifier); continue;
+      }
       if (agent) {
-        const res = commitDispatch(dc, { identifier: c.identifier, agent, runtime: targetRt, pass: 'cascade', action: 'assign', issue: issueObj, countDispatch: false });
+        const res = commitDispatch(dc, { identifier: c.identifier, agent, runtime: targetRt, pass: 'cascade', action: 'assign', issue: issueObj, countDispatch: false, decision });
         if (!res.ok) { logImpl('cascade_error', { identifier: c.identifier, error: res.error.message }); continue; }
         await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
       }
@@ -704,7 +779,7 @@ async function runCycle(opts, state) {
       // only the rerun, an actual dispatch (PANT-677).
       cascadeFired++;
       cascaded.add(c.identifier);
-      const res = commitDispatch(dc, { identifier: c.identifier, agent: target, runtime: targetRt, pass: 'cascade', action: 'rerun', reserve: agent ? 'none' : 'slot' });
+      const res = commitDispatch(dc, { identifier: c.identifier, agent: target, runtime: targetRt, pass: 'cascade', action: 'rerun', reserve: agent ? 'none' : 'slot', decision: agent ? null : decision });
       if (!res.ok) { logImpl('cascade_error', { identifier: c.identifier, error: res.error.message }); continue; }
       logImpl('cascade_enqueued', { identifier: c.identifier, agent: agent || issueObj.assignee_id });
     }
@@ -733,24 +808,30 @@ async function runCycle(opts, state) {
     // agents/auriga-review.instructions.md.
     const issueObj = inReviewById.get(r.issueId) || { identifier: r.identifier };
     const pre = dispatchEligible(issueObj, 'review', guardCtx());
-    if (pre.stop) break;
-    if (!pre.ok) { logImpl('review_skip', { identifier: r.identifier, agent: r.agent, reason: pre.reason }); continue; }
+    if (pre.stop) { skipDecision(dc, { identifier: r.identifier, pass: 'review', reason: pre.reason }); break; }
+    if (!pre.ok) {
+      logImpl('review_skip', { identifier: r.identifier, agent: r.agent, reason: pre.reason });
+      skipDecision(dc, { identifier: r.identifier, pass: 'review', reason: pre.reason });
+      continue;
+    }
     const plan = coreImpl.reviewSquadPlan(issueObj, cfgImpl);
     logImpl('review', {
       identifier: r.identifier, agent: r.agent, action: r.action, reason: r.reason,
       squad: plan.tier, perspectives: plan.perspectives, playwright: plan.playwright, applied: !dryRun,
     });
-    if (dryRun) continue;
 
     // PANT-262: give-up-review parallel to zombie give-up (detectZombies/auriga-router.mjs
     // zombie recovery). Fires after reviewMaxAttempts accumulated runs where the review
     // agent's run is consistently stale/failed — sets blocked + posts a diagnostic comment
     // so a human can find and fix the root-cause startup hang. Never retries further.
     if (r.action === 'give-up-review') {
-      logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: true });
-      parkForHuman(dc, r.identifier, {
-        blockedReason: 'review-give-up-max-attempts', comment: reviewGiveUpComment(cfgImpl), errorEvent: 'review_give_up_error',
-      });
+      logImpl('review_give_up', { identifier: r.identifier, agent: r.agent, applied: !dryRun });
+      recordDecision(dc, { identifier: r.identifier, pass: 'review', action: 'skip', reason: 'give_up_max_attempts', candidates: [] });
+      if (!dryRun) {
+        parkForHuman(dc, r.identifier, {
+          blockedReason: 'review-give-up-max-attempts', comment: reviewGiveUpComment(cfgImpl), errorEvent: 'review_give_up_error',
+        });
+      }
       continue;
     }
 
@@ -759,6 +840,15 @@ async function runCycle(opts, state) {
     const ok = dispatchEligible(issueObj, reviewPass, guardCtx({ agent: r.agent, runtime: reviewRt }));
     if (!ok.ok) {
       logImpl('review_skip', { identifier: r.identifier, agent: r.agent, reason: ok.reason, runtime: reviewRt });
+      skipDecision(dc, { identifier: r.identifier, pass: 'review', reason: ok.reason, agent: r.agent, runtime: reviewRt });
+      continue;
+    }
+    // A fresh review picks from the review lane (r.candidates); a rerun stays
+    // on the reviewer already assigned.
+    const decision = { reason: `review_tier_${plan.tier}`, candidates: r.candidates };
+    const reviewAction = r.action === 'dispatch-review' ? 'assign' : 'rerun';
+    if (dryRun) {
+      recordDecision(dc, { identifier: r.identifier, pass: 'review', action: reviewAction, agent: r.agent, runtime: reviewRt, ...decision });
       continue;
     }
 
@@ -769,7 +859,7 @@ async function runCycle(opts, state) {
         // started (Multica enqueues a run on assignment); force-rerun only if
         // the assignment did not auto-enqueue one (dead-zone fallback).
         // NOT routed through spawn.dispatch() (different contract — see spawn-adapter.mjs).
-        const res = commitDispatch(dc, { identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review', action: 'assign', issue: issueObj });
+        const res = commitDispatch(dc, { identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review', action: 'assign', issue: issueObj, decision });
         if (!res.ok) { logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: res.error.message }); continue; }
         await verifyAssignStarted(dc, {
           identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review',
@@ -777,7 +867,7 @@ async function runCycle(opts, state) {
         });
       } else {
         // rerun-review: no assign happened, always force-enqueue.
-        const res = commitDispatch(dc, { identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review', action: 'rerun' });
+        const res = commitDispatch(dc, { identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review', action: 'rerun', decision });
         if (!res.ok) { logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: res.error.message }); continue; }
       }
       logImpl('review_dispatched', { identifier: r.identifier, agent: r.agent, squad: plan.tier });
@@ -804,14 +894,19 @@ async function runCycle(opts, state) {
     for (const z of zombies) {
       const zIssue = issues.find((i) => i.identifier === z.identifier) || { identifier: z.identifier };
       const pre = dispatchEligible(zIssue, z.action === 'rerun' ? 'zombie-rerun' : 'zombie-assign', guardCtx());
-      if (pre.stop) break;
-      if (!pre.ok) { logImpl('zombie_skip', { ...z, reason: pre.reason }); continue; }
+      if (pre.stop) { skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: pre.reason }); break; }
+      if (!pre.ok) {
+        logImpl('zombie_skip', { ...z, reason: pre.reason });
+        skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: pre.reason });
+        continue;
+      }
       if (z.action === 'give-up') {
         // GH #75 / t001-zombie-give-up: attempt cap exhausted — stop re-actuating.
         // Never call spawn.assignIssue/rerunIssue on this path. Best-effort leave
         // a human-visible marker on the issue; a comment failure must never crash
         // the cycle (matches zombie_error/unblock_unassign_error convention).
         logImpl('zombie_give_up', { ...z, applied: !dryRun });
+        recordDecision(dc, { identifier: z.identifier, pass: 'zombie', action: 'skip', reason: 'give_up_max_attempts', candidates: [] });
         if (!dryRun) {
           parkForHuman(dc, z.identifier, {
             blockedReason: 'zombie-give-up-max-attempts', comment: zombieGiveUpComment(cfgImpl), errorEvent: 'zombie_give_up_error',
@@ -823,23 +918,42 @@ async function runCycle(opts, state) {
         const zombieAgentName = agentNameById(z.assigneeId);
         const zombieRt = zombieAgentName && cfgImpl.AGENTS[zombieAgentName]?.runtime;
         const ok = dispatchEligible(zIssue, 'zombie-rerun', guardCtx({ agent: zombieAgentName, runtime: zombieRt }));
-        if (!ok.ok) { logImpl('zombie_skip', { ...z, reason: ok.reason, agent: zombieAgentName, runtime: zombieRt }); continue; }
+        if (!ok.ok) {
+          logImpl('zombie_skip', { ...z, reason: ok.reason, agent: zombieAgentName, runtime: zombieRt });
+          skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: ok.reason, agent: zombieAgentName, runtime: zombieRt });
+          continue;
+        }
         logImpl('zombie', { ...z, applied: !dryRun });
-        if (!dryRun) {
-          const res = commitDispatch(dc, { identifier: z.identifier, agent: zombieAgentName, runtime: zombieRt, pass: 'zombie-rerun', action: 'rerun' });
+        const decision = { reason: 'existing_assignee' };
+        if (dryRun) {
+          recordDecision(dc, { identifier: z.identifier, pass: 'zombie', action: 'rerun', agent: zombieAgentName, runtime: zombieRt, ...decision });
+        } else {
+          const res = commitDispatch(dc, { identifier: z.identifier, agent: zombieAgentName, runtime: zombieRt, pass: 'zombie-rerun', action: 'rerun', decision });
           if (!res.ok) logImpl('zombie_error', { identifier: z.identifier, error: res.error.message });
         }
       } else {
         // needs (re)routing — route via its lane
         const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, z.isHive, blockedRuntimes, maxPerAgentZombie);
-        if (!agent) { logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' }); continue; }
+        const trace = {};
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, z.isHive, blockedRuntimes, maxPerAgentZombie, trace);
+        if (!agent) {
+          logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' });
+          skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: 'no-lane-capacity', candidates: trace.candidates });
+          continue;
+        }
         const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;
         const ok = dispatchEligible(zIssue, 'zombie-assign', guardCtx({ agent, runtime: zAgentRt }));
-        if (!ok.ok) { logImpl('zombie_skip', { ...z, reason: ok.reason, agent, runtime: zAgentRt }); continue; }
+        if (!ok.ok) {
+          logImpl('zombie_skip', { ...z, reason: ok.reason, agent, runtime: zAgentRt });
+          skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: ok.reason, agent, runtime: zAgentRt });
+          continue;
+        }
         logImpl('zombie', { ...z, agent, applied: !dryRun });
-        if (!dryRun) {
-          const res = commitDispatch(dc, { identifier: z.identifier, agent, runtime: zAgentRt, pass: 'zombie-assign', action: 'assign', issue: zIssue, countDispatch: false });
+        const decision = { reason: trace.reason, candidates: trace.candidates };
+        if (dryRun) {
+          recordDecision(dc, { identifier: z.identifier, pass: 'zombie', action: 'assign', agent, runtime: zAgentRt, ...decision });
+        } else {
+          const res = commitDispatch(dc, { identifier: z.identifier, agent, runtime: zAgentRt, pass: 'zombie-assign', action: 'assign', issue: zIssue, countDispatch: false, decision });
           if (!res.ok) { logImpl('zombie_error', { identifier: z.identifier, error: res.error.message }); continue; }
           await sleepImpl(cfgImpl.CAPS.verifyDelayMs);
           const rerun = commitDispatch(dc, { identifier: z.identifier, agent, runtime: zAgentRt, pass: 'zombie-assign', action: 'rerun', reserve: 'none' });
@@ -896,14 +1010,18 @@ async function runCycle(opts, state) {
       // earlier recovery must still stop later ones on the same runtime.
       const aIssue = todoAssignedById.get(a.issueId) || { identifier: a.identifier };
       const ok = dispatchEligible(aIssue, 'assigned-idle', guardCtx({ agent: a.agent, runtime: a.runtime }));
-      if (ok.stop) break;
+      if (ok.stop) { skipDecision(dc, { identifier: a.identifier, pass: 'assigned-idle', reason: ok.reason, agent: a.agent, runtime: a.runtime }); break; }
       if (!ok.ok) {
         logImpl('assigned_idle_skip', { identifier: a.identifier, agent: a.agent, reason: ok.reason, runtime: a.runtime });
+        skipDecision(dc, { identifier: a.identifier, pass: 'assigned-idle', reason: ok.reason, agent: a.agent, runtime: a.runtime });
         continue;
       }
       logImpl('assigned_idle', { identifier: a.identifier, agent: a.agent, idleAgeMs: a.idleAgeMs, reason: a.reason, applied: !dryRun });
-      if (!dryRun) {
-        const res = commitDispatch(dc, { identifier: a.identifier, agent: a.agent, runtime: a.runtime, pass: 'assigned-idle', action: 'rerun' });
+      const decision = { reason: 'existing_assignee' };
+      if (dryRun) {
+        recordDecision(dc, { identifier: a.identifier, pass: 'assigned-idle', action: 'rerun', agent: a.agent, runtime: a.runtime, ...decision });
+      } else {
+        const res = commitDispatch(dc, { identifier: a.identifier, agent: a.agent, runtime: a.runtime, pass: 'assigned-idle', action: 'rerun', decision });
         if (!res.ok) logImpl('assigned_idle_error', { identifier: a.identifier, error: res.error.message });
       }
     }
@@ -930,18 +1048,27 @@ async function runCycle(opts, state) {
   for (const p of picks) {
     const pickIssueObj = issues.find((i) => i.identifier === p.identifier) || { identifier: p.identifier };
     const ok = dispatchEligible(pickIssueObj, 'build', guardCtx({ agent: p.agent, runtime: p.runtime }));
-    if (ok.stop) break;
+    if (ok.stop) { skipDecision(dc, { identifier: p.identifier, pass: 'build', reason: ok.reason, agent: p.agent, runtime: p.runtime }); break; }
     if (!ok.ok) {
       if (ok.reason === 'runtime-blocked') logImpl('skip_blocked_runtime', { identifier: p.identifier, agent: p.agent, runtime: p.runtime });
       else logImpl('route_skip', { identifier: p.identifier, agent: p.agent, runtime: p.runtime, reason: ok.reason });
+      skipDecision(dc, { identifier: p.identifier, pass: 'build', reason: ok.reason, agent: p.agent, runtime: p.runtime });
       continue;
     }
+    // `route` stays alongside `decision`: cycle_summary's `routed` count reads it.
     logImpl('route', { identifier: p.identifier, agent: p.agent, lane: p.lane, runtime: p.runtime, applied: !dryRun });
-    if (dryRun) continue;
+    const decision = {
+      reason: p.decisionReason ?? laneReason(p.projectId, cfgImpl, coreImpl.isHiveStory(pickIssueObj)),
+      candidates: p.candidates, lane: p.lane ?? null,
+    };
+    if (dryRun) {
+      recordDecision(dc, { identifier: p.identifier, pass: 'build', action: 'assign', agent: p.agent, runtime: p.runtime, ...decision });
+      continue;
+    }
     // The assignment fingerprint commitDispatch writes makes
     // isRouterManagedAssignment() true for this issue next cycle, so re-routing
     // is idempotent (PAN-8245).
-    const res = commitDispatch(dc, { identifier: p.identifier, agent: p.agent, runtime: p.runtime, pass: 'build', action: 'assign', issue: pickIssueObj });
+    const res = commitDispatch(dc, { identifier: p.identifier, agent: p.agent, runtime: p.runtime, pass: 'build', action: 'assign', issue: pickIssueObj, decision });
     if (!res.ok) {
       logImpl('assign_error', { identifier: p.identifier, agent: p.agent, error: res.error.message || '' });
       continue;
@@ -966,11 +1093,13 @@ async function runCycle(opts, state) {
       targetProjectId: parentBoardConfig.projectId,
       applied: !dryRun,
     });
-    if (dryRun) continue;
-    handOffToBoard(h.identifier, {
+    const handUpDecision = { identifier: h.identifier, pass: 'hand_up', action: 'create_remote', reason: h.reason, candidates: [] };
+    if (dryRun) { recordDecision(dc, handUpDecision); continue; }
+    const res = handOffToBoard(h.identifier, {
       board: parentBoardConfig, event: 'hand_up', metadataKey: 'handed_up_from',
       comment: (created) => `Handed up — created ${created && created.identifier} on the parent board.`,
     }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
+    recordDecision(dc, { ...handUpDecision, error: res.error });
   }
 
   // ---- route hand-downs (t016 — orchestrator hand-down) ----
@@ -983,6 +1112,7 @@ async function runCycle(opts, state) {
       identifier: r.identifier, childId: r.childId, reason: r.reason,
       warning: `project routes to child '${r.childId}' which is ${r.reason === 'unknown-child' ? 'not registered in orchestrator-topology.json' : 'missing baseUrl/projectId reachability config'} — held for a human, not dispatched`,
     });
+    skipDecision(dc, { identifier: r.identifier, pass: 'hand_down', reason: r.reason });
   }
   for (const d of picks.handDowns || []) {
     logImpl('hand_down', {
@@ -990,11 +1120,13 @@ async function runCycle(opts, state) {
       targetProjectId: d.board.projectId,
       applied: !dryRun,
     });
-    if (dryRun) continue;
-    handOffToBoard(d.identifier, {
+    const handDownDecision = { identifier: d.identifier, pass: 'hand_down', action: 'create_remote', reason: 'project_route_child', candidates: [] };
+    if (dryRun) { recordDecision(dc, handDownDecision); continue; }
+    const res = handOffToBoard(d.identifier, {
       board: d.board, event: 'hand_down', metadataKey: 'handed_down_from',
       comment: (created) => `Handed down — created ${created && created.identifier} on child board '${d.childId}'.`,
     }, { issues, backlog, spawn, logImpl, createRemoteBacklog });
+    recordDecision(dc, { ...handDownDecision, error: res.error });
   }
 
   return { todo: todo.length, picked: picks.length, assigned: dc.assigned };
@@ -1008,13 +1140,14 @@ async function runCycle(opts, state) {
 // issue even if the post-create local mutations fail (the original
 // duplicate-on-retry bug, PANT-397). If the cancel itself fails we skip the
 // remote create entirely and let the next cycle retry.
+// Returns { ok, error } so the caller's decision record carries the outcome.
 function handOffToBoard(identifier, { board, event, metadataKey, comment }, { issues, backlog, spawn, logImpl, createRemoteBacklog }) {
   const issue = issues.find((i) => i.identifier === identifier);
   try {
     backlog.setIssueStatus(identifier, ISSUE_STATUS.CANCELLED);
   } catch (e) {
     logImpl(`${event}_pre_cancel_error`, { identifier, error: e.message });
-    return;
+    return { ok: false, error: e };
   }
 
   let createdIssue;
@@ -1030,7 +1163,7 @@ function handOffToBoard(identifier, { board, event, metadataKey, comment }, { is
     // the candidate pool next cycle rather than being stranded as cancelled.
     logImpl(`${event}_error`, { identifier, error: e.message });
     try { backlog.setIssueStatus(identifier, ISSUE_STATUS.TODO); } catch { /* next cycle retries */ }
-    return;
+    return { ok: false, error: e };
   }
 
   logImpl(`${event}_ok`, { identifier, newIdentifier: createdIssue && createdIssue.identifier });
@@ -1040,6 +1173,7 @@ function handOffToBoard(identifier, { board, event, metadataKey, comment }, { is
   try {
     spawn.unassignIssue(identifier);
   } catch (e) { logImpl(`${event}_unassign_error`, { identifier, error: e.message }); }
+  return { ok: true, error: null };
 }
 
 // ---- main loop (single-tenant, standalone -- unchanged) --------------------
@@ -1052,10 +1186,12 @@ async function main() {
   log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS });
 
   let totalAssigned = 0;
+  // PANT-816: skip decisions are rate-limited across cycles, so the limiter outlives each cycle.
+  const skipLimiter = createSkipLimiter();
   do {
     try {
       const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
-      const result = await cycle({ maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE });
+      const result = await cycle({ maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter });
       totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -1088,6 +1224,8 @@ async function mainMultiTenant() {
   let totalAssigned = 0;
   // PANT-388: per-tenant adapters live across cycles -- see getTenantAdapters().
   const tenantAdapters = new Map();
+  // PANT-816: one skip-decision limiter per tenant, kept across cycles.
+  const skipLimiters = new Map();
   do {
     let tenants = [];
     try {
@@ -1107,7 +1245,11 @@ async function mainMultiTenant() {
         const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
         try {
           const { backlog, spawn } = getTenantAdapters(tenantAdapters, tenantId, tenantCfg);
-          const result = await cycle({ backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), dryRun: DRY, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE });
+          if (!skipLimiters.has(tenantId)) skipLimiters.set(tenantId, createSkipLimiter());
+          const result = await cycle({
+            backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), tenantId, dryRun: DRY, maxAssign: remaining,
+            heartbeatFile: HEARTBEAT_FILE, skipLimiter: skipLimiters.get(tenantId),
+          });
           totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
         } catch (e) {

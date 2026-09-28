@@ -73,6 +73,7 @@ export const CAPS = _ext.CAPS ?? {
   assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
   assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
   redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago (PAN-7771)
+  decisionSkipWindowCycles: 10, // PANT-816: at most one `skip` decision record per issue per N cycles (see lib/decisions.mjs)
 };
 
 // ============================================================================
