@@ -1,9 +1,11 @@
 // Agent/runtime capacity + in-flight accounting — extracted from core.mjs
-// (t011 decomposition). Depends only on issue-status.mjs and review-eligibility.mjs (leaf modules) —
+// (t011 decomposition). Depends only on issue-status.mjs, review-eligibility.mjs and
+// run-classification.mjs (leaf modules) —
 // no dependency on any of core.mjs's own dispatch/decision logic.
 
-import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS } from './issue-status.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './issue-status.mjs';
 import { isReviewDispatchSkipped } from './review-eligibility.mjs';
+import { hasActiveRun } from './run-classification.mjs';
 
 const ACTIVE_ISSUE_STATUSES = new Set([
   ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
@@ -22,17 +24,40 @@ const ACTIVE_ISSUE_STATUSES = new Set([
 // issues makes real inflight ~0, freeing every lane. The per-cycle batch caps
 // (CAPS.perCycleTotal / perCyclePerAgent) prevent over-assignment during the brief
 // assign->run gap, and each assign is immediately re-run (enqueued) by the cycle loop.
-export function computeInflight(issues, agents) {
+//
+// FIX PANT-846 (GH #240): status alone still over-counts. An in_progress issue whose
+// last run was cancelled/failed hours ago (a zombie), or a parent that is in_progress
+// only while its staged sub-issues run, has no task running — yet each held a slot.
+// Live on hive three such issues filled claude-planning's RUNTIME_CAP=3 and the
+// planning lane dispatched nothing for hours. Capacity now tracks real work:
+//   - liveness.runsByIssue[identifier] known -> count only with an active, fresh run
+//     (hasActiveRun, same staleMs window detectZombies uses). A zombie frees its slot;
+//     zombie recovery re-reserves it when it actually re-runs the issue.
+//   - runs unknown (not fetched / fetch failed) -> keep the status-based count, except
+//     a parent with any non-terminal child: it waits on its children and never runs
+//     a task of its own meanwhile.
+export function computeInflight(issues, agents, liveness = {}) {
+  const { runsByIssue = {}, now = Date.now(), staleMs = Infinity } = liveness;
   const idToName = {};
   for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
   const counts = {};
   for (const name of Object.keys(agents)) counts[name] = 0;
+  const waitingParents = new Set();
+  for (const i of issues) {
+    if (i.parent_issue_id && !isTerminalIssueStatus((i.status || '').toLowerCase())) waitingParents.add(i.parent_issue_id);
+  }
   for (const i of issues) {
     if (!i.assignee_id) continue;
     const name = idToName[i.assignee_id];
     if (!name) continue;
     const st = (i.status || '').toLowerCase();
-    if (ACTIVE_ISSUE_STATUSES.has(st)) counts[name] += 1;
+    if (!ACTIVE_ISSUE_STATUSES.has(st)) continue;
+    const runs = runsByIssue[i.identifier];
+    if (runs) {
+      if (hasActiveRun(runs, now, staleMs)) counts[name] += 1;
+    } else if (!waitingParents.has(i.id)) {
+      counts[name] += 1;
+    }
   }
   return counts;
 }

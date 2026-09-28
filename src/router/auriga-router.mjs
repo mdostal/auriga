@@ -279,7 +279,28 @@ async function runCycle(opts, state) {
   const scanIds = [...new Set([...(discovered.length ? discovered : cfgImpl.PROJECT_IDS), ...cfgImpl.PROJECT_IDS])];
   const issues = backlog.listAllIssues(scanIds);
   state.issuesScanned = issues.length;
-  const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS);
+  // In_progress issues + their runs. Fetched up front because capacity needs them too
+  // (PANT-846): computeInflight counts an in_progress issue only while it has an active
+  // run, so a zombie or a parent waiting on sub-issues stops holding a RUNTIME_CAP slot.
+  // inProgress (and the state-machine passes below) stay DISPATCH-scoped to
+  // cfgImpl.PROJECT_IDS; runs are additionally fetched, read-only, for any in_progress
+  // issue assigned to one of this tenant's agents elsewhere on the board, since those
+  // count against the same caps. A failed fetch leaves the issue on the status-based count.
+  const isInProgressStatus = (i) => [
+    ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
+  ].includes((i.status || '').toLowerCase());
+  const inProgress = issues.filter((i) => isInProgressStatus(i) && cfgImpl.PROJECT_IDS.includes(i.project_id));
+  const runsByIssue = {};
+  for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+  const agentIds = new Set(Object.values(cfgImpl.AGENTS).map((a) => a.id));
+  for (const i of issues) {
+    if (!isInProgressStatus(i) || !agentIds.has(i.assignee_id) || runsByIssue[i.identifier]) continue;
+    try { runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier); }
+    catch (e) { logImpl('inflight_runs_error', { identifier: i.identifier, error: e.message }); }
+  }
+  const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS, {
+    runsByIssue, now, staleMs: cfgImpl.CAPS.zombieStaleMs,
+  });
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
   // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
@@ -349,12 +370,6 @@ async function runCycle(opts, state) {
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
   // DISPATCH-scoped (writes setIssueStatus) — see the blocked->todo pass above.
-  const inProgress = issues.filter((i) => [
-    ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
-  ].includes((i.status || '').toLowerCase()) && cfgImpl.PROJECT_IDS.includes(i.project_id));
-  const runsByIssue = {};
-  for (const i of inProgress) runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
-
   const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
   for (const c of completions) {
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
@@ -742,6 +757,9 @@ async function runCycle(opts, state) {
             spawn.rerunIssue(z.identifier);
             assigned++;
             if (zombieAgentName) {
+              // PANT-846: a zombie has no active run, so computeInflight no longer counts
+              // it — the rerun re-reserves its slot here (reverses PANT-655's skip).
+              inflight[zombieAgentName] = (inflight[zombieAgentName] || 0) + 1;
               priorAgentCycleAssigns[zombieAgentName] = (priorAgentCycleAssigns[zombieAgentName] || 0) + 1;
             }
             if (zombieRt) loopRtProjected[zombieRt] = (loopRtProjected[zombieRt] || 0) + 1;
