@@ -1148,7 +1148,9 @@ test('selectReviewDispatch: parked (review-give-up) ticket assigned to reviewer 
   // skips it (isAgentParked) but computeReviewInflight counted it -> claude-review
   // RUNTIME_CAP=1 full -> 0 review dispatches across 18 in_review tickets.
   assert.equal(CFG.RUNTIME_CAP['claude-review'], 1);
-  const parked = inReview('FFE-38', 38, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } });
+  // PANT-930: a router give-up reason no longer parks an in_review ticket (it is
+  // stale once the ticket left `blocked`), so model the park with an agent-written reason.
+  const parked = inReview('FFE-38', 38, 'RV', { metadata: { blocked_reason: 'waiting for human sign-off' } });
   const eligible = [inReview('FFE-46', 46), inReview('FFE-47', 47), inReview('FFE-48', 48)];
   const issues = [parked, ...eligible];
   const runs = { 'FFE-38': [doneStale], 'FFE-46': [], 'FFE-47': [], 'FFE-48': [] };
@@ -1165,7 +1167,7 @@ test('computeReviewInflight: counts exactly the reviewer-assigned tickets select
   // waiting_on a human, seed) must also be excluded from inflight.
   const skipped = [
     inReview('SK-1', 1, 'RV', { title: 'smoke test ticket' }),
-    inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } }),
+    inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'waiting for human sign-off' } }),
     inReview('SK-3', 3, 'RV', { labels: [{ name: 'human-todo' }] }),
     inReview('SK-4', 4, 'RV', { metadata: { waiting_on: 'Mathew' } }),
     inReview('SK-5', 5, 'RV', { labels: [{ name: 'needs-plan' }] }),
@@ -1174,6 +1176,37 @@ test('computeReviewInflight: counts exactly the reviewer-assigned tickets select
   assert.equal(core.computeReviewInflight(skipped, CFG)['auriga-review'], 0);
   const active = inReview('OK-1', 10, 'RV');
   assert.equal(core.computeReviewInflight([...skipped, active], CFG)['auriga-review'], 1, 'a real review still holds its slot');
+});
+
+// ---- PANT-930 / GH #244: stale router give-up reason ----------------------
+
+test('isAgentParked: a router give-up reason parks only while the issue is blocked — PANT-930', () => {
+  for (const reason of ['zombie-give-up-max-attempts', 'review-give-up-max-attempts']) {
+    const md = { blocked_reason: reason };
+    assert.equal(core.isAgentParked({ status: 'blocked', metadata: md }), true, `${reason} parks a blocked issue`);
+    for (const status of ['in_review', 'todo', 'in_progress']) {
+      assert.equal(core.isAgentParked({ status, metadata: md }), false, `${reason} is stale once ${status}`);
+      assert.equal(core.isStaleRouterPark({ status, metadata: md }), true);
+    }
+    assert.equal(core.isStaleRouterPark({ status: 'blocked', metadata: md }), false);
+  }
+  // Any other reason is an explicit agent/human park and holds in every status.
+  assert.equal(core.isAgentParked({ status: 'in_review', metadata: { blocked_reason: 'waiting for human sign-off' } }), true);
+  assert.equal(core.isAgentParked({ status: 'todo', metadata: { blocked_reason: 'needs API key from ops' } }), true);
+  assert.equal(core.isStaleRouterPark({ status: 'in_review', metadata: { blocked_reason: 'waiting for human sign-off' } }), false);
+});
+
+test('selectReviewDispatch: in_review ticket with a stale zombie give-up reason is reviewed — PANT-930 regression', () => {
+  // Live (hive, 2026-09-28): PANT-809/812/815/816 were zombie-given-up (blocked +
+  // blocked_reason), reworked, and moved back to in_review with the key still set.
+  // They were skipped as parked every cycle while the review slot sat free.
+  const stale = inReview('PANT-812', 812, null, { metadata: { blocked_reason: 'zombie-give-up-max-attempts' } });
+  assert.equal(core.isReviewDispatchSkipped(stale, CFG), false);
+  const reviewInflight = core.computeReviewInflight([stale], CFG);
+  const picks = core.selectReviewDispatch([stale], { 'PANT-812': [] }, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-812');
+  assert.equal(picks[0].action, 'dispatch-review');
 });
 
 // ---- GH #102: anti-starvation fairness ------------------------------------
@@ -1707,6 +1740,38 @@ test('detectParentDone: skips agent-parked parent (isAgentParked guard)', () => 
     { id: 'P', identifier: 'PAN-P', project_id: 'PCORE', status: 'blocked', title: 'epic', metadata: { blocked_reason: 'needs human approval before closing' } },
     { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'a', parent_issue_id: 'P' },
     { id: 'c2', identifier: 'PAN-c2', project_id: 'PCORE', status: 'done', title: 'b', parent_issue_id: 'P' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: a seed stays open mid-planning even when every current child is done — PANT-627', () => {
+  const issues = [
+    { id: 'S', identifier: 'PAN-S', project_id: 'PCORE', status: 'in_progress', title: 'seed', labels: [{ name: 'idea' }] },
+    { id: 'c1', identifier: 'PAN-c1', project_id: 'PCORE', status: 'done', title: 'stage 1', parent_issue_id: 'S' },
+  ];
+  assert.equal(core.detectParentDone(issues).length, 0);
+});
+
+test('detectParentDone: a finished seed in in_review rolls up once every stage is done — PANT-930', () => {
+  // Live: PANT-173/178/179 (label idea) sat in_review for days with all stages done.
+  // The review lane skips seeds, so the planning rollup must close them.
+  const issues = [
+    { id: 'S', identifier: 'PANT-179', project_id: 'PCORE', status: 'in_review', title: 'seed', labels: [{ name: 'idea' }] },
+    { id: 'c1', identifier: 'PANT-209', project_id: 'PCORE', status: 'done', title: 'stage 1', parent_issue_id: 'S' },
+    { id: 'c2', identifier: 'PANT-210', project_id: 'PCORE', status: 'cancelled', title: 'stage 2', parent_issue_id: 'S' },
+  ];
+  const acts = core.detectParentDone(issues);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'PANT-179');
+  assert.equal(acts[0].action, 'advance-parent-done');
+});
+
+test('detectParentDone: an in_review seed with an unfinished stage stays open — PANT-930', () => {
+  // Live: PANT-176 is in_review but its stage PANT-757 is blocked.
+  const issues = [
+    { id: 'S', identifier: 'PANT-176', project_id: 'PCORE', status: 'in_review', title: 'seed', labels: [{ name: 'idea' }] },
+    { id: 'c1', identifier: 'PANT-754', project_id: 'PCORE', status: 'done', title: 'stage 1', parent_issue_id: 'S' },
+    { id: 'c2', identifier: 'PANT-757', project_id: 'PCORE', status: 'blocked', title: 'stage 2', parent_issue_id: 'S' },
   ];
   assert.equal(core.detectParentDone(issues).length, 0);
 });
