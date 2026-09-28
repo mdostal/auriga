@@ -87,6 +87,55 @@ test('listIssues() GETs the project-scoped route and maps back to raw, snake_cas
   }]);
 });
 
+// PANT-931 (mdostal/auriga#246): Pantheon maps Multica `backlog` onto `todo`, so parked
+// stories reached core.mjs as plain todo and detectAssignedIdle reran them 7x/hour.
+test('PANT-931: nativeStatus is surfaced as status_name, and omitted when core-api does not send it', async (t) => {
+  makeCurlMock(t, () => ({ status: 200, body: { issues: [rawBoardIssue({ id: 'a', nativeStatus: 'backlog' }), rawBoardIssue({ id: 'b' })] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const [parked, plain] = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL }).listAllIssues([]);
+
+  assert.equal(parked.status, 'todo');
+  assert.equal(parked.status_name, 'backlog');
+  assert.equal('status_name' in plain, false);
+});
+
+test('PANT-931: a todo issue whose nativeStatus is backlog is never rerun by detectAssignedIdle or picked by selectAssignments', async (t) => {
+  const old = '2026-01-01T00:00:00Z';
+  const agent = { type: 'agent', id: 'AGENT' };
+  makeCurlMock(t, () => ({
+    status: 200,
+    body: {
+      issues: [
+        rawBoardIssue({ id: 'p1', identifier: 'PANT-924', number: 924, nativeStatus: 'backlog', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 't1', identifier: 'PANT-1', number: 1, nativeStatus: 'todo', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 'p2', identifier: 'PANT-926', number: 926, nativeStatus: 'backlog', assignee: null, parentId: 'EPIC' }),
+        rawBoardIssue({ id: 't2', identifier: 'PANT-2', number: 2, nativeStatus: 'todo', assignee: null, parentId: 'EPIC' }),
+      ],
+    },
+  }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const core = await import('../lib/core.mjs');
+  const issues = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL }).listAllIssues([]);
+
+  const cfg = {
+    AGENTS: { 'auriga-dev': { id: 'AGENT', runtime: 'codex', maxInflight: 3 } },
+    RUNTIME_CAP: { codex: 4 },
+    PROJECT_LANE: { 'proj-1': ['auriga-dev'] },
+    DEFAULT_LANE: ['auriga-dev'],
+    HIVE_LANE: [],
+    PROJECT_IDS: ['proj-1'],
+    PROJECT_NAMES: {},
+    CAPS: { perCyclePerAgent: 5, perCycleTotal: 5, zombieStaleMs: 20 * 60 * 1000, assignedIdleStaleMs: 10 * 60 * 1000, assignedIdlePerCycle: 10 },
+    HUMAN_NAMES: [],
+  };
+
+  const idle = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), Date.parse('2026-02-01T00:00:00Z'));
+  assert.deepEqual(idle.map((a) => a.identifier), ['PANT-1']);
+
+  const picks = core.selectAssignments(issues, cfg, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['PANT-2']);
+});
+
 test('listAllProjectIds() returns a single sentinel (Pantheon backlog is board-wide, not project-scoped)', async (t) => {
   makeCurlMock(t, () => new Error('should never be called — listAllProjectIds is pure'));
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();

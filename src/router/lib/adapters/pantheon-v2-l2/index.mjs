@@ -69,6 +69,12 @@ function sleepSync(ms) {
 // own vocabulary). Deliberately keeps Auriga's real, existing consumer
 // code working unchanged rather than "fixing" it as an unplanned side
 // effect of this cutover.
+//
+// PANT-931: Pantheon collapses Multica's `backlog` onto its own `todo`, so a
+// parked issue would look like plain todo work to isPlainTodo. core-api
+// (PANT-928) returns the real Multica status as `nativeStatus`; surface it as
+// `status_name`, the field core.mjs's PARKED_STATUS_NAMES guard already reads.
+// Only set when present so older core-api responses keep the exact old shape.
 function toRawIssue(issue) {
   if (!issue) return issue;
   return {
@@ -86,6 +92,7 @@ function toRawIssue(issue) {
     metadata: issue.metadata,
     created_at: issue.createdAt,
     updated_at: issue.updatedAt,
+    ...(issue.nativeStatus ? { status_name: issue.nativeStatus } : {}),
   };
 }
 
