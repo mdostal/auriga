@@ -19,6 +19,9 @@ import {
   computeReviewInflight, chooseReviewAgent,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+import {
+  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isSeedByLabel, isReviewDispatchSkipped,
+} from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun };
@@ -32,27 +35,10 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
+export { isSmokeScratch, isHumanTodo, isAgentParked, isReviewDispatchSkipped };
 
-// Ignore smoke/scratch/verification tickets by title.
-export function isSmokeScratch(title = '') {
-  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
-}
-
-const HUMAN_TODO_LABEL = 'human-todo';
-
-// Priority-1 filter: true when an issue must never enter the agent dispatch
-// pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
-// — because only a human can complete it. Excluded issues belong in the
-// separate human queue instead (see scripts/export-human-queue.mjs).
-export function isHumanTodo(issue, cfg) {
-  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
-  if (labels.includes(HUMAN_TODO_LABEL)) return true;
-  const waitingOn = issue.metadata && issue.metadata.waiting_on;
-  if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
-  const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
-  const w = waitingOn.trim().toLowerCase();
-  return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
-}
+// isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
+// ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
 
 // Why an issue was routed to the human queue — 'label' or 'waiting_on'.
 // Callers should only call this once isHumanTodo(issue, cfg) is true.
@@ -132,15 +118,6 @@ export function isSeed(issue, allIssues = []) {
   const isTopLevel = !issue.parent_issue_id;
   const isChildless = !allIssues.some((i) => i.parent_issue_id === issue.id);
   return isTopLevel && isChildless;
-}
-
-// isSeed limited to the explicit-label legs only — used in detect* functions where
-// the childless+top-level heuristic is too broad (an in_progress story has no children
-// in that set, so the heuristic would fire on every top-level ticket).
-function isSeedByLabel(issue) {
-  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
-  if (labelNames.includes('not-a-seed')) return false;
-  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
 }
 
 // The planning lane every seed routes to (PAN-6646).
@@ -733,10 +710,9 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue; // PANT-675: still evaluate already-assigned issues (potential give-ups) after budget consumed
-    if (isSmokeScratch(i.title)) continue;
-    if (isAgentParked(i)) continue;
-    if (isHumanTodo(i, cfg)) continue; // human controls this review
-    if (isSeedByLabel(i)) continue; // PANT-625/PANT-737: seeds are planning-lane; never dispatch a review run for them
+    // smoke / parked / human-todo / seed. Shared with computeReviewInflight so a
+    // skipped ticket can never hold a review slot (PANT-737, PANT-843).
+    if (isReviewDispatchSkipped(i, cfg)) continue;
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -1119,13 +1095,6 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIss
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
-}
-
-// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
-// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
-export function isAgentParked(issue = {}) {
-  const r = issue && issue.metadata && issue.metadata.blocked_reason;
-  return typeof r === 'string' && r.trim() !== '';
 }
 
 const NEEDS_DECISION = 'needs-decision';
