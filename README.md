@@ -61,17 +61,21 @@ flowchart TB
     sel -->|hive story| claudehive
     sel -->|other| codex
     sm -->|run done| inrev
-    sm -->|PR merged| board
+    sm -->|"linked PR merged\n(Multica issue-PR link via core-api;\nno GitHub polling)"| board
     lock -.guards.- scan
 ```
 
 **Internally**, each cycle the router: scans the configured Multica projects → recovers zombies
 (stale/failed in-progress issues) → advances issue status from board facts alone (a done run →
-`in_review`; a *merged* PR → `done`) → selects a small batch of unassigned todos → routes each by
+`in_review`; a *merged* PR linked to the issue on the board → `done`) → selects a small batch of unassigned todos → routes each by
 capability and project lane, respecting caps → assigns and verifies a run actually started
 (re-running to force-enqueue if not) → logs → sleeps. A pidfile keeps exactly one router alive.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full component/flow diagram and repo
 layout.
+
+All board reads and writes go through Pantheon's `core-api` (the `pantheon-v2-l2` adapter); the
+router never calls Multica or GitHub directly, and it no longer polls GitHub for repos or PRs
+(removed in PANT-717, GitHub [#194](https://github.com/mdostal/auriga/issues/194)).
 
 **In Pantheon**, Auriga sits between the board and the agents. Work is planned upstream (Minerva),
 lands on the Multica board, and Auriga drains it to the swarm.
@@ -148,11 +152,13 @@ healthcheck (see [`src/router/README.md`](src/router/README.md#observability)). 
 [`src/router/README.md`](src/router/README.md) for state-machine and human-queue details.
 
 `cycle()` no longer talks to Multica directly — it goes through the `backlogAdapter` /
-`spawnAdapter` boundary in [`src/router/lib/adapters/`](src/router/lib/adapters/), which holds
-the typed contracts, the real Multica-backed implementations (a behavior-preserving port of the
-former `lib/multica.mjs`), an in-memory stub used by tests, and the intentionally-unbuilt
-`pantheon-v2-l2` stub (the only sanctioned path from Auriga to Pantheon). See that directory's
-`README.md` for the two-adapter model.
+`spawnAdapter` boundary in [`src/router/lib/adapters/`](src/router/lib/adapters/). The live
+router is wired to the `pantheon-v2-l2` adapter: the production HTTP adapter to Pantheon's own
+`core-api`, and the only sanctioned path from Auriga to Pantheon. The directory also holds the
+typed contracts, the older Multica-CLI-backed implementations (a port of the former
+`lib/multica.mjs`, no longer used by the router cycle), and an in-memory stub used by tests. See
+that directory's `README.md` and
+[`pantheon-v2-l2/README.md`](src/router/lib/adapters/pantheon-v2-l2/README.md).
 
 Alongside the router, [`src/server/`](src/server/) is a small read-only `node:http` JSON API
 over this repo's own `.pHive/` state (epics, stories, activity — see `src/server/lib/read.mjs`),
@@ -163,10 +169,12 @@ on. Neither package is a dependency of the router; each has its own `package.jso
 ## Status
 
 **WIP — live on the hive.** The `src/router/` auto-router runs live, draining the aligned Multica
-projects with 26 passing unit tests; capability-aware routing and pure-code state-machine transitions
-are merged on `main`. The richer TypeScript routing **engine** (board-state consumer, adapters,
-escalation, verifier pool) lives on the `feat/routing-engine` branch and is not yet integrated with
-the running router. See [docs/VISION.md](docs/VISION.md) for the trajectory and where to jump in.
+projects through Pantheon's `core-api`. Capability-aware routing, pure-code state-machine
+transitions, the review squad, and orchestrator hand-up are merged on `dev`; the root `npm test`
+suite runs 760+ tests (650+ of them router tests). The older TypeScript routing-engine snapshot
+recovered from `pantheon-orchestrator` sits in [`src/engine/`](src/engine/) as reference material
+only. It is not wired into the router, and the `feat/routing-engine` branch it came from is
+abandoned. See [docs/VISION.md](docs/VISION.md) for the trajectory and where to jump in.
 
 > Note: `mdostal/pantheon-orchestrator` is **LEGACY** — Auriga code that used to live there has been
 > moved into this repo.
