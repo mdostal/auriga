@@ -1140,6 +1140,42 @@ test('selectReviewDispatch: seed assigned to review agent (maxInflight=1) does n
   assert.equal(picks[0].identifier, 'PANT-255', 'normal ticket gets the review slot');
 });
 
+// ---- PANT-843 / GH #236: every skipped ticket must not hold inflight ------
+
+test('selectReviewDispatch: parked (review-give-up) ticket assigned to reviewer does not block other reviews at RUNTIME_CAP 1 — PANT-843 regression', () => {
+  // Live scenario (firefly-events, FFE-38): a review-give-up ticket stays in_review,
+  // assigned to the reviewer, with metadata.blocked_reason set. selectReviewDispatch
+  // skips it (isAgentParked) but computeReviewInflight counted it -> claude-review
+  // RUNTIME_CAP=1 full -> 0 review dispatches across 18 in_review tickets.
+  assert.equal(CFG.RUNTIME_CAP['claude-review'], 1);
+  const parked = inReview('FFE-38', 38, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } });
+  const eligible = [inReview('FFE-46', 46), inReview('FFE-47', 47), inReview('FFE-48', 48)];
+  const issues = [parked, ...eligible];
+  const runs = { 'FFE-38': [doneStale], 'FFE-46': [], 'FFE-47': [], 'FFE-48': [] };
+  const reviewInflight = core.computeReviewInflight(issues, CFG);
+  assert.equal(reviewInflight['auriga-review'], 0, 'parked ticket must not hold the review slot');
+  const picks = core.selectReviewDispatch(issues, runs, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'FFE-46');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('computeReviewInflight: counts exactly the reviewer-assigned tickets selectReviewDispatch processes — PANT-843', () => {
+  // Every skip reason in selectReviewDispatch (smoke, parked, human-todo label,
+  // waiting_on a human, seed) must also be excluded from inflight.
+  const skipped = [
+    inReview('SK-1', 1, 'RV', { title: 'smoke test ticket' }),
+    inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } }),
+    inReview('SK-3', 3, 'RV', { labels: [{ name: 'human-todo' }] }),
+    inReview('SK-4', 4, 'RV', { metadata: { waiting_on: 'Mathew' } }),
+    inReview('SK-5', 5, 'RV', { labels: [{ name: 'needs-plan' }] }),
+  ];
+  for (const i of skipped) assert.equal(core.isReviewDispatchSkipped(i, CFG), true, `${i.identifier} is skipped`);
+  assert.equal(core.computeReviewInflight(skipped, CFG)['auriga-review'], 0);
+  const active = inReview('OK-1', 10, 'RV');
+  assert.equal(core.computeReviewInflight([...skipped, active], CFG)['auriga-review'], 1, 'a real review still holds its slot');
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
@@ -1204,6 +1240,68 @@ test('selectReviewDispatch: a PR-less ticket that never resolves cannot monopoli
   // Every genuinely different in_review ticket eventually got a real dispatch
   // turn -- not just the starver, forever.
   assert.equal(dispatchedOther.size, others.length);
+});
+
+// ---- PANT-921 (GH #242): oldest-waiting in_review ticket is reviewed first ----
+// The board lists in_review newest-first. Walking it in caller order with one review
+// slot handed every slot to the newest arrival, so with a steady inflow the tail was
+// never reached (live: PANT-697 waited 25h while the lane ran 10 reviews/hour).
+
+const HOUR = 60 * 60 * 1000;
+const buildDone = (msAgo) => ({ status: 'completed', completed_at: new Date(NOW - msAgo).toISOString(), agent_id: 'AB' });
+
+test('reviewWaitingSinceMs: latest run timestamp, created_at fallback, Infinity when undated — PANT-921', () => {
+  const created = new Date(NOW - 48 * HOUR).toISOString();
+  assert.equal(core.reviewWaitingSinceMs({ created_at: created }, []), NOW - 48 * HOUR);
+  assert.equal(core.reviewWaitingSinceMs({ created_at: created }, [buildDone(30 * HOUR), buildDone(25 * HOUR)]), NOW - 25 * HOUR);
+  const active = { status: 'running', started_at: new Date(NOW - HOUR).toISOString(), agent_id: 'RV' };
+  assert.equal(core.reviewWaitingSinceMs({ created_at: created }, [buildDone(25 * HOUR), active]), NOW - HOUR);
+  assert.equal(core.reviewWaitingSinceMs({ updated_at: new Date(NOW).toISOString() }, []), Infinity, 'updated_at is never used');
+});
+
+test('selectReviewDispatch: the oldest-waiting ticket wins the lone slot even when the board lists it last — PANT-921', () => {
+  const oldest = inReview('PANT-697', 697);
+  const newer = [1, 2, 3].map((h) => inReview(`PANT-9${h}`, 900 + h));
+  const runsByIssue = { 'PANT-697': [buildDone(25 * HOUR)] };
+  for (const [k, i] of newer.entries()) runsByIssue[i.identifier] = [buildDone((k + 1) * 60_000)];
+  const picks = core.selectReviewDispatch([...newer, oldest], runsByIssue, CFG, {}, { now: NOW }); // newest-first, like the board
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'PANT-697');
+});
+
+test('selectReviewDispatch: under a steady stream of new in_review tickets, a waiting ticket is reviewed within a bounded number of cycles — PANT-921', () => {
+  // Live shape: 17 in_review, ~12 new arrivals/hour, perCycleReview 1. The target has
+  // 5 tickets older than it and 11 newer; every cycle 3 more arrive at the head.
+  const runsByIssue = {};
+  let board = []; // newest-first, as GET /api/backlog/issues?status=in_review returns it
+  let seq = 0;
+  const arrive = (enteredAt) => {
+    const i = inReview(`PANT-S${seq}`, seq++);
+    runsByIssue[i.identifier] = [{ status: 'completed', completed_at: new Date(enteredAt).toISOString(), agent_id: 'AB' }];
+    board.unshift(i);
+    return i;
+  };
+  let target;
+  for (let k = 16; k >= 0; k--) {
+    const i = arrive(NOW - (k + 1) * HOUR);
+    if (k === 11) target = i;
+  }
+  const olderThanTarget = 5;
+
+  const CYCLE_MS = 5 * 60 * 1000;
+  let servedAt = -1;
+  for (let c = 0; c < 50 && servedAt < 0; c++) {
+    const now = NOW + c * CYCLE_MS;
+    for (let n = 0; n < 3; n++) arrive(now - 1000 + n);
+    const picks = core.selectReviewDispatch(board, runsByIssue, CFG, {}, { now });
+    assert.ok(picks.length <= 1, 'perCycleReview cap still respected');
+    for (const p of picks) {
+      if (p.identifier === target.identifier) servedAt = c;
+      board = board.filter((i) => i.identifier !== p.identifier); // reviewed -> leaves in_review
+    }
+  }
+  assert.ok(servedAt >= 0, 'the waiting ticket was never reviewed (starved by newer arrivals)');
+  assert.ok(servedAt <= olderThanTarget, `reviewed at cycle ${servedAt}; bound is ${olderThanTarget} (one per older ticket)`);
 });
 
 // ---- PANT-531: build-phase runs must not inflate review thresholds --------

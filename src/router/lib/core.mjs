@@ -19,6 +19,9 @@ import {
   computeReviewInflight, chooseReviewAgent,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+import {
+  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isSeedByLabel, isReviewDispatchSkipped,
+} from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun };
@@ -32,27 +35,10 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
+export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isReviewDispatchSkipped };
 
-// Ignore smoke/scratch/verification tickets by title.
-export function isSmokeScratch(title = '') {
-  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
-}
-
-const HUMAN_TODO_LABEL = 'human-todo';
-
-// Priority-1 filter: true when an issue must never enter the agent dispatch
-// pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
-// — because only a human can complete it. Excluded issues belong in the
-// separate human queue instead (see scripts/export-human-queue.mjs).
-export function isHumanTodo(issue, cfg) {
-  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
-  if (labels.includes(HUMAN_TODO_LABEL)) return true;
-  const waitingOn = issue.metadata && issue.metadata.waiting_on;
-  if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
-  const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
-  const w = waitingOn.trim().toLowerCase();
-  return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
-}
+// isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
+// ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
 
 // Why an issue was routed to the human queue — 'label' or 'waiting_on'.
 // Callers should only call this once isHumanTodo(issue, cfg) is true.
@@ -132,15 +118,6 @@ export function isSeed(issue, allIssues = []) {
   const isTopLevel = !issue.parent_issue_id;
   const isChildless = !allIssues.some((i) => i.parent_issue_id === issue.id);
   return isTopLevel && isChildless;
-}
-
-// isSeed limited to the explicit-label legs only — used in detect* functions where
-// the childless+top-level heuristic is too broad (an in_progress story has no children
-// in that set, so the heuristic would fire on every top-level ticket).
-export function isSeedByLabel(issue) {
-  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
-  if (labelNames.includes('not-a-seed')) return false;
-  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
 }
 
 // The planning lane every seed routes to (PAN-6646).
@@ -654,6 +631,20 @@ export function reviewEligible(_issue = {}) {
 // computeReviewInflight/chooseReviewAgent now live in ./capacity.mjs —
 // imported + re-exported above (t011 decomposition).
 
+// When an in_review ticket started waiting for review (epoch ms), for oldest-first
+// review dispatch (PANT-921). A ticket reaches in_review when its build run completes,
+// and any later review run restarts its wait, so this is the latest run timestamp,
+// falling back to created_at for a ticket with no runs. Deliberately NOT updated_at:
+// any comment or label write advances it (PANT-440). Returns Infinity when no timestamp
+// is known, so an undated ticket sorts after dated ones and ties keep caller order.
+export function reviewWaitingSinceMs(issue = {}, runs = []) {
+  const ms = Math.max(
+    toMs(issue.created_at),
+    ...runs.map((r) => toMs(r.completed_at || r.started_at || r.dispatched_at || r.created_at)),
+  );
+  return ms > 0 ? ms : Infinity;
+}
+
 // Decide this cycle's review/ship dispatches from the in_review board.
 // runsByIssue: { [identifier]: runs[] } for the in_review issues.
 // Returns [{ identifier, issueId, projectId, agent, action, reason }] where
@@ -707,8 +698,8 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // runsByIssue already gives us each issue's own accumulated run count for
   // free — a natural, stateless "how many turns has this ticket already had"
   // signal, no new persisted state and no GitHub call required. Below the
-  // fairness threshold, candidates are considered in the caller's given order,
-  // unchanged (Array#sort is stable). At/over it, a ticket is deprioritized
+  // fairness threshold, candidates are considered oldest-waiting first (PANT-921,
+  // below). At/over it, a ticket is deprioritized
   // behind every ticket still under threshold; it's only reconsidered once
   // nothing under-threshold qualifies this cycle, so it's slowed, never
   // starved outright, while every other real in_review ticket gets first
@@ -718,10 +709,20 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // must not inflate this counter — a story needing 3+ build iterations would otherwise be
   // deprioritized the moment it enters in_review, before any review run has ever fired.
   const attemptsOf = (i) => reviewRunsOf(runsByIssue[i.identifier] || []);
+  // PANT-921 (GH #242): within each fairness tier, OLDEST-WAITING FIRST. The board
+  // lists in_review newest-first, so walking it in caller order with one review slot
+  // handed every slot to the newest arrival and a steady inflow starved the tail
+  // forever (live: PANT-697 sat 25h unreviewed while the lane ran 10 reviews/hour).
+  // Oldest-first bounds the wait: new arrivals queue behind it, so a ticket is served
+  // once everything ahead of it has had its turn.
+  const waitingSince = {};
+  for (const i of inReviewIssues) waitingSince[i.identifier] = reviewWaitingSinceMs(i, runsByIssue[i.identifier] || []);
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
-    return ea - eb;
+    if (ea !== eb) return ea - eb;
+    const wa = waitingSince[a.identifier], wb = waitingSince[b.identifier];
+    return wa === wb ? 0 : (wa < wb ? -1 : 1);
   });
 
   const actions = [];
@@ -733,10 +734,9 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue; // PANT-675: still evaluate already-assigned issues (potential give-ups) after budget consumed
-    if (isSmokeScratch(i.title)) continue;
-    if (isAgentParked(i)) continue;
-    if (isHumanTodo(i, cfg)) continue; // human controls this review
-    if (isSeedByLabel(i)) continue; // PANT-625/PANT-737: seeds are planning-lane; never dispatch a review run for them
+    // smoke / parked / human-todo / seed. Shared with computeReviewInflight so a
+    // skipped ticket can never hold a review slot (PANT-737, PANT-843).
+    if (isReviewDispatchSkipped(i, cfg)) continue;
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -1121,11 +1121,30 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIss
   return actions;
 }
 
-// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
-// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
-export function isAgentParked(issue = {}) {
-  const r = issue && issue.metadata && issue.metadata.blocked_reason;
-  return typeof r === 'string' && r.trim() !== '';
+const NEEDS_DECISION = 'needs-decision';
+const normStatus = (v) => (typeof v === 'string' ? v.trim().toLowerCase().replace(/[\s_]+/g, '-') : '');
+
+// PANT-844: true when an issue is waiting on a human decision — labelled
+// `needs-decision`, or carrying that status (custom workflows surface it via
+// status / status_name). Only a human answer can move these forward, so
+// re-running the assignee just burns a session that re-reports "nothing changed".
+export function isAwaitingDecision(issue = {}) {
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.includes(NEEDS_DECISION)) return true;
+  return [issue.status, issue.status_name].some((v) => normStatus(v) === NEEDS_DECISION);
+}
+
+// PANT-844: assigned-idle recovery is for genuine `todo` work only. A custom
+// workflow column (e.g. "Backlog" mapped onto the todo category) must not slip
+// through, so status_category must agree and status_name must not name a
+// parked column. status_name is free text ("To Do"), so only known parked
+// names are rejected rather than requiring an exact `todo`.
+const PARKED_STATUS_NAMES = new Set(['backlog', 'blocked', NEEDS_DECISION]);
+function isPlainTodo(issue = {}) {
+  if (normStatus(issue.status) !== 'todo') return false;
+  if (issue.status_category && normStatus(issue.status_category) !== 'todo') return false;
+  if (PARKED_STATUS_NAMES.has(normStatus(issue.status_name))) return false;
+  return true;
 }
 
 // ---- PAN-7492 self-heal: recover assigned-but-idle stories ----
@@ -1153,11 +1172,12 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
   );
   const actions = [];
   for (const i of todoIssues) {
-    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!isPlainTodo(i)) continue; // PANT-844: never backlog / blocked / custom non-todo columns
     if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isAwaitingDecision(i)) continue; // PANT-844: waits on a human answer, not a rerun
     // PANT-643: do NOT guard seeds here — detectAssignedIdle calls rerunIssue (re-enqueues the
     // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
     // must be recovered just like any other assigned-idle issue.
