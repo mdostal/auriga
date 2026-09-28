@@ -631,6 +631,20 @@ export function reviewEligible(_issue = {}) {
 // computeReviewInflight/chooseReviewAgent now live in ./capacity.mjs —
 // imported + re-exported above (t011 decomposition).
 
+// When an in_review ticket started waiting for review (epoch ms), for oldest-first
+// review dispatch (PANT-921). A ticket reaches in_review when its build run completes,
+// and any later review run restarts its wait, so this is the latest run timestamp,
+// falling back to created_at for a ticket with no runs. Deliberately NOT updated_at:
+// any comment or label write advances it (PANT-440). Returns Infinity when no timestamp
+// is known, so an undated ticket sorts after dated ones and ties keep caller order.
+export function reviewWaitingSinceMs(issue = {}, runs = []) {
+  const ms = Math.max(
+    toMs(issue.created_at),
+    ...runs.map((r) => toMs(r.completed_at || r.started_at || r.dispatched_at || r.created_at)),
+  );
+  return ms > 0 ? ms : Infinity;
+}
+
 // Decide this cycle's review/ship dispatches from the in_review board.
 // runsByIssue: { [identifier]: runs[] } for the in_review issues.
 // Returns [{ identifier, issueId, projectId, agent, action, reason }] where
@@ -684,8 +698,8 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // runsByIssue already gives us each issue's own accumulated run count for
   // free — a natural, stateless "how many turns has this ticket already had"
   // signal, no new persisted state and no GitHub call required. Below the
-  // fairness threshold, candidates are considered in the caller's given order,
-  // unchanged (Array#sort is stable). At/over it, a ticket is deprioritized
+  // fairness threshold, candidates are considered oldest-waiting first (PANT-921,
+  // below). At/over it, a ticket is deprioritized
   // behind every ticket still under threshold; it's only reconsidered once
   // nothing under-threshold qualifies this cycle, so it's slowed, never
   // starved outright, while every other real in_review ticket gets first
@@ -695,10 +709,20 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // must not inflate this counter — a story needing 3+ build iterations would otherwise be
   // deprioritized the moment it enters in_review, before any review run has ever fired.
   const attemptsOf = (i) => reviewRunsOf(runsByIssue[i.identifier] || []);
+  // PANT-921 (GH #242): within each fairness tier, OLDEST-WAITING FIRST. The board
+  // lists in_review newest-first, so walking it in caller order with one review slot
+  // handed every slot to the newest arrival and a steady inflow starved the tail
+  // forever (live: PANT-697 sat 25h unreviewed while the lane ran 10 reviews/hour).
+  // Oldest-first bounds the wait: new arrivals queue behind it, so a ticket is served
+  // once everything ahead of it has had its turn.
+  const waitingSince = {};
+  for (const i of inReviewIssues) waitingSince[i.identifier] = reviewWaitingSinceMs(i, runsByIssue[i.identifier] || []);
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
-    return ea - eb;
+    if (ea !== eb) return ea - eb;
+    const wa = waitingSince[a.identifier], wb = waitingSince[b.identifier];
+    return wa === wb ? 0 : (wa < wb ? -1 : 1);
   });
 
   const actions = [];
