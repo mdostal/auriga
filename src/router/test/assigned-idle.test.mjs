@@ -396,3 +396,52 @@ test('PANT-440: idle age is measured from the latest run start once that is past
   assert.equal(actions.length, 1);
   assert.equal(actions[0].idleAgeMs, NOW - lastRun);
 });
+
+// PANT-844 (mdostal/auriga#237): seven needs-decision tickets sat in backlog while
+// still assigned, and assigned_idle re-ran the builder ~51 times with
+// reason assigned-todo-stale. Only plain `todo` work is eligible for a rerun.
+test('PANT-844: detectAssignedIdle never reruns backlog / blocked / needs-decision status tickets', () => {
+  const issues = ['backlog', 'blocked', 'needs-decision', 'needs_decision', 'in_progress'].map((status, n) => ({
+    ...assignedTodo(`FFE-${n}`, 'A'), status,
+  }));
+  const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: detectAssignedIdle skips a todo ticket labelled needs-decision (string or object labels)', () => {
+  const objLabel = { ...assignedTodo('FFE-43', 'A'), labels: [{ id: 'l1', name: 'needs-decision' }] };
+  const strLabel = { ...assignedTodo('FFE-26', 'A'), labels: ['Needs-Decision'] };
+  const actions = core.detectAssignedIdle([objLabel, strLabel], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: needs-decision label suppresses the rerun even with a stale last run', () => {
+  const issue = { ...assignedTodo('FFE-34', 'A'), labels: [{ name: 'needs-decision' }] };
+  const runs = { 'FFE-34': [{ status: 'completed', created_at: new Date(OLD).toISOString(), completed_at: new Date(OLD).toISOString() }] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: custom backlog / needs-decision column mapped onto the todo category is not rerun', () => {
+  const backlogCol = { ...assignedTodo('FFE-44', 'A'), status_category: 'todo', status_name: 'Backlog' };
+  const decisionCol = { ...assignedTodo('FFE-45', 'A'), status_category: 'todo', status_name: 'Needs Decision' };
+  const otherCategory = { ...assignedTodo('FFE-54', 'A'), status_category: 'backlog' };
+  const actions = core.detectAssignedIdle([backlogCol, decisionCol, otherCategory], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: plain todo tickets (including a "To Do" status_name) are still recovered', () => {
+  const plain = assignedTodo('FFE-60', 'A');
+  const named = { ...assignedTodo('FFE-61', 'A'), status_category: 'todo', status_name: 'To Do', labels: [{ name: 'bug' }] };
+  const actions = core.detectAssignedIdle([plain, named], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => a.identifier), ['FFE-60', 'FFE-61']);
+  assert.ok(actions.every((a) => a.action === 'start'));
+});
+
+test('PANT-844: isAwaitingDecision matches label, status and status_name only', () => {
+  assert.equal(core.isAwaitingDecision({ labels: [{ name: 'needs-decision' }] }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'needs_decision' }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'todo', status_name: 'Needs Decision' }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'todo', labels: [{ name: 'decision' }] }), false);
+  assert.equal(core.isAwaitingDecision({}), false);
+});
