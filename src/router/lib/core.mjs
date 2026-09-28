@@ -35,7 +35,7 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
-export { isSmokeScratch, isHumanTodo, isAgentParked, isStaleRouterPark, isReviewDispatchSkipped };
+export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
 
 // isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
 // ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
