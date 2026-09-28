@@ -3,8 +3,15 @@
 // resolvable target_repo, lanes sitting idle, and scheduled maintenance
 // autopilots that are paused or overdue. This is the surface that would have
 // made the CADEX/Tools/GigRadar/dashboards orphan incident visible before it
-// happened. The Multica query is the slow part, so results are cached for
+// happened. The board query is the slow part, so results are cached for
 // `ttlMs` (default 30s) rather than recomputed on every request.
+//
+// Board data comes from the injected backlog adapter, which is Pantheon
+// core-api in production (PANT-818). core-api has no project-list or
+// autopilot endpoint yet, so when the adapter lacks listAllProjects /
+// listAutopilots those two sections come back as `null` and are named in
+// `unavailable` with the reason. They are never silently reported as `[]`
+// (that would read as "no gaps") and never fetched from Multica directly.
 import express from 'express';
 
 // Mirrors the target_repo resolution order build agents use: a `target_repo:`
@@ -32,9 +39,10 @@ function latestAutopilotRun(runs = []) {
   })[0] || null;
 }
 
-function summarizeSchedulerGaps(mca, now, graceMs) {
-  if (typeof mca.listAutopilots !== 'function') return [];
-  const autopilots = mca.listAutopilots();
+const NOT_IN_CORE_API = 'not available through Pantheon core-api yet';
+
+function summarizeSchedulerGaps(backlog, now, graceMs) {
+  const autopilots = backlog.listAutopilots();
   return autopilots
     .filter((a) => Array.isArray(a.trigger_kinds) && a.trigger_kinds.includes('schedule'))
     .map((a) => {
@@ -46,8 +54,8 @@ function summarizeSchedulerGaps(mca, now, graceMs) {
       if (!paused && !overdue) return null;
 
       let latestRun = null;
-      if (typeof mca.autopilotRuns === 'function') {
-        latestRun = latestAutopilotRun(mca.autopilotRuns(a.id));
+      if (typeof backlog.autopilotRuns === 'function') {
+        latestRun = latestAutopilotRun(backlog.autopilotRuns(a.id));
       }
 
       return {
@@ -66,7 +74,7 @@ function summarizeSchedulerGaps(mca, now, graceMs) {
     .filter(Boolean);
 }
 
-export function createGapsRouter(cfg, mca, core, opts = {}) {
+export function createGapsRouter(cfg, backlog, core, opts = {}) {
   const ttlMs = opts.ttlMs ?? 30000;
   const schedulerGapGraceMs = opts.schedulerGapGraceMs ?? 2 * 60 * 1000;
   const nowFn = opts.now || (() => Date.now());
@@ -80,12 +88,18 @@ export function createGapsRouter(cfg, mca, core, opts = {}) {
         return res.json(cache.body);
       }
 
-      const projects = mca.listAllProjects();
-      const missingProjects = projects
-        .filter((p) => !cfg.PROJECT_IDS.includes(p.id))
-        .map((p) => ({ id: p.id, title: p.title }));
+      const unavailable = {};
 
-      const issues = mca.listAllIssues(cfg.PROJECT_IDS);
+      let missingProjects = null;
+      if (typeof backlog.listAllProjects === 'function') {
+        missingProjects = backlog.listAllProjects()
+          .filter((p) => !cfg.PROJECT_IDS.includes(p.id))
+          .map((p) => ({ id: p.id, title: p.title }));
+      } else {
+        unavailable.missing_projects = `board project listing ${NOT_IN_CORE_API}`;
+      }
+
+      const issues = backlog.listAllIssues(cfg.PROJECT_IDS);
       const missingTargetRepo = issues
         .filter((i) => !resolveTargetRepo(i))
         .map((i) => ({ identifier: i.identifier, title: i.title, project_id: i.project_id }));
@@ -95,13 +109,19 @@ export function createGapsRouter(cfg, mca, core, opts = {}) {
       const idleLanes = Object.keys(cfg.AGENTS).filter(
         (name) => (inflight[name] || 0) === 0 && (queued[name] || 0) === 0
       );
-      const autopilotSchedulerGaps = summarizeSchedulerGaps(mca, now, schedulerGapGraceMs);
+      let autopilotSchedulerGaps = null;
+      if (typeof backlog.listAutopilots === 'function') {
+        autopilotSchedulerGaps = summarizeSchedulerGaps(backlog, now, schedulerGapGraceMs);
+      } else {
+        unavailable.autopilot_scheduler_gaps = `autopilot listing ${NOT_IN_CORE_API}`;
+      }
 
       const body = {
         missing_projects: missingProjects,
         stories_missing_target_repo: missingTargetRepo,
         idle_lanes: idleLanes,
         autopilot_scheduler_gaps: autopilotSchedulerGaps,
+        unavailable,
         computed_at: new Date(now).toISOString(),
       };
       cache = { at: now, body };

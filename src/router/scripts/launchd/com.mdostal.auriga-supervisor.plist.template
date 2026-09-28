@@ -24,13 +24,21 @@
     <string>__DIR__</string>
     <key>HOME</key>
     <string>__HOME__</string>
+    <!-- supervisor.sh / the router default to stdout/stderr (container
+         logs); on a bare host keep the historical /tmp log files. -->
+    <key>ROUTER_LOG</key>
+    <string>/tmp/auriga-router.log</string>
+    <key>SUP_LOG</key>
+    <string>/tmp/auriga-supervisor.log</string>
+    <key>AURIGA_LOG</key>
+    <string>/tmp/auriga-router.jsonl</string>
   </dict>
 
   <key>WorkingDirectory</key>
   <string>__DIR__</string>
 
   <!-- Reboot-survival: launch at boot/login (RunAtLoad) and respawn on exit
-       (KeepAlive). supervisor.sh itself is single-instance (its own pidfile
+       (KeepAlive). supervisor.sh itself is single-instance (its own flock
        guard) and loops forever restarting the router, so KeepAlive here is
        the outer safety net for the rare case supervisor.sh itself dies. -->
   <key>RunAtLoad</key>

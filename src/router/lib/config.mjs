@@ -11,27 +11,25 @@
 // AGENTS/PROJECT_NAMES/PROJECT_IDS moved to ./config-substrate.mjs
 // (p2-multica-backlog-adapter — the substrate/policy config split; see
 // .pHive/epics/p2-adapter-interface/stories/p2-multica-backlog-adapter.yaml).
-// RUNTIME_CAP/PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE/
-// REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS moved there too, completing that
-// split (p2-multica-spawn-adapter). Imported + re-exported here (not just
-// re-exported) because this module still MUTATES AGENTS and RUNTIME_CAP
-// below (adding the 'auriga-review' agent + its runtime-cap bucket) and
-// reads PROJECT_NAMES elsewhere; re-exporting keeps every existing
+// RUNTIME_CAP/PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE moved there
+// too, completing that split (p2-multica-spawn-adapter). Imported + re-exported
+// here (not just re-exported) because this module still MUTATES AGENTS and
+// RUNTIME_CAP below (adding the 'auriga-review' agent + its runtime-cap bucket)
+// and reads PROJECT_NAMES elsewhere; re-exporting keeps every existing
 // `cfg.AGENTS` / `cfg.PROJECT_NAMES` / `cfg.PROJECT_IDS` / `cfg.RUNTIME_CAP` /
-// `cfg.PROJECT_LANE` / `cfg.DEFAULT_LANE` / `cfg.HIVE_LANE` / `cfg.REVIEW_LANE` /
-// `cfg.REVIEW_REPO_OWNER` / `cfg.REVIEW_SEARCH_REPOS` call site
-// (auriga-router.mjs, tests, scripts) working unchanged during the split.
+// `cfg.PROJECT_LANE` / `cfg.DEFAULT_LANE` / `cfg.HIVE_LANE` / `cfg.REVIEW_LANE`
+// call site (auriga-router.mjs, tests, scripts) working unchanged during the split.
 import {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
+  REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 } from './config-substrate.mjs';
 import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
+  REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 };
 
 // Task type -> preferred model name (PAN-7938: model selection routing).
@@ -75,6 +73,7 @@ export const CAPS = _ext.CAPS ?? {
   assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
   assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
   redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago (PAN-7771)
+  decisionSkipWindowCycles: 10, // PANT-816: at most one `skip` decision record per issue per N cycles (see lib/decisions.mjs)
 };
 
 // ============================================================================

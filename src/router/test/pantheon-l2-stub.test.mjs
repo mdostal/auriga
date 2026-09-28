@@ -45,7 +45,7 @@ function makeCurlMock(t, handler) {
     const bodyText = result.body === undefined ? '' : JSON.stringify(result.body);
     return `${bodyText}\n${result.status}`;
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: fn } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: fn } });
   return calls;
 }
 
@@ -85,6 +85,55 @@ test('listIssues() GETs the project-scoped route and maps back to raw, snake_cas
     parent_issue_id: null, metadata: { foo: 1 }, created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   }]);
+});
+
+// PANT-931 (mdostal/auriga#246): Pantheon maps Multica `backlog` onto `todo`, so parked
+// stories reached core.mjs as plain todo and detectAssignedIdle reran them 7x/hour.
+test('PANT-931: nativeStatus is surfaced as status_name, and omitted when core-api does not send it', async (t) => {
+  makeCurlMock(t, () => ({ status: 200, body: { issues: [rawBoardIssue({ id: 'a', nativeStatus: 'backlog' }), rawBoardIssue({ id: 'b' })] } }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const [parked, plain] = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL }).listAllIssues([]);
+
+  assert.equal(parked.status, 'todo');
+  assert.equal(parked.status_name, 'backlog');
+  assert.equal('status_name' in plain, false);
+});
+
+test('PANT-931: a todo issue whose nativeStatus is backlog is never rerun by detectAssignedIdle or picked by selectAssignments', async (t) => {
+  const old = '2026-01-01T00:00:00Z';
+  const agent = { type: 'agent', id: 'AGENT' };
+  makeCurlMock(t, () => ({
+    status: 200,
+    body: {
+      issues: [
+        rawBoardIssue({ id: 'p1', identifier: 'PANT-924', number: 924, nativeStatus: 'backlog', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 't1', identifier: 'PANT-1', number: 1, nativeStatus: 'todo', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 'p2', identifier: 'PANT-926', number: 926, nativeStatus: 'backlog', assignee: null, parentId: 'EPIC' }),
+        rawBoardIssue({ id: 't2', identifier: 'PANT-2', number: 2, nativeStatus: 'todo', assignee: null, parentId: 'EPIC' }),
+      ],
+    },
+  }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const core = await import('../lib/core.mjs');
+  const issues = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL }).listAllIssues([]);
+
+  const cfg = {
+    AGENTS: { 'auriga-dev': { id: 'AGENT', runtime: 'codex', maxInflight: 3 } },
+    RUNTIME_CAP: { codex: 4 },
+    PROJECT_LANE: { 'proj-1': ['auriga-dev'] },
+    DEFAULT_LANE: ['auriga-dev'],
+    HIVE_LANE: [],
+    PROJECT_IDS: ['proj-1'],
+    PROJECT_NAMES: {},
+    CAPS: { perCyclePerAgent: 5, perCycleTotal: 5, zombieStaleMs: 20 * 60 * 1000, assignedIdleStaleMs: 10 * 60 * 1000, assignedIdlePerCycle: 10 },
+    HUMAN_NAMES: [],
+  };
+
+  const idle = core.detectAssignedIdle(issues, {}, cfg, core.agentIdSet(cfg.AGENTS), Date.parse('2026-02-01T00:00:00Z'));
+  assert.deepEqual(idle.map((a) => a.identifier), ['PANT-1']);
+
+  const picks = core.selectAssignments(issues, cfg, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['PANT-2']);
 });
 
 test('listAllProjectIds() returns a single sentinel (Pantheon backlog is board-wide, not project-scoped)', async (t) => {
@@ -133,94 +182,6 @@ test('getIssuePullRequests() unwraps {pull_requests} and degrades to [] on failu
   const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
 
   assert.deepEqual(backlog.getIssuePullRequests('PAN-1'), [{ number: 42 }]);
-});
-
-// ---- listCandidatePullRequests() -- Pantheon GitHub facade (PANT-133) ----
-// PR discovery now routes through Pantheon's GitHub facade (GET
-// /api/github/repos and GET /api/github/repos/:owner/:repo/pulls) via the
-// same curl-based `exec` injection the other tests above use — no `ghExec`
-// parameter and no gh binary. All three tests inject `exec` directly
-// (createPantheonV2L2BacklogAdapter({ exec })) and parse the URL from curl's
-// argv to dispatch the right fake response, matching makeCurlMock's own
-// argv-parsing shape.
-
-function makePantheonGhExec(t, handler) {
-  const calls = [];
-  const fn = t.mock.fn((cmd, args) => {
-    if (cmd !== 'curl') throw new Error('unexpected exec cmd: ' + cmd);
-    // Extract the URL from curl args (the first bare arg after -X GET)
-    const xIdx = args.indexOf('-X');
-    const url = args[xIdx + 2];
-    calls.push({ url, args });
-    const result = handler(url);
-    if (result instanceof Error) throw result;
-    return `${JSON.stringify(result)}\n200`;
-  });
-  return { fn, calls };
-}
-
-test('listCandidatePullRequests() calls Pantheon GitHub facade: repos listing then per-repo pulls', async (t) => {
-  const { fn: exec, calls } = makePantheonGhExec(t, (url) => {
-    if (url.includes('/api/github/repos?')) return [{ full_name: 'mdostal/auriga' }, { full_name: 'mdostal/heimdall' }];
-    if (url.includes('/pulls?')) return [];
-    return null;
-  });
-  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
-  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/pantheon-v2'] });
-
-  backlog.listCandidatePullRequests();
-
-  const repoCalls = calls.filter((c) => c.url.includes('/api/github/repos?'));
-  const prCalls = calls.filter((c) => c.url.includes('/pulls?'));
-  assert.equal(repoCalls.length, 1, 'one repo-listing call for reviewRepoOwner');
-  assert.ok(repoCalls[0].url.includes('owner=mdostal'), 'repo listing must use ?owner= (not ?org=) to match Pantheon facade query param');
-  assert.ok(prCalls.length >= 2, 'at least one pulls call per repo (auriga + heimdall from listing, plus pantheon-v2 from reviewSearchRepos)');
-});
-
-test('listCandidatePullRequests() unions Pantheon repo listing with reviewSearchRepos, dedupes, tags each PR with _repo', async (t) => {
-  const { fn: exec } = makePantheonGhExec(t, (url) => {
-    if (url.includes('/api/github/repos?')) return [{ full_name: 'mdostal/auriga' }, { full_name: 'mdostal/heimdall' }];
-    if (url.includes('/mdostal/auriga/pulls')) return [{ number: 1, title: 'a PR', head: { ref: 'feat/pant-1' }, state: 'open' }];
-    if (url.includes('/mdostal/heimdall/pulls')) return [{ number: 2, title: 'h PR', head: { ref: 'feat/h-1' }, state: 'open' }];
-    if (url.includes('/mdostal/consus/pulls')) return [{ number: 3, title: 'c PR', head: { ref: 'feat/c-1' }, state: 'open' }];
-    return [];
-  });
-  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
-  const backlog = createPantheonV2L2BacklogAdapter({
-    baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
-  });
-
-  const prs = backlog.listCandidatePullRequests();
-
-  // mdostal/auriga is in both ghListRepos result AND reviewSearchRepos — deduped to one scan.
-  const sorted = prs.slice().sort((a, b) => a.number - b.number);
-  assert.equal(sorted.length, 3);
-  assert.equal(sorted[0].number, 1); assert.equal(sorted[0]._repo, 'mdostal/auriga');
-  assert.equal(sorted[1].number, 2); assert.equal(sorted[1]._repo, 'mdostal/heimdall');
-  assert.equal(sorted[2].number, 3); assert.equal(sorted[2]._repo, 'mdostal/consus');
-  // head_ref is flattened from head.ref by pantheon-github.mjs
-  assert.equal(sorted[0].head_ref, 'feat/pant-1');
-});
-
-test('listCandidatePullRequests() isolates a single repo\'s failure -- other repos still scanned, never throws', async (t) => {
-  const { fn: exec } = makePantheonGhExec(t, (url) => {
-    if (url.includes('/api/github/repos?')) throw new Error('Pantheon: 503 GITHUB_TOKEN absent');
-    if (url.includes('/mdostal/auriga/pulls')) throw new Error('Pantheon: 404 Not Found');
-    if (url.includes('/mdostal/consus/pulls')) return [{ number: 9, title: 'ok', head: { ref: 'feat/ok' }, state: 'open' }];
-    return [];
-  });
-  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
-  const backlog = createPantheonV2L2BacklogAdapter({
-    baseUrl: BASE_URL, exec, reviewRepoOwner: 'mdostal', reviewSearchRepos: ['mdostal/auriga', 'mdostal/consus'],
-  });
-
-  const prs = backlog.listCandidatePullRequests();
-
-  // repo-listing failed (falls back to just reviewSearchRepos), auriga's own PR list
-  // failed too, but consus's succeeded -- one real PR survives, nothing throws.
-  assert.equal(prs.length, 1);
-  assert.equal(prs[0].number, 9);
-  assert.equal(prs[0]._repo, 'mdostal/consus');
 });
 
 test('setIssueStatus() POSTs {status} and PROPAGATES a failure (write methods never degrade)', async (t) => {
@@ -312,6 +273,30 @@ test('createIssue() falls back to cfg.project as the default target when ticket.
   backlog.createIssue({ title: 'Handed up' });
 
   assert.equal(calls[0].body.project, 'default-project-id');
+});
+
+// ---- setIssueMetadata() ----------------------------------------------------------------
+
+test('setIssueMetadata() PUTs to /api/backlog/issues/:id/metadata with the metadata object', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 204 }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  const result = backlog.setIssueMetadata('PAN-1', { router_assignment_fingerprint: 'abc123', router_assignment_agent: 'codex-dev-1' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'PUT');
+  assert.equal(calls[0].url, `${BASE_URL}/api/backlog/issues/PAN-1/metadata`);
+  assert.deepEqual(calls[0].body, { router_assignment_fingerprint: 'abc123', router_assignment_agent: 'codex-dev-1' });
+  assert.equal(result, null); // 204 no body
+});
+
+test('setIssueMetadata() degrades gracefully (returns null) on failure — never throws', async (t) => {
+  makeCurlMock(t, () => new Error('HTTP 502'));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const backlog = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL });
+
+  assert.equal(backlog.setIssueMetadata('PAN-1', { key: 'value' }), null);
 });
 
 // ---- SpawnAdapter ----------------------------------------------------------------------
@@ -530,10 +515,8 @@ test('selectRoute() degrades to null on failure — never throws', async (t) => 
 });
 
 test('reportRouteOutcome() POSTs to /api/route/:decisionId/outcome after a successful selectRoute()', async (t) => {
-  let selectCount = 0;
   const calls = makeCurlMock(t, ({ url }) => {
     if (url.endsWith('/api/route/select')) {
-      selectCount++;
       return { status: 200, body: { decision_id: 'dec-42', chosen_lane: 'build' } };
     }
     if (url.includes('/api/route/') && url.endsWith('/outcome')) {

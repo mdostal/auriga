@@ -24,6 +24,44 @@ test('computeInflight: only counts actively-running assignments, not assigned-to
   assert.equal(counts['build-b'], 1);
 });
 
+// PANT-846 (GH #240): live on hive three in_progress issues with no running task
+// (two zombies, one parent waiting on staged sub-issues) filled claude-planning's
+// RUNTIME_CAP=3 and the planning lane dispatched nothing for hours.
+test('computeInflight: with runs known, counts an in_progress issue only while it has an active, fresh run (PANT-846)', () => {
+  const now = Date.parse('2026-09-28T03:30:00Z');
+  const hoursAgo = (h) => new Date(now - h * 3600e3).toISOString();
+  const issues = [
+    { identifier: 'LIVE', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'CANCELLED', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'NO-RUNS', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'HUNG', assignee_id: 'B', status: 'running' },
+  ];
+  const runsByIssue = {
+    LIVE: [{ status: 'running', started_at: hoursAgo(0.1) }],
+    CANCELLED: [{ status: 'cancelled', created_at: hoursAgo(24), completed_at: hoursAgo(24) }],
+    'NO-RUNS': [],
+    HUNG: [{ status: 'running', started_at: hoursAgo(5) }],
+  };
+  const counts = computeInflight(issues, AGENTS, { runsByIssue, now, staleMs: 3600e3 });
+  assert.equal(counts['build-a'], 1, 'only the live run holds a slot');
+  assert.equal(counts['build-b'], 0, 'a run past the zombie stale window is a hang, not work');
+});
+
+test('computeInflight: a parent waiting on non-terminal children holds no slot (PANT-846)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PARENT', assignee_id: 'A', status: 'in_progress' },
+    { id: 'C1', parent_issue_id: 'P', status: 'done' },
+    { id: 'C2', parent_issue_id: 'P', status: 'todo', assignee_id: 'human' },
+    { id: 'Q', identifier: 'DONE-KIDS', assignee_id: 'A', status: 'in_progress' },
+    { id: 'C3', parent_issue_id: 'Q', status: 'cancelled' },
+  ];
+  // No runs known: status fallback, minus the waiting parent.
+  assert.equal(computeInflight(issues, AGENTS)['build-a'], 1);
+  // Runs known: a parent that does have its own live run still counts.
+  const runsByIssue = { PARENT: [{ status: 'running', started_at: new Date().toISOString() }] };
+  assert.equal(computeInflight(issues, AGENTS, { runsByIssue })['build-a'], 2);
+});
+
 test('computeAssignedQueued: counts assigned-but-still-todo issues (observability only)', () => {
   const issues = [{ assignee_id: 'A', status: 'todo' }, { assignee_id: 'A', status: 'in_progress' }];
   const counts = computeAssignedQueued(issues, AGENTS);
@@ -48,6 +86,27 @@ const REVIEW_CFG = { REVIEW_LANE: ['auriga-review'], AGENTS: { 'auriga-review': 
 test('computeReviewInflight: counts in_review issues currently assigned to a review-lane agent', () => {
   const counts = computeReviewInflight([{ assignee_id: 'RV' }, { assignee_id: 'other' }], REVIEW_CFG);
   assert.equal(counts['auriga-review'], 1);
+});
+
+// ---- PANT-737: seed-labeled tickets must not hold inflight slots -----------
+
+test('computeReviewInflight: seed-labeled (idea) issue assigned to review agent does not count — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'idea' }] };
+  const normal = { assignee_id: 'RV', labels: [] };
+  const counts = computeReviewInflight([seed, normal], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1, 'only the non-seed issue counts');
+});
+
+test('computeReviewInflight: not-a-seed label overrides idea — issue counts normally', () => {
+  const notSeed = { assignee_id: 'RV', labels: [{ name: 'idea' }, { name: 'not-a-seed' }] };
+  const counts = computeReviewInflight([notSeed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1);
+});
+
+test('computeReviewInflight: needs-plan label also excludes from inflight — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'needs-plan' }] };
+  const counts = computeReviewInflight([seed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 0);
 });
 
 test('chooseReviewAgent: null when the whole lane is at capacity', () => {

@@ -16,9 +16,13 @@ import {
 } from './pr-matching.mjs';
 import {
   computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
-  computeReviewInflight, chooseReviewAgent,
+  agentCapacityReason, computeReviewInflight, chooseReviewAgent, laneCandidates,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
+import {
+  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isSeedByLabel, isReviewDispatchSkipped,
+} from './review-eligibility.mjs';
+import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun };
 export { storyKey, slugKey, descStoryDeps, descStoryId };
@@ -31,27 +35,10 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
+export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
 
-// Ignore smoke/scratch/verification tickets by title.
-export function isSmokeScratch(title = '') {
-  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
-}
-
-const HUMAN_TODO_LABEL = 'human-todo';
-
-// Priority-1 filter: true when an issue must never enter the agent dispatch
-// pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
-// — because only a human can complete it. Excluded issues belong in the
-// separate human queue instead (see scripts/export-human-queue.mjs).
-export function isHumanTodo(issue, cfg) {
-  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
-  if (labels.includes(HUMAN_TODO_LABEL)) return true;
-  const waitingOn = issue.metadata && issue.metadata.waiting_on;
-  if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
-  const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
-  const w = waitingOn.trim().toLowerCase();
-  return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
-}
+// isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
+// ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
 
 // Why an issue was routed to the human queue — 'label' or 'waiting_on'.
 // Callers should only call this once isHumanTodo(issue, cfg) is true.
@@ -133,6 +120,28 @@ export function isSeed(issue, allIssues = []) {
   return isTopLevel && isChildless;
 }
 
+// The planning lane every seed routes to (PAN-6646).
+export const PLANNING_AGENT = 'minerva-dev';
+
+// Does this tenant's config include the planning lane? A cfg with no AGENTS map
+// at all (bare {} in pure-function tests/callers) is "unknown" and keeps the
+// historical behaviour, so only a real agent roster lacking minerva-dev counts.
+export function hasPlanningAgent(cfg) {
+  return !cfg || !cfg.AGENTS || !!cfg.AGENTS[PLANNING_AGENT];
+}
+
+// isSeed, scoped to what this tenant can actually do with a seed (PANT-772).
+// The top-level+childless heuristic exists to steer un-planned work to Minerva;
+// on a tenant with no planning agent (e.g. firefly-events/Flayr) that steer
+// has nowhere to go and silently disabled every top-level ticket. There, a
+// heuristic-only seed is just a build ticket. Explicitly-labeled seeds
+// ('idea'/'needs-plan'/'consus-idea') stay seeds — a human asked for planning.
+export function isSeedForTenant(issue, allIssues = [], cfg) {
+  if (!isSeed(issue, allIssues)) return false;
+  if (hasPlanningAgent(cfg)) return true;
+  return isSeedByLabel(issue);
+}
+
 // Is this issue explicitly marked for hand-up to this instance's registered
 // parent (t015 — orchestrator hand-up)? Mirrors isSeed()'s label-detection
 // shape exactly: a `hand-up` label is the durable, human/Minerva-applied
@@ -151,6 +160,45 @@ export function isSeed(issue, allIssues = []) {
 export function isHandUp(issue) {
   const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
   return labelNames.includes('hand-up');
+}
+
+// Where does this todo go (t016 — orchestrator hand-down)? Pure: a project's
+// route is either an agent lane (today's behaviour, and the implicit default
+// for every registry entry without a `route`) or a registered child board
+// (cfg.PROJECT_ROUTE, from projects.json). `childBoards` is
+// orchestrator-topology.mjs's resolveChildBoardConfigs() output: every
+// registered child id -> its reachability config, or null when it has none.
+//
+// Returns one of:
+//   { kind: 'agent', lane }               — dispatch to a local agent lane
+//   { kind: 'child', childId, board }     — create it on that child's board
+//   { kind: 'human', reason, childId }    — the project names a child that is
+//     not registered in the topology ('unknown-child') or has no reachability
+//     config ('child-unreachable'). The config is rejected: the issue is held
+//     for a human (the same human-todo path an unroutable ticket takes) and is
+//     NEVER dispatched to an agent — falling back to the agent lane would
+//     silently build work the operator explicitly routed elsewhere.
+export function resolveRouteTarget(issue, cfg, childBoards = {}) {
+  const route = cfg.PROJECT_ROUTE && cfg.PROJECT_ROUTE[issue.project_id];
+  if (!route || route.kind !== 'child') {
+    return { kind: 'agent', lane: (cfg.PROJECT_LANE && cfg.PROJECT_LANE[issue.project_id]) || cfg.DEFAULT_LANE };
+  }
+  const { childId } = route;
+  if (!childId || !childBoards || !Object.hasOwn(childBoards, childId)) {
+    return { kind: 'human', reason: 'unknown-child', childId: childId || null };
+  }
+  const board = childBoards[childId];
+  if (!board) return { kind: 'human', reason: 'child-unreachable', childId };
+  return { kind: 'child', childId, board };
+}
+
+// Does this issue's project route to a child board at all (valid or not)?
+// Used by passes other than selectAssignments that would otherwise assign an
+// agent directly (cascade dispatch) — a child-routed project's todos are
+// never built locally.
+export function isChildRouted(issue, cfg) {
+  const route = cfg && cfg.PROJECT_ROUTE && cfg.PROJECT_ROUTE[issue.project_id];
+  return !!(route && route.kind === 'child');
 }
 
 // Dependency gate: is this issue's declared depends_on satisfied enough to dispatch?
@@ -175,29 +223,69 @@ export function depsSatisfied(issue, statusById) {
   return true;
 }
 
-// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
-// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
-// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
-// load that still has capacity.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set()) {
-  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
-  const eligible = lane.filter((name) =>
-    agentHasCapacity(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) &&
-    !blockedRuntimes.has(cfg.AGENTS[name]?.runtime)
-  );
-  if (!eligible.length) return null;
-  // Prefer lane order but break by lowest projected load.
+// Rank a lane: drop agents without capacity, on a blocked runtime or over the
+// per-cycle cap, then prefer lowest current+projected load, lane order breaking
+// ties. Returns { chosen, candidates } (candidates: see laneCandidates).
+function rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent) {
+  const skips = new Map(lane.map((name) => [name,
+    agentCapacityReason(name, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected) ||
+    (blockedRuntimes.has(cfg.AGENTS[name]?.runtime) ? 'runtime_blocked' : null) ||
+    ((projected.perAgentCycle?.[name] || 0) >= maxPerAgent ? 'per_cycle_per_agent_cap' : null),
+  ]));
+  const eligible = lane.filter((name) => skips.get(name) === null);
   eligible.sort((x, y) => {
     const lx = (inflight[x] || 0) + (projected.perAgent[x] || 0);
     const ly = (inflight[y] || 0) + (projected.perAgent[y] || 0);
     if (lx !== ly) return lx - ly;
     return lane.indexOf(x) - lane.indexOf(y);
   });
-  return eligible[0];
+  const chosen = eligible[0] ?? null;
+  return { chosen, candidates: laneCandidates(lane, chosen, skips, cfg.AGENTS) };
+}
+
+// Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
+// (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
+// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
+// load that still has capacity.
+// trace (optional object): filled with { reason, candidates } for the decision
+// record (PANT-816) — the lane it routed by and every agent it considered.
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null) {
+  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
+  const { chosen, candidates } = rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
+  if (trace) {
+    trace.reason = isHive ? 'hive_story' : (cfg.PROJECT_LANE[projectId] ? 'project_lane' : 'default_lane');
+    trace.candidates = candidates;
+  }
+  return chosen;
+}
+
+// Choose the best agent for an issue, consulting TREE_AGENT_ATTACHMENTS first.
+// Hive stories always bypass tree-path routing (HIVE_LANE is unconditional).
+// Falls back to chooseAgentForProject when no tree-path attachment matches or
+// all matched agents are at capacity or on blocked runtimes. `trace` as for
+// chooseAgentForProject; a fallback keeps the rejected tree-path candidates.
+export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null) {
+  if (isHiveStory(issue)) {
+    return chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, true, blockedRuntimes, maxPerAgent, trace);
+  }
+  const treeLane = getEligibleAgentsByTreePath(issue, cfg);
+  let treeCandidates = [];
+  if (treeLane.length) {
+    const tree = rankLane(treeLane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
+    if (tree.chosen) {
+      if (trace) { trace.reason = 'tree_attachment'; trace.candidates = tree.candidates; }
+      return tree.chosen;
+    }
+    treeCandidates = tree.candidates;
+  }
+  const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent, trace);
+  if (trace && treeCandidates.length) trace.candidates = [...treeCandidates, ...trace.candidates];
+  return agent;
 }
 
 // Select this cycle's assignments from the board.
-// Returns [{ identifier, issueId, projectId, agent, lane, runtime }].
+// Returns [{ identifier, issueId, projectId, agent, lane, runtime, decisionReason, candidates, ... }]
+// (decisionReason + candidates feed the router's decision record, PANT-816).
 // Respects per-agent inflight caps, per-runtime caps, and small per-cycle batch caps.
 // blockedRuntimes: Set of runtime names to skip this cycle (rate-limited lanes).
 function agentNameForAssignee(assigneeId, agents) {
@@ -228,7 +316,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   const exclude = opts.exclude || new Set();
 
   const runtimeInflight = computeRuntimeInflight(inflight, cfg.AGENTS);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...opts.priorAgentCycleAssigns } };
 
   // issueId -> lowercased status, over the WHOLE scanned board (not just candidates) so the
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
@@ -242,6 +330,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // (PAN-8245: content changes trigger reassignment; unchanged router assignments noop).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
+    .filter(isPlainTodo) // PANT-931: a backlog/blocked column mapped onto todo is parked, not work
     .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
@@ -259,8 +348,6 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     return (a.number || 0) - (b.number || 0);
   });
 
-  const PLANNING_AGENT = 'minerva-dev';
-
   // t015 — orchestrator hand-up: decisions are returned as DATA (never
   // acted on here — core.mjs stays pure/no-I/O, same invariant t011's
   // decomposition preserved everywhere else). auriga-router.mjs's cycle()
@@ -270,41 +357,80 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // every existing caller that treats this return value as a plain array
   // (`.length`, `for...of`, etc.) is unaffected.
   const handUps = [];
+  // PANT-772: seeds seen on a tenant with no planning agent — returned as data
+  // (like handUps) so the router can log them instead of skipping silently.
+  // fallback=true: heuristic-only seed, routed to the build lane below.
+  // fallback=false: explicitly-labeled seed, held (nothing can plan it here).
+  const seedNoPlanning = [];
+  // t016 — orchestrator hand-down: same decisions-as-data contract as
+  // handUps. handDowns are created on a child board by the router;
+  // handDownRejected are held for a human with a logged warning.
+  const handDowns = [];
+  const handDownRejected = [];
 
   const chosen = [];
   for (const issue of candidates) {
     if (chosen.length >= maxTotal) break;
 
-    // Un-planned seeds MUST route to the Minerva planning lane, never a build
-    // lane — and if the planning lane has no capacity this cycle, skip the
-    // issue entirely rather than falling back to chooseAgentForProject.
-    if (isSeed(issue, issues) && !isHiveStory(issue)) {
-      if (!cfg.AGENTS[PLANNING_AGENT]) continue;
-      if (!agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) continue;
-      const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
-      if (blockedRuntimes.has(runtime)) continue;
-      if ((projected.perAgentCycle[PLANNING_AGENT] || 0) >= maxPerAgent) continue;
-      const seedDecision = assignmentDecision(issue, PLANNING_AGENT, cfg, opts);
-      if (seedDecision.action === 'noop') continue;
-
-      projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
-      projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
-      projected.perAgentCycle[PLANNING_AGENT] = (projected.perAgentCycle[PLANNING_AGENT] || 0) + 1;
-
-      chosen.push({
-        identifier: issue.identifier,
-        issueId: issue.id,
-        projectId: issue.project_id,
-        lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
-        agent: PLANNING_AGENT,
-        runtime,
-        assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
-        assignmentReason: seedDecision.reason,
-      });
+    // Explicit project -> child-board routing wins over every agent route
+    // (seed/planning included): the child instance owns that work end to end.
+    const target = resolveRouteTarget(issue, cfg, opts.childBoards);
+    if (target.kind === 'child') {
+      handDowns.push({ identifier: issue.identifier, issueId: issue.id, childId: target.childId, board: target.board });
+      continue;
+    }
+    if (target.kind === 'human') {
+      handDownRejected.push({ identifier: issue.identifier, issueId: issue.id, childId: target.childId, reason: target.reason });
       continue;
     }
 
-    const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, isHiveStory(issue), blockedRuntimes);
+    // Un-planned seeds MUST route to the Minerva planning lane, never a build
+    // lane — and if the planning lane has no capacity this cycle, skip the
+    // issue entirely rather than falling back to chooseAgentForProject.
+    // PANT-518: when the planning lane is unavailable, fall through to the
+    // isHandUp check (below) rather than always continuing — a seed with the
+    // hand-up label and no planning route must escalate, not silently defer.
+    const seed = isSeed(issue, issues) && !isHiveStory(issue);
+    if (seed && !hasPlanningAgent(cfg)) {
+      seedNoPlanning.push({ identifier: issue.identifier, issueId: issue.id, fallback: !isSeedByLabel(issue) });
+    }
+    if (seed && isSeedForTenant(issue, issues, cfg)) {
+      let seedHandled = false;
+      if (cfg.AGENTS[PLANNING_AGENT]
+          && agentHasCapacity(PLANNING_AGENT, cfg.AGENTS, cfg.RUNTIME_CAP, inflight, runtimeInflight, projected)) {
+        const runtime = cfg.AGENTS[PLANNING_AGENT].runtime;
+        if (!blockedRuntimes.has(runtime) && (projected.perAgentCycle[PLANNING_AGENT] || 0) < maxPerAgent) {
+          const seedDecision = assignmentDecision(issue, PLANNING_AGENT, cfg, opts);
+          if (seedDecision.action !== 'noop') {
+            projected.perAgent[PLANNING_AGENT] = (projected.perAgent[PLANNING_AGENT] || 0) + 1;
+            projected.perRuntime[runtime] = (projected.perRuntime[runtime] || 0) + 1;
+            projected.perAgentCycle[PLANNING_AGENT] = (projected.perAgentCycle[PLANNING_AGENT] || 0) + 1;
+            chosen.push({
+              identifier: issue.identifier,
+              issueId: issue.id,
+              projectId: issue.project_id,
+              lane: cfg.PROJECT_NAMES[issue.project_id] || issue.project_id,
+              agent: PLANNING_AGENT,
+              runtime,
+              assignmentFingerprint: assignmentFingerprint(issue, PLANNING_AGENT, cfg, opts),
+              assignmentReason: seedDecision.reason,
+              decisionReason: 'seed_planning',
+              candidates: [{ agent: PLANNING_AGENT, runtime, selected: true }],
+            });
+          }
+          seedHandled = true; // dispatched or noop — either way the issue is handled
+        }
+      }
+      // Seeds never fall through to build-lane dispatch. When the planning
+      // lane had no route, check hand-up before skipping this cycle.
+      if (!seedHandled && isHandUp(issue) && opts.parentBoardConfig) {
+        handUps.push({ identifier: issue.identifier, issueId: issue.id, reason: 'no-local-route' });
+      }
+      continue;
+    }
+
+    const trace = {};
+    const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent, trace);
     if (!agent) {
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
@@ -318,10 +444,8 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       continue;
     }
     const runtime = cfg.AGENTS[agent].runtime;
-    if (blockedRuntimes.has(runtime)) continue;
     const decision = assignmentDecision(issue, agent, cfg, opts);
     if (decision.action === 'noop') continue;
-    if ((projected.perAgentCycle[agent] || 0) >= maxPerAgent) continue;
 
     // commit projection
     projected.perAgent[agent] = (projected.perAgent[agent] || 0) + 1;
@@ -337,9 +461,14 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
       runtime,
       assignmentFingerprint: assignmentFingerprint(issue, agent, cfg, opts),
       assignmentReason: decision.reason,
+      decisionReason: trace.reason,
+      candidates: trace.candidates,
     });
   }
   chosen.handUps = handUps;
+  chosen.handDowns = handDowns;
+  chosen.handDownRejected = handDownRejected;
+  chosen.seedNoPlanning = seedNoPlanning;
   return chosen;
 }
 
@@ -348,13 +477,13 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 // (see classifyRun) is the only signal. Only considers issues currently
 // in_progress, so a re-scan after the transition naturally stops re-firing
 // (the issue is no longer in the input set) — idempotent by construction.
-export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, allIssues = []) {
+export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue;
+    if (isSeedByLabel(i)) continue; // label-only: heuristic fires on any top-level in_progress story
     const lr = latestRun(runsByIssue[i.identifier] || []);
     if (!lr) continue;
     if (classifyRun(lr, now).done) {
@@ -379,9 +508,19 @@ export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}, allIssu
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // seeds have planning PRs that must not advance the epic to done
+    if (isSeedForTenant(i, allIssues, cfg)) continue; // seeds have planning PRs that must not advance the epic to done
     const prs = prsByIssue[i.identifier] || [];
-    const merged = prs.some(isPrMerged);
+    // AUTHORITATIVE PATH (PANT-373): when the story records its OWN PR url, ONLY
+    // that exact PR being merged can advance it. A stray merged PR that merely
+    // matched the story (identifier/short key in its title, branch or body) must
+    // not advance it while its own PR is still open — detectFalseDone would demote
+    // it straight back (it trusts ownPrUrl), thrashing done<->in_review every cycle.
+    // Mirrors detectFalseDone's ownPrUrl path so the two directions are symmetric.
+    // FALLBACK (no recorded own PR): any matched merged PR counts (prior behavior).
+    const own = ownPrUrl(i);
+    const merged = own
+      ? prs.some((p) => isPrMerged(p) && samePrUrl(p.url || p.html_url, own))
+      : prs.some(isPrMerged);
     if (merged) {
       actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'advance-done' });
     }
@@ -404,7 +543,7 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
   return false;
 }
 
-export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
+export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), _allIssues = []) {
   const actions = [];
   // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
   const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
@@ -412,7 +551,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // never zombie-dispatch a seed to a build lane
+    if (isSeedByLabel(i)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
@@ -510,6 +649,20 @@ export function reviewEligible(_issue = {}) {
 // computeReviewInflight/chooseReviewAgent now live in ./capacity.mjs —
 // imported + re-exported above (t011 decomposition).
 
+// When an in_review ticket started waiting for review (epoch ms), for oldest-first
+// review dispatch (PANT-921). A ticket reaches in_review when its build run completes,
+// and any later review run restarts its wait, so this is the latest run timestamp,
+// falling back to created_at for a ticket with no runs. Deliberately NOT updated_at:
+// any comment or label write advances it (PANT-440). Returns Infinity when no timestamp
+// is known, so an undated ticket sorts after dated ones and ties keep caller order.
+export function reviewWaitingSinceMs(issue = {}, runs = []) {
+  const ms = Math.max(
+    toMs(issue.created_at),
+    ...runs.map((r) => toMs(r.completed_at || r.started_at || r.dispatched_at || r.created_at)),
+  );
+  return ms > 0 ? ms : Infinity;
+}
+
 // Decide this cycle's review/ship dispatches from the in_review board.
 // runsByIssue: { [identifier]: runs[] } for the in_review issues.
 // Returns [{ identifier, issueId, projectId, agent, action, reason }] where
@@ -528,14 +681,27 @@ export function reviewEligible(_issue = {}) {
 export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInflight, opts = {}) {
   const now = opts.now ?? Date.now();
   const maxTotal = opts.maxTotal ?? (cfg.CAPS && cfg.CAPS.perCycleReview) ?? 1;
-  const blockedRuntimes = opts.blockedRuntimes ?? new Set();
-  const allIssues = opts.allIssues || [];
+  const blockedRuntimes = (opts && opts.blockedRuntimes) || new Set();
+  // PANT-814: perCyclePerAgent applies to review agents too, counting what earlier
+  // passes this cycle already dispatched (opts.priorAgentCycleAssigns).
+  const maxPerAgent = opts.maxPerAgent ?? (cfg.CAPS && cfg.CAPS.perCyclePerAgent) ?? Infinity;
+  const perAgentCycle = { ...opts.priorAgentCycleAssigns };
   const staleMs = (cfg.CAPS && cfg.CAPS.zombieStaleMs) ?? Infinity;
   const lane = cfg.REVIEW_LANE || [];
   if (!lane.length) return [];
   const reviewAgentIds = new Set(lane.map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean));
   const idToName = {};
   for (const n of lane) { const a = cfg.AGENTS[n]; if (a) idToName[a.id] = n; }
+
+  // PANT-658: agents that used to be in REVIEW_LANE. Run history alone can't tell a former
+  // reviewer from the builder that is still assigned after the build->review handoff, so
+  // this needs an explicit positive signal (cfg.FORMER_REVIEW_AGENT_IDS). Their runs count
+  // as review-phase runs (fairness + give-up cap carry over across a lane change), but an
+  // issue they hold is re-dispatched to a CURRENT lane reviewer, never rerun on them.
+  const formerReviewIds = new Set((cfg.FORMER_REVIEW_AGENT_IDS || []).filter((id) => id && !reviewAgentIds.has(id)));
+  const reviewPhaseIds = new Set([...reviewAgentIds, ...formerReviewIds]);
+  const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
+  const reviewRunsOf = (runs) => runs.filter((r) => reviewPhaseIds.has(r.agent_id)).length;
 
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
@@ -550,35 +716,45 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   // runsByIssue already gives us each issue's own accumulated run count for
   // free — a natural, stateless "how many turns has this ticket already had"
   // signal, no new persisted state and no GitHub call required. Below the
-  // fairness threshold, candidates are considered in the caller's given order,
-  // unchanged (Array#sort is stable). At/over it, a ticket is deprioritized
+  // fairness threshold, candidates are considered oldest-waiting first (PANT-921,
+  // below). At/over it, a ticket is deprioritized
   // behind every ticket still under threshold; it's only reconsidered once
   // nothing under-threshold qualifies this cycle, so it's slowed, never
   // starved outright, while every other real in_review ticket gets first
   // crack at the slot.
   const fairnessMax = (cfg.CAPS && cfg.CAPS.reviewFairnessMaxAttempts) ?? 3;
-  // PANT-531: count only review-phase runs (agent_id in reviewAgentIds). Build-phase runs
+  // PANT-531: count only review-phase runs (current or former review agents). Build-phase runs
   // must not inflate this counter — a story needing 3+ build iterations would otherwise be
   // deprioritized the moment it enters in_review, before any review run has ever fired.
-  const attemptsOf = (i) => (runsByIssue[i.identifier] || []).filter((r) => reviewAgentIds.has(r.agent_id)).length;
+  const attemptsOf = (i) => reviewRunsOf(runsByIssue[i.identifier] || []);
+  // PANT-921 (GH #242): within each fairness tier, OLDEST-WAITING FIRST. The board
+  // lists in_review newest-first, so walking it in caller order with one review slot
+  // handed every slot to the newest arrival and a steady inflow starved the tail
+  // forever (live: PANT-697 sat 25h unreviewed while the lane ran 10 reviews/hour).
+  // Oldest-first bounds the wait: new arrivals queue behind it, so a ticket is served
+  // once everything ahead of it has had its turn.
+  const waitingSince = {};
+  for (const i of inReviewIssues) waitingSince[i.identifier] = reviewWaitingSinceMs(i, runsByIssue[i.identifier] || []);
   const ordered = [...inReviewIssues].sort((a, b) => {
     const ea = attemptsOf(a) >= fairnessMax ? 1 : 0;
     const eb = attemptsOf(b) >= fairnessMax ? 1 : 0;
-    return ea - eb;
+    if (ea !== eb) return ea - eb;
+    const wa = waitingSince[a.identifier], wb = waitingSince[b.identifier];
+    return wa === wb ? 0 : (wa < wb ? -1 : 1);
   });
 
   const actions = [];
-  // PANT-667: give-up-review is an administrative no-op (sets blocked + posts comment),
-  // not a real dispatch — collect separately so exhausted issues never consume a
-  // perCycleReview budget slot and starve legitimately reviewable issues behind them.
+  // PANT-584: give-up-review is an administrative action, not a dispatch — it must
+  // not consume a perCycleReview slot. Collect give-ups separately so they don't
+  // increment actions.length and starve real dispatches. Mirrors how zombie give-ups
+  // bypass the maxAssign counter in the router's zombie loop.
   const giveUps = [];
   const projected = {};
   for (const i of ordered) {
     if (actions.length >= maxTotal && !reviewAgentIds.has(i.assignee_id)) continue; // PANT-675: still evaluate already-assigned issues (potential give-ups) after budget consumed
-    if (isSmokeScratch(i.title)) continue;
-    if (isAgentParked(i)) continue;
-    if (isHumanTodo(i, cfg)) continue; // human controls this review
-    if (isSeed(i, allIssues)) continue; // PANT-625: seeds have no PR to review
+    // smoke / parked / human-todo / seed. Shared with computeReviewInflight so a
+    // skipped ticket can never hold a review slot (PANT-737, PANT-843).
+    if (isReviewDispatchSkipped(i, cfg)) continue;
     const runs = runsByIssue[i.identifier] || [];
 
     if (reviewAgentIds.has(i.assignee_id)) {
@@ -592,9 +768,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
       // give-up-review on its very first review dispatch. The give-up action sets the issue
       // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
-      const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
-      const reviewRunCount = runs.filter((r) => reviewAgentIds.has(r.agent_id)).length;
-      if (reviewRunCount >= reviewMaxAttempts) {
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
         giveUps.push({
           identifier: i.identifier, issueId: i.id, projectId: i.project_id,
           agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
@@ -603,7 +777,9 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       }
       const rerAgentName = idToName[i.assignee_id];
       const rerRuntime = rerAgentName && cfg.AGENTS?.[rerAgentName]?.runtime;
-      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-666: don't re-dispatch into a blocked runtime
+      if (rerRuntime && blockedRuntimes.has(rerRuntime)) continue; // PANT-588/PANT-666: don't consume the slot re-dispatching into a blocked runtime
+      if ((perAgentCycle[rerAgentName] || 0) >= maxPerAgent) continue; // PANT-814
+      perAgentCycle[rerAgentName] = (perAgentCycle[rerAgentName] || 0) + 1;
       actions.push({
         identifier: i.identifier, issueId: i.id, projectId: i.project_id,
         agent: rerAgentName, action: 'rerun-review', reason: 'review-stale',
@@ -611,17 +787,30 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       continue;
     }
 
+    if (formerReviewIds.has(i.assignee_id)) {
+      if (hasActiveRun(runs, now, staleMs)) continue; // let the former reviewer's live run finish
+      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
+        giveUps.push({
+          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+          agent: `former-review:${i.assignee_id}`, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
+        });
+        continue;
+      }
+    }
+
     // not yet under review — pick a review agent with free capacity. Dispatch is
     // status-only now (reviewEligible no longer checks GitHub) — see
     // reviewEligible's own doc comment for why.
     if (!reviewEligible(i)) continue;
 
-    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes);
+    const trace = {};
+    const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes, { perAgentCycle, maxPerAgent }, trace);
     if (!agent) continue;
     projected[agent] = (projected[agent] || 0) + 1;
+    perAgentCycle[agent] = (perAgentCycle[agent] || 0) + 1;
     actions.push({
       identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-      agent, action: 'dispatch-review', reason: 'needs-review',
+      agent, action: 'dispatch-review', reason: 'needs-review', candidates: trace.candidates,
     });
   }
   return [...giveUps, ...actions];
@@ -663,7 +852,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 export function descDepsSatisfied(issue, allIssues = []) {
   const slugs = descStoryDeps(issue);
   if (!slugs.length) return true;
-  const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+  const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
   for (const slug of slugs) {
     const slugLower = slug.toLowerCase();
     let dep = siblings.find((s) => descStoryId(s) === slugLower);
@@ -699,7 +888,7 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i.title)) continue;
-    if (isSeed(i, allIssues)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
+    if (isSeedForTenant(i, allIssues, cfg)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
@@ -740,13 +929,13 @@ export function samePrUrl(a, b) {
   return !!a && !!b && norm(a) === norm(b);
 }
 
-export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = []) {
+export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = [], mergedPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (allIssues.length > 0 && isSeed(i, allIssues)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
+    if (allIssues.length > 0 && isSeedForTenant(i, allIssues, cfg)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
     // AUTHORITATIVE PATH (collision-proof): when the story records its OWN PR url,
     // ONLY that exact PR being still open can demote it. If its own PR is merged or
     // closed (absent from the gathered open-PR set) the story is truly shipped and
@@ -788,7 +977,9 @@ export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = 
     // to done off the merged PR while detectFalseDone immediately demotes it again off
     // the unrelated open one, and the two detectors thrash done<->in_review forever.
     // A merged identity-matching PR means the story is genuinely done -> skip the demotion.
-    const mergedPr = (openPrs || []).find((p) => {
+    // PANT-656: an open-only `openPrs` never holds merged PRs, so merged ones must come in
+    // via `mergedPrs`; `openPrs` is still searched in case the caller passed a mixed-state list.
+    const mergedPr = [...(mergedPrs || []), ...(openPrs || [])].find((p) => {
       if (!isPrMerged(p)) return false;
       if (!prIdentityMatchesStory(p, i)) return false;
       return repoQualifies(p);
@@ -824,8 +1015,12 @@ export function detectParentDone(issues, cfg = {}) {
     if (isSmokeScratch(parent.title)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
-    if (isSeed(parent, issues)) continue; // PANT-627: seed epics with planning labels must not auto-close
     const pst = (parent.status || '').toLowerCase();
+    // PANT-627: a seed epic must not auto-close mid-planning (more stages may still
+    // be added). PANT-930 (GH #244): once the planner moves the seed to in_review it
+    // has declared the plan finished, and seeds are skipped by the review lane
+    // (PANT-625/737), so nothing else would ever close it. Roll that one up.
+    if (isSeed(parent, issues) && pst !== ISSUE_STATUS.IN_REVIEW) continue;
     if (isTerminalIssueStatus(pst)) continue; // already closed
     if (!kids.length) continue;
     const allDone = kids.every((k) => isTerminalIssueStatus((k.status || '').toLowerCase()));
@@ -883,7 +1078,7 @@ export function dependsOnAny(issue, completedIds, allIssues = []) {
   }
   const slugs = descStoryDeps(issue);
   if (slugs.length) {
-    const siblings = allIssues.filter((s) => s.parent_issue_id && s.parent_issue_id === issue.parent_issue_id && s.id !== issue.id);
+    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
     for (const slug of slugs) {
       const dep = resolveDepSibling(slug, siblings);
       if (dep && completedIds.has(dep.id)) return true;
@@ -913,11 +1108,17 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
   for (const i of issues) {
     const st = (i.status || '').toLowerCase();
     if (st !== ISSUE_STATUS.TODO && st !== ISSUE_STATUS.BLOCKED) continue;
+    // Already assigned+queued: the cascade path would re-route it via
+    // chooseAgentForProject and reassign it to whichever lane agent has room.
+    // Kept over main's PANT-662 removal (sync/main-into-dev); an idle assigned
+    // todo is recovered by detectAssignedIdle instead, on its CURRENT assignee.
+    if (i.assignee_id && st === ISSUE_STATUS.TODO) continue;
     if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
     if (isSmokeScratch(i.title)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, issues)) continue; // seeds must route to planning lane, never cascade-dispatch to build
+    if (isSeedByLabel(i)) continue; // seeds belong to the planning lane — never cascade to build
+    if (isChildRouted(i, cfg)) continue; // t016: handed down to a child board, never built here
     if (!hasDeclaredDeps(i)) continue;
     if (!dependsOnAny(i, completedIds, issues)) continue;
     if (!allDepsSatisfied(i, statusById, issues)) continue;
@@ -931,23 +1132,42 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 // status as the formal "send back" signal; the router owns the transition to
 // todo + unassign (the router must never rely solely on agent free-text for a
 // status mutation the state machine should handle).
-export function detectChangesRequested(changesRequestedIssues, cfg = {}, allIssues = []) {
+export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of changesRequestedIssues) {
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
-    if (isSeed(i, allIssues)) continue; // PANT-632: seeds in changes_requested must not re-enter build pool
+    if (isSeedByLabel(i)) continue; // never override a human changes_requested on a labeled planning seed
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'changeback-to-todo' });
   }
   return actions;
 }
 
-// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
-// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
-export function isAgentParked(issue = {}) {
-  const r = issue && issue.metadata && issue.metadata.blocked_reason;
-  return typeof r === 'string' && r.trim() !== '';
+const NEEDS_DECISION = 'needs-decision';
+const normStatus = (v) => (typeof v === 'string' ? v.trim().toLowerCase().replace(/[\s_]+/g, '-') : '');
+
+// PANT-844: true when an issue is waiting on a human decision — labelled
+// `needs-decision`, or carrying that status (custom workflows surface it via
+// status / status_name). Only a human answer can move these forward, so
+// re-running the assignee just burns a session that re-reports "nothing changed".
+export function isAwaitingDecision(issue = {}) {
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.includes(NEEDS_DECISION)) return true;
+  return [issue.status, issue.status_name].some((v) => normStatus(v) === NEEDS_DECISION);
+}
+
+// PANT-844: assigned-idle recovery is for genuine `todo` work only. A custom
+// workflow column (e.g. "Backlog" mapped onto the todo category) must not slip
+// through, so status_category must agree and status_name must not name a
+// parked column. status_name is free text ("To Do"), so only known parked
+// names are rejected rather than requiring an exact `todo`.
+const PARKED_STATUS_NAMES = new Set(['backlog', 'blocked', NEEDS_DECISION]);
+function isPlainTodo(issue = {}) {
+  if (normStatus(issue.status) !== 'todo') return false;
+  if (issue.status_category && normStatus(issue.status_category) !== 'todo') return false;
+  if (PARKED_STATUS_NAMES.has(normStatus(issue.status_name))) return false;
+  return true;
 }
 
 // ---- PAN-7492 self-heal: recover assigned-but-idle stories ----
@@ -956,28 +1176,82 @@ export function agentIdSet(agents = {}) {
   return new Set(Object.values(agents).map((a) => a && a.id).filter(Boolean));
 }
 
+// Timestamp -> epoch ms; missing/unparseable values become 0 so they never win a max().
+function toMs(ts) {
+  const ms = ts ? new Date(ts).getTime() : 0;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 // Detect assigned `todo` issues that should have dispatched already but are
 // still idle. These do not count as capacity, so recovery is a separate bounded
 // pass instead of part of route selection.
-export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), allIssues = []) {
+export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), _allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
+  // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
+  // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
+  const reviewLaneIds = new Set(
+    (cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n] && cfg.AGENTS[n].id).filter(Boolean)
+  );
   const actions = [];
   for (const i of todoIssues) {
-    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    if (!isPlainTodo(i)) continue; // PANT-844: never backlog / blocked / custom non-todo columns
     if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
     if (isSmokeScratch(i.title)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
+    if (isAwaitingDecision(i)) continue; // PANT-844: waits on a human answer, not a rerun
     // PANT-643: do NOT guard seeds here — detectAssignedIdle calls rerunIssue (re-enqueues the
     // CURRENT assignment, never re-routes to a build lane), so a seed assigned to minerva-dev
     // must be recovered just like any other assigned-idle issue.
 
-    const touchedAt = i.updated_at || i.created_at;
-    const idleAgeMs = touchedAt ? now - new Date(touchedAt).getTime() : Infinity;
+    // PANT-440: idle age is measured from the LATER of issue creation and the
+    // last run start — explicitly NOT i.updated_at. Any write (a comment, a
+    // label, the router's own side-effects) advances updated_at, so using it
+    // let a genuine dead-zone reset its stale timer forever. updated_at is only
+    // a fallback for records that carry no created_at.
+    const runs = runsByIssue[i.identifier] || [];
+    const baseTime = Math.max(
+      toMs(i.created_at || i.updated_at),
+      ...runs.map((r) => toMs(r.created_at || r.dispatched_at || r.started_at)),
+    );
+    const idleAgeMs = baseTime > 0 ? now - baseTime : Infinity;
     if (idleAgeMs < staleMs) continue;
 
-    const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, staleMs)) continue;
+
+    if (reviewLaneIds.has(i.assignee_id)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'review-lane-on-todo',
+      });
+      continue;
+    }
+
+    // PANT-436: a hive story on a non-hive-capable lane (codex/opencode) can't
+    // run /hive:execute — rerunning it just burns a slot. Unassign so fresh
+    // routing sends it to the hive lane (detectZombies only sees in_progress,
+    // so a plain skip would leave it stuck in todo).
+    if (isHiveStory(i) && !isHiveCapableAssignee(i.assignee_id, cfg)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: 'hive-on-noncapable-lane',
+      });
+      continue;
+    }
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({
@@ -1037,7 +1311,7 @@ export function limitAssignedIdleRecoveries(actions, cfg, opts = {}) {
   const inflight = opts.inflight || {};
   const runtimeCap = opts.runtimeCap || cfg.RUNTIME_CAP || {};
   const runtimeInflight = opts.runtimeInflight || computeRuntimeInflight(inflight, agents);
-  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...(opts.priorAgentCycleAssigns || {}) } };
+  const projected = { perAgent: {}, perRuntime: {}, perAgentCycle: { ...opts.priorAgentCycleAssigns } };
 
   const selected = [];
   const skipped = [];

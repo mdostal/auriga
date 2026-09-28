@@ -216,6 +216,12 @@ export const RUNTIME_CAP = _ext.RUNTIME_CAP ?? {
 // `cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE`).
 export const PROJECT_LANE = _ext.PROJECT_LANE ?? registryConfig.PROJECT_LANE;
 
+// Project UUID -> { kind: 'child', childId } (t016 — orchestrator hand-down).
+// A project listed here routes its todos to that child board instead of an
+// agent lane (core.mjs's resolveRouteTarget). Projects absent from this map
+// keep today's agent-lane routing via PROJECT_LANE/DEFAULT_LANE above.
+export const PROJECT_ROUTE = _ext.PROJECT_ROUTE ?? registryConfig.PROJECT_ROUTE;
+
 // Fallback lane for every other project: spread across the two Codex agents.
 // Applies ONLY to non-hive stories — see HIVE_LANE below for capability-aware override.
 export const DEFAULT_LANE = _ext.DEFAULT_LANE ?? ['auriga-dev', 'heimdall-dev-codex'];
@@ -235,19 +241,8 @@ export const HIVE_LANE = _ext.HIVE_LANE ?? ['auriga-build', 'mnemosyne-dev', 'vo
 // re-exported there, exactly like the AGENTS split in p2-multica-backlog-adapter).
 export const REVIEW_LANE = _ext.REVIEW_LANE ?? ['auriga-review'];
 
-// GitHub owner whose repos the review lane sweeps for open PRs. The router
-// discovers ALL of this owner's repos live (mca.ghListRepos) each cycle so a new
-// repo (logic-loops, house-finder, ...) is covered the moment it exists, instead
-// of waiting to be hand-added to REVIEW_SEARCH_REPOS below. REVIEW_SEARCH_REPOS
-// remains the static fallback used only when live discovery returns nothing.
-export const REVIEW_REPO_OWNER = _ext.REVIEW_REPO_OWNER ?? 'mdostal';
+// Agent ids that used to be in REVIEW_LANE (PANT-658). Their runs still count toward the
+// review fairness/give-up caps, and in_review issues they hold get re-dispatched to a
+// current lane reviewer. Add an id here whenever a reviewer is dropped from REVIEW_LANE.
+export const FORMER_REVIEW_AGENT_IDS = _ext.FORMER_REVIEW_AGENT_IDS ?? [];
 
-// Baseline repos the review lane searches for a story's open PR. Multica's
-// issue<->PR linkage is empty in practice, so PR discovery goes through gh; the
-// router also adds any explicit target_repo it finds on an in_review story, so
-// this is just the default set of OUR private plugin repos.
-export const REVIEW_SEARCH_REPOS = _ext.REVIEW_SEARCH_REPOS ?? [
-  'mdostal/auriga', 'mdostal/heimdall', 'mdostal/consus',
-  'mdostal/pantheon-orchestrator', 'mdostal/mnemosyne', 'mdostal/votum',
-  'mdostal/cron-maker',
-];

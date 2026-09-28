@@ -30,12 +30,168 @@ npm run once      # node auriga-router.mjs --once
 npm run dry       # --once --dry-run
 
 # supervised (keeps exactly ONE detached router alive, restarts on death)
-nohup ./supervisor.sh >> /tmp/auriga-supervisor.log 2>&1 &
+./supervisor.sh                    # router JSONL -> this terminal / container stdout
+ROUTER_LOG=/tmp/auriga-router.log SUP_LOG=/tmp/auriga-supervisor.log \
+  nohup ./supervisor.sh &          # bare host: keep log files instead
 ```
 
-`supervisor.sh` defaults `DIR` to this directory
-(`~/Documents/work/dostal/code/auriga/src/router`) and `NODE` to the mise
-node 24 install. Override via env if needed.
+`supervisor.sh` is POSIX `sh` (runs unchanged in the alpine image). It uses
+`node` from `PATH` (override with `NODE`; it exits 1 if no node is found) and
+defaults `DIR` to its own directory. Its flock lock defaults to
+`auriga-supervisor.lock` next to the router pidfile
+(`AURIGA_SUPERVISOR_LOCK`). Router output is inherited unless `ROUTER_LOG` is
+set, supervisor messages go to stderr unless `SUP_LOG` is set, and it checks
+liveness every `AURIGA_SUPERVISOR_INTERVAL` seconds (default 30). Requires
+`flock` (busybox provides it on alpine).
+
+## Observability
+
+### Log sink
+
+The router writes one JSON object per line. With `AURIGA_LOG` unset (the
+container default) it writes to **stdout**, so `docker logs` / the collector
+sees every event. With `AURIGA_LOG` set it appends to that file instead and
+stdout stays quiet (if the file can't be written, the line falls back to
+stdout). Every record carries `ts` and `event`, plus `instance_id` /
+`tenant_id` when `AURIGA_INSTANCE_ID` / `AURIGA_TENANT_ID` are set
+(multi-tenant mode stamps each tenant's own `tenant_id`).
+
+### `cycle_summary` event
+
+Every `cycle()` ends with exactly one `cycle_summary`, in single- and
+multi-tenant mode (one per tenant cycle there). It is emitted even when a pass
+throws part-way: the summary is marked `aborted` and the error then propagates
+to the existing `cycle_error` / `tenant_cycle_error` line.
+
+```json
+{
+  "ts": "2026-09-27T22:00:00.000Z",
+  "event": "cycle_summary",
+  "duration_ms": 1834,
+  "issues_scanned": 212,
+  "todo": 3, "picked": 2, "assigned": 2,
+  "passes": {
+    "unblocked": 0, "parent_rollup": 0, "in_review": 1, "verified_done": 0,
+    "changeback": 0, "cascade": 0, "zombie": 0, "assigned_idle": 0,
+    "review": 1, "routed": 2, "hand_up": 0
+  },
+  "errors": 0,
+  "aborted": false,
+  "blocked_runtimes": [],
+  "dry_run": false
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `duration_ms` | Wall-clock time of the cycle. |
+| `issues_scanned` | Issues returned by the board scan (0 if the scan itself failed). |
+| `todo` / `picked` / `assigned` | Same as `cycle()`'s return value; `null` when the cycle aborted. |
+| `passes.*` | Decision events emitted per pass, counted whether applied or `dry_run`. `unblocked` / `parent_rollup` / `in_review` / `verified_done` / `changeback` = `advance` events of that kind; `cascade` = `cascade_dispatch`; `zombie` = `zombie` + `zombie_give_up`; `assigned_idle` = `assigned_idle` + `assigned_idle_unassign` + `archived_agent_unassign`; `review` = `review`; `routed` = `route`; `hand_up` = `hand_up`. Mapping: `passForEvent()` in `lib/observability.mjs`. |
+| `errors` | Number of `*_error` events this cycle, plus 1 if the cycle aborted. |
+| `aborted` / `abort_error` | `true` and the error message when a pass threw out of `cycle()`. |
+| `blocked_runtimes` | Runtimes rate-limit-blocked by the end of the cycle (sorted). |
+| `dry_run` | Whether the cycle ran with `--dry-run`. |
+
+A healthy idle router shows `cycle_summary` every `AURIGA_CYCLE_MS` with
+`errors: 0` and zero pass counts. A wedged one stops emitting it.
+
+### `decision` event (decision records)
+
+One `decision` per routing choice a `cycle()` pass makes: a dispatch, a
+cross-board hand-off, or an issue a guard turned away. It exists so routing
+policy can be compared across runs (VISION.md ②, "metrics at every decision").
+The schema is versioned by `schema`. A consumer should reject versions it
+doesn't know, and any breaking change bumps the version. The constants and
+enums live in `lib/decisions.mjs`.
+
+```json
+{
+  "ts": "2026-09-27T22:00:00.000Z",
+  "event": "decision",
+  "schema": 1,
+  "tenant_id": "dostal-tech",
+  "instance_id": "auriga-1",
+  "identifier": "PANT-816",
+  "pass": "build",
+  "action": "assign",
+  "agent": "auriga-build",
+  "runtime": "claude",
+  "lane": "Auriga",
+  "reason": "project_lane",
+  "candidates": [
+    { "agent": "auriga-dev", "runtime": "codex", "selected": false, "skip": "runtime_blocked" },
+    { "agent": "auriga-build", "runtime": "claude", "selected": true }
+  ],
+  "caps": {
+    "agent_inflight": 1, "agent_max_inflight": 3, "agent_cycle_assigns": 0, "per_cycle_per_agent": 2,
+    "runtime_inflight": 2, "runtime_cap": 4, "assigned": 0, "max_assign": null
+  },
+  "dry_run": false,
+  "error": null
+}
+```
+
+Every field is always present. A field is `null` when it doesn't apply, never missing.
+
+| Field | Meaning |
+|---|---|
+| `schema` | Record version, currently `1`. |
+| `ts` | When the decision was made. |
+| `tenant_id` / `instance_id` | The tenant the cycle ran for (the multi-tenant tenant, else `AURIGA_TENANT_ID`), and `AURIGA_INSTANCE_ID`. |
+| `identifier` | The issue. |
+| `pass` | `build` \| `cascade` \| `zombie` \| `assigned_idle` \| `review` \| `hand_up` \| `hand_down`. |
+| `action` | `assign` (route to a newly chosen agent), `rerun` (re-enqueue on the current assignee), `create_remote` (hand-up/hand-down to another board), `skip` (a guard turned it away). |
+| `agent` / `runtime` | Who it went to. `null` for hand-offs and for skips made before an agent was picked. |
+| `lane` | The issue's project lane name. |
+| `reason` | Why, from the enum below. |
+| `candidates` | Every lane agent considered: the chosen one has `selected: true`, and each rejected one has a `skip` reason (`agent_offline`, `agent_at_capacity`, `runtime_at_capacity`, `runtime_blocked`, `per_cycle_per_agent_cap`, `unknown_agent`, or `lower_ranked` for an agent that was eligible but lost the load/lane-order tiebreak). Passes that rerun the current assignee list just that agent. |
+| `caps` | Headroom at decision time, before this dispatch was counted. `agent_inflight` / `agent_max_inflight`, `agent_cycle_assigns` / `per_cycle_per_agent`, `runtime_inflight` / `runtime_cap`, and `assigned` / `max_assign` (the cycle-wide cap). A `null` cap means uncapped. |
+| `dry_run` | `true` on a `--dry-run` cycle. A dry run emits the same decisions the live cycle would, at the point it would dispatch. |
+| `error` | The adapter error message when the dispatch or hand-off failed, else `null`. |
+
+`reason` values:
+
+| Group | Values |
+|---|---|
+| Dispatch | `project_lane`, `default_lane` (project has no lane of its own), `hive_story` (hive lane), `tree_attachment` (`TREE_AGENT_ATTACHMENTS`), `seed_planning` (seed routed to the planning agent), `existing_assignee` (a rerun on the current assignee), `review_tier_full` / `review_tier_light` / `review_tier_backend` / `review_tier_standard` (review, by squad tier), `no_local_route` (hand-up), `project_route_child` (hand-down). |
+| Guard skips (`dispatchEligible()`) | `max_assign`, `pass_cap`, `agent_parked`, `seed`, `runtime_blocked`, `assignee_runtime_blocked`, `per_cycle_per_agent_cap`. |
+| Other skips | `no_capacity` (no lane agent free), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human), `unknown_child` / `child_unreachable` (hand-down config rejected). |
+
+`skip` records are rate-limited to one per issue per
+`CAPS.decisionSkipWindowCycles` cycles (default 10), so an issue a guard
+rejects every cycle doesn't flood the log. The give-up records aren't
+rate-limited; each happens once, because the issue is parked. A follow-up
+forced rerun (after an assign, or after a verify finds no run started) is part
+of the same decision and doesn't emit a second record.
+
+The older `route` event is kept alongside `decision` for build picks, because
+`cycle_summary`'s `passes.routed` count reads it (`passForEvent()`).
+
+### Heartbeat + container healthcheck
+
+After every `cycle_summary` the daemon atomically rewrites a heartbeat file
+(the summary JSON plus `pid`) at `AURIGA_HEARTBEAT_FILE`, default
+`auriga-router.heartbeat` next to the pidfile (`/tmp/auriga-router.heartbeat`
+with the default `AURIGA_PIDFILE`). In multi-tenant mode an iteration that
+finds no tenants still refreshes it, so the check measures loop liveness, not
+tenant availability. Tests that call `cycle()` directly write no heartbeat
+unless they pass `opts.heartbeatFile`.
+
+`bin/healthcheck.mjs` exits 0 while the heartbeat's mtime is newer than
+`AURIGA_HEALTH_MAX_AGE_MS`, and 1 when it is missing or stale. The default max
+age is 3 × `AURIGA_CYCLE_MS` (75 s default → 225 s). A cycle's own duration
+(verify sleeps, API latency) adds to the gap between heartbeats, so raise the
+limit if cycles routinely run long. It reads the same env as the router, so
+run it inside the router's container:
+
+```dockerfile
+HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=2 \
+  CMD node /app/src/router/bin/healthcheck.mjs || exit 1
+```
+
+(Adjust `/app` to wherever the image copies the repo. Keep `--start-period`
+longer than the first cycle, because no heartbeat exists before it finishes.)
 
 ## Human-todo filter (priority-1)
 
@@ -129,7 +285,11 @@ node scripts/bulk-extract-human-todos.mjs --no-notify   # suppress operator noti
 - `test/core.test.mjs` — `npm test`.
 - `../../scripts/export-human-queue.mjs` — per-cycle human-queue export (aligned projects, `todo` only).
 - `../../scripts/bulk-extract-human-todos.mjs` — one-off, workspace-wide human-todo triage sweep (see above).
-- Pidfiles / logs (in `/tmp`, single-instance safety):
-  - `/tmp/auriga-router.pid`, `/tmp/auriga-router.log`, `/tmp/auriga-router.jsonl`
-  - `/tmp/auriga-supervisor.pid`, `/tmp/auriga-supervisor.log`
-- Overridable: `AURIGA_PIDFILE`, `AURIGA_LOG`.
+- `lib/observability.mjs` — log sink, `cycle_summary` counting, heartbeat.
+- `lib/decisions.mjs` — `decision` record schema, reason enum, skip rate limiter.
+- `bin/healthcheck.mjs` — container healthcheck (see Observability).
+- Runtime files (defaults):
+  - `/tmp/auriga-router.pid` (`AURIGA_PIDFILE`), `/tmp/auriga-router.heartbeat` (`AURIGA_HEARTBEAT_FILE`)
+  - `auriga-supervisor.lock` next to the pidfile (`AURIGA_SUPERVISOR_LOCK`)
+  - JSONL log: stdout, or `AURIGA_LOG`. Supervisor: stderr, or `SUP_LOG`; router stdout/stderr, or `ROUTER_LOG`.
+  - The launchd template sets `AURIGA_LOG=/tmp/auriga-router.jsonl`, `ROUTER_LOG=/tmp/auriga-router.log`, `SUP_LOG=/tmp/auriga-supervisor.log` to keep the host layout.
