@@ -473,6 +473,21 @@ async function runCycle(opts, state) {
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
   state.blockedRuntimes = blockedRuntimes;
 
+  // ---- hygiene: clear router give-up reasons that outlived `blocked` (PANT-930) ----
+  // zombie/review give-up write blocked_reason alongside status blocked. When the
+  // issue later leaves blocked, the key stays behind. isAgentParked already ignores
+  // it (isStaleRouterPark); this pass also removes it from the board so the ticket
+  // no longer reads as parked. Best-effort, own projects only.
+  if (typeof backlog.setIssueMetadata === 'function') {
+    for (const i of issues) {
+      if (!cfgImpl.PROJECT_IDS.includes(i.project_id) || !coreImpl.isStaleRouterPark(i)) continue;
+      logImpl('stale_park_cleared', { identifier: i.identifier, status: i.status, blocked_reason: i.metadata.blocked_reason, applied: !dryRun });
+      if (dryRun) continue;
+      try { backlog.setIssueMetadata(i.identifier, { blocked_reason: '' }); }
+      catch (e) { logImpl('stale_park_clear_error', { identifier: i.identifier, error: e.message }); }
+    }
+  }
+
   // ---- state-machine: blocked -> todo when declared deps clear (PAN-6662) ----
   // The multi-story crux. A story parked in `blocked` at plan time (its dep stories
   // not built yet) is invisible to every other pass — the build candidate pool only

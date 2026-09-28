@@ -27,11 +27,30 @@ export function isHumanTodo(issue, cfg) {
   return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
 }
 
+// blocked_reason values the ROUTER itself writes when it gives up and sets the
+// issue `blocked` (zombie give-up, review give-up). They describe that blocked
+// state only.
+export const ROUTER_GIVE_UP_REASONS = Object.freeze(['zombie-give-up-max-attempts', 'review-give-up-max-attempts']);
+
+// PANT-930 (GH #244): true when a router give-up reason outlived the `blocked`
+// status it was written with. Once a human or agent moves the issue out of
+// `blocked` (reworked -> in_review, reset -> todo) the give-up is over, but
+// nothing deletes the key. Treating it as a live park skipped those issues
+// forever (live: PANT-809/812/815/816 in_review, never reviewed).
+export function isStaleRouterPark(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string' || !ROUTER_GIVE_UP_REASONS.includes(r.trim())) return false;
+  return String(issue.status || '').toLowerCase() !== 'blocked';
+}
+
 // True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
 // These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
+// A router give-up reason only parks while the issue is still `blocked` (isStaleRouterPark);
+// any other (agent/human-written) reason parks in every status.
 export function isAgentParked(issue = {}) {
   const r = issue && issue.metadata && issue.metadata.blocked_reason;
-  return typeof r === 'string' && r.trim() !== '';
+  if (typeof r !== 'string' || r.trim() === '') return false;
+  return !isStaleRouterPark(issue);
 }
 
 // isSeed limited to the explicit-label legs only — used in detect* functions where
