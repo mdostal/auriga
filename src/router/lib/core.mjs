@@ -330,6 +330,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // (PAN-8245: content changes trigger reassignment; unchanged router assignments noop).
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
+    .filter(isPlainTodo) // PANT-931: a backlog/blocked column mapped onto todo is parked, not work
     .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
     .filter((i) => !isSmokeScratch(i.title))
