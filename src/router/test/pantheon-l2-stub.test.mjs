@@ -466,10 +466,8 @@ test('selectRoute() degrades to null on failure — never throws', async (t) => 
 });
 
 test('reportRouteOutcome() POSTs to /api/route/:decisionId/outcome after a successful selectRoute()', async (t) => {
-  let selectCount = 0;
   const calls = makeCurlMock(t, ({ url }) => {
     if (url.endsWith('/api/route/select')) {
-      selectCount++;
       return { status: 200, body: { decision_id: 'dec-42', chosen_lane: 'build' } };
     }
     if (url.includes('/api/route/') && url.endsWith('/outcome')) {

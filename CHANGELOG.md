@@ -4,6 +4,10 @@ All notable changes to Auriga are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Orchestrator hand-down, first slice** (t016, PANT-820): a registered project can route its todos to a child board instead of an agent lane. Set this with `auriga project add <id> --child <childId>`, which writes `route: { kind: 'child', childId }` in `projects.json`. Each cycle creates the todo on the child's board through t015's `createIssue` primitive, then closes, comments on and unassigns the original, using hand-up's cancel-first guard against duplicates. A route naming a child that isn't in `orchestrator-topology.json`, or has no reachability config, is held for a human with a `hand_down_rejected` warning. It is never dispatched to an agent. Existing entries keep routing through their agent lane unchanged.
+
 ## [0.3.0] - 2026-09-06
 
 **A new MemoryAdapter + orchestrator topology registry (the first real steps toward multi-instance Auriga), a real gh-CLI timeout drift bug and a real dispatch-blocking tie-break bug found and fixed, repo-wide lint enforcement, and `core.mjs` decomposed from a single 1189-line file into five focused modules.**
