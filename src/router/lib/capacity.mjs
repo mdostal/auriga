@@ -1,8 +1,9 @@
 // Agent/runtime capacity + in-flight accounting — extracted from core.mjs
-// (t011 decomposition). Depends only on issue-status.mjs (a leaf module) —
+// (t011 decomposition). Depends only on issue-status.mjs and review-eligibility.mjs (leaf modules) —
 // no dependency on any of core.mjs's own dispatch/decision logic.
 
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS } from './issue-status.mjs';
+import { isReviewDispatchSkipped } from './review-eligibility.mjs';
 
 const ACTIVE_ISSUE_STATUSES = new Set([
   ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
@@ -79,14 +80,6 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
   return true;
 }
 
-// Seed-label check (mirrors core.mjs's isSeedByLabel, kept local to avoid
-// a circular import — capacity.mjs is imported by core.mjs).
-function isSeedLabel(issue) {
-  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
-  if (labelNames.includes('not-a-seed')) return false;
-  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
-}
-
 // In-flight review count per review-lane agent — an issue assigned to a
 // review agent = that agent is (or should be) reviewing it, so it holds a
 // slot until it leaves in_review (merged->done) or is sent back. This caps
@@ -94,9 +87,11 @@ function isSeedLabel(issue) {
 // build lanes' claude RUNTIME_CAP accounting (review agents use their own
 // bucket).
 //
-// Seed-labeled issues are excluded: they are skipped by selectReviewDispatch
-// and must not occupy a capacity slot — a seed accidentally landing in
-// in_review would otherwise deadlock all review dispatch (PANT-737).
+// Every ticket selectReviewDispatch skips (smoke, parked, human-todo, seed —
+// see isReviewDispatchSkipped) is excluded: it is never reviewed, so it must
+// not occupy a capacity slot. A seed (PANT-737) or a review-give-up parked
+// ticket (PANT-843) left assigned to the reviewer otherwise filled the whole
+// claude-review RUNTIME_CAP=1 bucket and froze all review dispatch.
 export function computeReviewInflight(inReviewIssues, cfg) {
   const lane = cfg.REVIEW_LANE || [];
   const idToName = {};
@@ -104,7 +99,7 @@ export function computeReviewInflight(inReviewIssues, cfg) {
   const counts = {};
   for (const n of lane) counts[n] = 0;
   for (const i of inReviewIssues) {
-    if (isSeedLabel(i)) continue;
+    if (isReviewDispatchSkipped(i, cfg)) continue;
     const name = idToName[i.assignee_id];
     if (name) counts[name] += 1;
   }

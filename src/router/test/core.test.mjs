@@ -1140,6 +1140,42 @@ test('selectReviewDispatch: seed assigned to review agent (maxInflight=1) does n
   assert.equal(picks[0].identifier, 'PANT-255', 'normal ticket gets the review slot');
 });
 
+// ---- PANT-843 / GH #236: every skipped ticket must not hold inflight ------
+
+test('selectReviewDispatch: parked (review-give-up) ticket assigned to reviewer does not block other reviews at RUNTIME_CAP 1 — PANT-843 regression', () => {
+  // Live scenario (firefly-events, FFE-38): a review-give-up ticket stays in_review,
+  // assigned to the reviewer, with metadata.blocked_reason set. selectReviewDispatch
+  // skips it (isAgentParked) but computeReviewInflight counted it -> claude-review
+  // RUNTIME_CAP=1 full -> 0 review dispatches across 18 in_review tickets.
+  assert.equal(CFG.RUNTIME_CAP['claude-review'], 1);
+  const parked = inReview('FFE-38', 38, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } });
+  const eligible = [inReview('FFE-46', 46), inReview('FFE-47', 47), inReview('FFE-48', 48)];
+  const issues = [parked, ...eligible];
+  const runs = { 'FFE-38': [doneStale], 'FFE-46': [], 'FFE-47': [], 'FFE-48': [] };
+  const reviewInflight = core.computeReviewInflight(issues, CFG);
+  assert.equal(reviewInflight['auriga-review'], 0, 'parked ticket must not hold the review slot');
+  const picks = core.selectReviewDispatch(issues, runs, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'FFE-46');
+  assert.equal(picks[0].action, 'dispatch-review');
+});
+
+test('computeReviewInflight: counts exactly the reviewer-assigned tickets selectReviewDispatch processes — PANT-843', () => {
+  // Every skip reason in selectReviewDispatch (smoke, parked, human-todo label,
+  // waiting_on a human, seed) must also be excluded from inflight.
+  const skipped = [
+    inReview('SK-1', 1, 'RV', { title: 'smoke test ticket' }),
+    inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'review-give-up-max-attempts' } }),
+    inReview('SK-3', 3, 'RV', { labels: [{ name: 'human-todo' }] }),
+    inReview('SK-4', 4, 'RV', { metadata: { waiting_on: 'Mathew' } }),
+    inReview('SK-5', 5, 'RV', { labels: [{ name: 'needs-plan' }] }),
+  ];
+  for (const i of skipped) assert.equal(core.isReviewDispatchSkipped(i, CFG), true, `${i.identifier} is skipped`);
+  assert.equal(core.computeReviewInflight(skipped, CFG)['auriga-review'], 0);
+  const active = inReview('OK-1', 10, 'RV');
+  assert.equal(core.computeReviewInflight([...skipped, active], CFG)['auriga-review'], 1, 'a real review still holds its slot');
+});
+
 // ---- GH #102: anti-starvation fairness ------------------------------------
 // A PR-less in_review ticket (a planning-only ticket, or one detectFalseDone
 // keeps bouncing done->in_review because a build agent lied about a PR) can
