@@ -96,6 +96,78 @@ to the existing `cycle_error` / `tenant_cycle_error` line.
 A healthy idle router shows `cycle_summary` every `AURIGA_CYCLE_MS` with
 `errors: 0` and zero pass counts. A wedged one stops emitting it.
 
+### `decision` event (decision records)
+
+One `decision` per routing choice a `cycle()` pass makes: a dispatch, a
+cross-board hand-off, or an issue a guard turned away. It exists so routing
+policy can be compared across runs (VISION.md ②, "metrics at every decision").
+The schema is versioned by `schema`. A consumer should reject versions it
+doesn't know, and any breaking change bumps the version. The constants and
+enums live in `lib/decisions.mjs`.
+
+```json
+{
+  "ts": "2026-09-27T22:00:00.000Z",
+  "event": "decision",
+  "schema": 1,
+  "tenant_id": "dostal-tech",
+  "instance_id": "auriga-1",
+  "identifier": "PANT-816",
+  "pass": "build",
+  "action": "assign",
+  "agent": "auriga-build",
+  "runtime": "claude",
+  "lane": "Auriga",
+  "reason": "project_lane",
+  "candidates": [
+    { "agent": "auriga-dev", "runtime": "codex", "selected": false, "skip": "runtime_blocked" },
+    { "agent": "auriga-build", "runtime": "claude", "selected": true }
+  ],
+  "caps": {
+    "agent_inflight": 1, "agent_max_inflight": 3, "agent_cycle_assigns": 0, "per_cycle_per_agent": 2,
+    "runtime_inflight": 2, "runtime_cap": 4, "assigned": 0, "max_assign": null
+  },
+  "dry_run": false,
+  "error": null
+}
+```
+
+Every field is always present. A field is `null` when it doesn't apply, never missing.
+
+| Field | Meaning |
+|---|---|
+| `schema` | Record version, currently `1`. |
+| `ts` | When the decision was made. |
+| `tenant_id` / `instance_id` | The tenant the cycle ran for (the multi-tenant tenant, else `AURIGA_TENANT_ID`), and `AURIGA_INSTANCE_ID`. |
+| `identifier` | The issue. |
+| `pass` | `build` \| `cascade` \| `zombie` \| `assigned_idle` \| `review` \| `hand_up` \| `hand_down`. |
+| `action` | `assign` (route to a newly chosen agent), `rerun` (re-enqueue on the current assignee), `create_remote` (hand-up/hand-down to another board), `skip` (a guard turned it away). |
+| `agent` / `runtime` | Who it went to. `null` for hand-offs and for skips made before an agent was picked. |
+| `lane` | The issue's project lane name. |
+| `reason` | Why, from the enum below. |
+| `candidates` | Every lane agent considered: the chosen one has `selected: true`, and each rejected one has a `skip` reason (`agent_offline`, `agent_at_capacity`, `runtime_at_capacity`, `runtime_blocked`, `per_cycle_per_agent_cap`, `unknown_agent`, or `lower_ranked` for an agent that was eligible but lost the load/lane-order tiebreak). Passes that rerun the current assignee list just that agent. |
+| `caps` | Headroom at decision time, before this dispatch was counted. `agent_inflight` / `agent_max_inflight`, `agent_cycle_assigns` / `per_cycle_per_agent`, `runtime_inflight` / `runtime_cap`, and `assigned` / `max_assign` (the cycle-wide cap). A `null` cap means uncapped. |
+| `dry_run` | `true` on a `--dry-run` cycle. A dry run emits the same decisions the live cycle would, at the point it would dispatch. |
+| `error` | The adapter error message when the dispatch or hand-off failed, else `null`. |
+
+`reason` values:
+
+| Group | Values |
+|---|---|
+| Dispatch | `project_lane`, `default_lane` (project has no lane of its own), `hive_story` (hive lane), `tree_attachment` (`TREE_AGENT_ATTACHMENTS`), `seed_planning` (seed routed to the planning agent), `existing_assignee` (a rerun on the current assignee), `review_tier_full` / `review_tier_light` / `review_tier_backend` / `review_tier_standard` (review, by squad tier), `no_local_route` (hand-up), `project_route_child` (hand-down). |
+| Guard skips (`dispatchEligible()`) | `max_assign`, `pass_cap`, `agent_parked`, `seed`, `runtime_blocked`, `assignee_runtime_blocked`, `per_cycle_per_agent_cap`. |
+| Other skips | `no_capacity` (no lane agent free), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human), `unknown_child` / `child_unreachable` (hand-down config rejected). |
+
+`skip` records are rate-limited to one per issue per
+`CAPS.decisionSkipWindowCycles` cycles (default 10), so an issue a guard
+rejects every cycle doesn't flood the log. The give-up records aren't
+rate-limited; each happens once, because the issue is parked. A follow-up
+forced rerun (after an assign, or after a verify finds no run started) is part
+of the same decision and doesn't emit a second record.
+
+The older `route` event is kept alongside `decision` for build picks, because
+`cycle_summary`'s `passes.routed` count reads it (`passForEvent()`).
+
 ### Heartbeat + container healthcheck
 
 After every `cycle_summary` the daemon atomically rewrites a heartbeat file
@@ -214,6 +286,7 @@ node scripts/bulk-extract-human-todos.mjs --no-notify   # suppress operator noti
 - `../../scripts/export-human-queue.mjs` — per-cycle human-queue export (aligned projects, `todo` only).
 - `../../scripts/bulk-extract-human-todos.mjs` — one-off, workspace-wide human-todo triage sweep (see above).
 - `lib/observability.mjs` — log sink, `cycle_summary` counting, heartbeat.
+- `lib/decisions.mjs` — `decision` record schema, reason enum, skip rate limiter.
 - `bin/healthcheck.mjs` — container healthcheck (see Observability).
 - Runtime files (defaults):
   - `/tmp/auriga-router.pid` (`AURIGA_PIDFILE`), `/tmp/auriga-router.heartbeat` (`AURIGA_HEARTBEAT_FILE`)
