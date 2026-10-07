@@ -101,8 +101,12 @@ export const CAPS = _ext.CAPS ?? {
 // object was already built, which would silently stomp any future
 // tenant-scoped AGENTS override for this one agent. Only the runtime-cap
 // bucket registration is still this "policy" file's job.
-
-RUNTIME_CAP['claude-review'] = 1;
+//
+// `??=`, not `=` (GH #248 / PANT-935): this runs AFTER config-substrate.mjs's
+// `_ext.RUNTIME_CAP ?? {...}`, so an unconditional assignment silently
+// reverted an operator's AURIGA_CONFIG `RUNTIME_CAP["claude-review"]` to 1.
+// Only default the bucket when the external config doesn't set it.
+RUNTIME_CAP['claude-review'] ??= 1;
 
 // REVIEW_LANE/REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS themselves now live in
 // ./config-substrate.mjs (imported + re-exported above) — see that file for
