@@ -32,19 +32,9 @@
 // backend-agnostic in practice (despite the adapter interface's own
 // aspiration to be), so this adapter preserves that shape rather than
 // silently changing it and risking a subtle behavior break.
-//
-// GitHub-based PR discovery: routes through Pantheon's own GitHub facade
-// (core/api/github.ts, Story 1 of the Pantheon-native GitHub plugin epic) via
-// the same `run` HTTP runner this adapter already uses for backlog calls.
-// GITHUB_TOKEN is held centrally in Pantheon -- Auriga's container needs no
-// GH_TOKEN and no gh/git binaries. See ../pantheon-github.mjs for the
-// makePantheonGhListRepos / makePantheonGhPrs factories that replace the old
-// gh-CLI-based makeGhRun/makeGhListRepos/makeGhPrs from github-cli.mjs.
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
-import { gatherReviewRepos, makeListCandidatePullRequests } from '../github-cli.mjs';
-import { makePantheonGhListRepos, makePantheonGhPrs } from '../pantheon-github.mjs';
 import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
@@ -52,11 +42,15 @@ import {
   HIVE_LANE as SUBSTRATE_HIVE_LANE,
   REVIEW_LANE as SUBSTRATE_REVIEW_LANE,
   RUNTIME_CAP as SUBSTRATE_RUNTIME_CAP,
-  REVIEW_REPO_OWNER as SUBSTRATE_REVIEW_REPO_OWNER,
-  REVIEW_SEARCH_REPOS as SUBSTRATE_REVIEW_SEARCH_REPOS,
 } from '../../config-substrate.mjs';
 
 const DEFAULT_BASE_URL = 'http://core-api:3012';
+
+// listAllProjectIds()'s single board-wide sentinel -- see that method's
+// comment. Exported so callers that need REAL project ids (the `auriga
+// project` CLI) can tell "core-api has no project listing" apart from a
+// board that genuinely has one project.
+export const PANTHEON_BOARD_SENTINEL = '__pantheon_board__';
 const DEFAULT_VERIFY_DELAY_MS = 6000;
 
 // Real synchronous sleep — ported verbatim from multica/spawn.mjs (same
@@ -75,6 +69,12 @@ function sleepSync(ms) {
 // own vocabulary). Deliberately keeps Auriga's real, existing consumer
 // code working unchanged rather than "fixing" it as an unplanned side
 // effect of this cutover.
+//
+// PANT-931: Pantheon collapses Multica's `backlog` onto its own `todo`, so a
+// parked issue would look like plain todo work to isPlainTodo. core-api
+// (PANT-928) returns the real Multica status as `nativeStatus`; surface it as
+// `status_name`, the field core.mjs's PARKED_STATUS_NAMES guard already reads.
+// Only set when present so older core-api responses keep the exact old shape.
 function toRawIssue(issue) {
   if (!issue) return issue;
   return {
@@ -92,19 +92,17 @@ function toRawIssue(issue) {
     metadata: issue.metadata,
     created_at: issue.createdAt,
     updated_at: issue.updatedAt,
+    ...(issue.nativeStatus ? { status_name: issue.nativeStatus } : {}),
   };
 }
 
 /**
  * @param {{
- *   baseUrl?: string, exec?: Function,
- *   reviewRepoOwner?: string, reviewSearchRepos?: string[], project?: string,
+ *   baseUrl?: string, exec?: Function, project?: string,
  * }} [cfg]
  *   baseUrl defaults to PANTHEON_API_URL, then DEFAULT_BASE_URL (matching
  *   the docker-compose internal hostname for core-api). exec lets a test
- *   inject a fake execFileSync for all HTTP calls (both backlog and GitHub
- *   facade). reviewRepoOwner/reviewSearchRepos default to
- *   config-substrate.mjs's REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS.
+ *   inject a fake execFileSync for all HTTP calls.
  *   project is createIssue's default target project (t015) -- lets a caller
  *   stand up a whole adapter instance pointed at a specific board+project
  *   (e.g. a hand-up target) without repeating the project on every createIssue
@@ -116,21 +114,6 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
   const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
     TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
-
-  const REVIEW_REPO_OWNER = cfg.reviewRepoOwner || SUBSTRATE_REVIEW_REPO_OWNER || null;
-  const REVIEW_SEARCH_REPOS = cfg.reviewSearchRepos || SUBSTRATE_REVIEW_SEARCH_REPOS || [];
-
-  // PR discovery now routes through Pantheon's GitHub facade (GET
-  // /api/github/repos and GET /api/github/repos/:owner/:repo/pulls) via the
-  // same `run` HTTP runner used for backlog calls. GITHUB_TOKEN is held
-  // centrally in Pantheon -- no gh binary or GH_TOKEN env var needed here.
-  // gatherReviewRepos / makeListCandidatePullRequests are pure logic from
-  // github-cli.mjs and are reused unchanged.
-  const ghListRepos = makePantheonGhListRepos(run);
-  const ghPrs = makePantheonGhPrs(run);
-  const listCandidatePullRequests = makeListCandidatePullRequests(
-    ghListRepos, ghPrs, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
-  );
 
   // Per-project issue list. NOT called by auriga-router.mjs's own cycle()
   // today (it uses listAllIssues below instead) but part of the
@@ -153,7 +136,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
   // issue Pantheon's backlog knows about), just without Auriga needing to
   // understand Multica's project concept to get there.
   function listAllProjectIds() {
-    return ['__pantheon_board__'];
+    return [PANTHEON_BOARD_SENTINEL];
   }
 
   // Board-wide aggregate — REQUIRED by auriga-router.mjs's cycle() (not
@@ -217,6 +200,20 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     }
   }
 
+  // Best-effort: merges metadataObj into the issue's existing metadata via
+  // PUT /api/backlog/issues/:id/metadata (Pantheon's own setMetadata, which
+  // does { ...existing, ...kv } — confirmed in core/api/backlog.ts +
+  // contracts/l1/adapters/in-memory-board-queue.ts). Never throws — a
+  // metadata write failure must never abort a dispatch (PAN-8245).
+  function setIssueMetadata(identifier, metadataObj) {
+    try {
+      return run('PUT', `/api/backlog/issues/${encodeURIComponent(identifier)}/metadata`, metadataObj);
+    } catch (e) {
+      process.stderr.write(`pantheon-v2-l2: setIssueMetadata(${identifier}) failed: ${e.message}\n`);
+      return null;
+    }
+  }
+
   // WRITE method: propagates any failure to the caller (no try/catch) —
   // genuinely NEW capability (t015 — orchestrator hand-up): every other
   // method on this adapter acts on an EXISTING issue; this creates one.
@@ -253,15 +250,12 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     setIssueStatus,
     commentOnIssue,
     createIssue,
+    setIssueMetadata,
 
     // "Ported extra", not part of the BacklogAdapter typedef contract, but
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's
     // own comment above.
     listAllIssues,
-
-    // "Ported extra" -- see this file's header comment + listCandidatePullRequests's
-    // own comment above for why this exists again.
-    listCandidatePullRequests,
   });
 }
 
@@ -374,7 +368,10 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // Populated at dispatch time by selectRoute(); consumed (and cleared) at
   // outcome time by reportRouteOutcome(). Survives across cycles in the same
   // process instance; entries are cleaned up once the outcome is reported.
-  const _decisions = new Map();
+  // cfg.decisions lets a caller that rebuilds this adapter (mainMultiTenant,
+  // on a tenant config change) hand the same store to the new instance so
+  // decisions recorded before the rebuild can still be reported (PANT-388).
+  const _decisions = cfg.decisions instanceof Map ? cfg.decisions : new Map();
 
   // Best-effort: calls POST /api/route/select before assignIssue() so Heimdall
   // can record the routing decision and inform future lane selection. Stores the

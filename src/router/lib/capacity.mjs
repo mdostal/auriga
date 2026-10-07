@@ -1,8 +1,11 @@
 // Agent/runtime capacity + in-flight accounting — extracted from core.mjs
-// (t011 decomposition). Depends only on issue-status.mjs (a leaf module) —
+// (t011 decomposition). Depends only on issue-status.mjs, review-eligibility.mjs and
+// run-classification.mjs (leaf modules) —
 // no dependency on any of core.mjs's own dispatch/decision logic.
 
-import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS } from './issue-status.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './issue-status.mjs';
+import { isReviewDispatchSkipped } from './review-eligibility.mjs';
+import { hasActiveRun } from './run-classification.mjs';
 
 const ACTIVE_ISSUE_STATUSES = new Set([
   ISSUE_STATUS.IN_PROGRESS, ISSUE_STATUS_ALT_SPELLINGS.IN_PROGRESS_SPACED, ISSUE_STATUS.RUNNING,
@@ -21,17 +24,40 @@ const ACTIVE_ISSUE_STATUSES = new Set([
 // issues makes real inflight ~0, freeing every lane. The per-cycle batch caps
 // (CAPS.perCycleTotal / perCyclePerAgent) prevent over-assignment during the brief
 // assign->run gap, and each assign is immediately re-run (enqueued) by the cycle loop.
-export function computeInflight(issues, agents) {
+//
+// FIX PANT-846 (GH #240): status alone still over-counts. An in_progress issue whose
+// last run was cancelled/failed hours ago (a zombie), or a parent that is in_progress
+// only while its staged sub-issues run, has no task running — yet each held a slot.
+// Live on hive three such issues filled claude-planning's RUNTIME_CAP=3 and the
+// planning lane dispatched nothing for hours. Capacity now tracks real work:
+//   - liveness.runsByIssue[identifier] known -> count only with an active, fresh run
+//     (hasActiveRun, same staleMs window detectZombies uses). A zombie frees its slot;
+//     zombie recovery re-reserves it when it actually re-runs the issue.
+//   - runs unknown (not fetched / fetch failed) -> keep the status-based count, except
+//     a parent with any non-terminal child: it waits on its children and never runs
+//     a task of its own meanwhile.
+export function computeInflight(issues, agents, liveness = {}) {
+  const { runsByIssue = {}, now = Date.now(), staleMs = Infinity } = liveness;
   const idToName = {};
   for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
   const counts = {};
   for (const name of Object.keys(agents)) counts[name] = 0;
+  const waitingParents = new Set();
+  for (const i of issues) {
+    if (i.parent_issue_id && !isTerminalIssueStatus((i.status || '').toLowerCase())) waitingParents.add(i.parent_issue_id);
+  }
   for (const i of issues) {
     if (!i.assignee_id) continue;
     const name = idToName[i.assignee_id];
     if (!name) continue;
     const st = (i.status || '').toLowerCase();
-    if (ACTIVE_ISSUE_STATUSES.has(st)) counts[name] += 1;
+    if (!ACTIVE_ISSUE_STATUSES.has(st)) continue;
+    const runs = runsByIssue[i.identifier];
+    if (runs) {
+      if (hasActiveRun(runs, now, staleMs)) counts[name] += 1;
+    } else if (!waitingParents.has(i.id)) {
+      counts[name] += 1;
+    }
   }
   return counts;
 }
@@ -69,14 +95,20 @@ export function computeRuntimeInflight(inflight, agents) {
 // already-projected assignments this cycle? Returns false immediately when
 // the agent's runtime is marked offline (available === false, PAN-8645).
 export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
+  return agentCapacityReason(name, agents, runtimeCap, inflight, runtimeInflight, projected) === null;
+}
+
+// Why agentHasCapacity() is false for this agent, or null when it has capacity.
+// The decision record (PANT-816) logs this per rejected candidate.
+export function agentCapacityReason(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
   const a = agents[name];
-  if (!a) return false;
-  if (a.available === false) return false; // PAN-8645: offline runtime block
+  if (!a) return 'unknown_agent';
+  if (a.available === false) return 'agent_offline'; // PAN-8645: offline runtime block
   const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
-  if (agentNow >= (a.maxInflight ?? Infinity)) return false;
+  if (agentNow >= (a.maxInflight ?? Infinity)) return 'agent_at_capacity';
   const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
-  if (rtNow >= (runtimeCap[a.runtime] ?? Infinity)) return false;
-  return true;
+  if (rtNow >= (runtimeCap[a.runtime] ?? Infinity)) return 'runtime_at_capacity';
+  return null;
 }
 
 // In-flight review count per review-lane agent — an issue assigned to a
@@ -85,6 +117,12 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
 // concurrent reviews at each agent's maxInflight without touching the
 // build lanes' claude RUNTIME_CAP accounting (review agents use their own
 // bucket).
+//
+// Every ticket selectReviewDispatch skips (smoke, parked, human-todo, seed —
+// see isReviewDispatchSkipped) is excluded: it is never reviewed, so it must
+// not occupy a capacity slot. A seed (PANT-737) or a review-give-up parked
+// ticket (PANT-843) left assigned to the reviewer otherwise filled the whole
+// claude-review RUNTIME_CAP=1 bucket and froze all review dispatch.
 export function computeReviewInflight(inReviewIssues, cfg) {
   const lane = cfg.REVIEW_LANE || [];
   const idToName = {};
@@ -92,6 +130,7 @@ export function computeReviewInflight(inReviewIssues, cfg) {
   const counts = {};
   for (const n of lane) counts[n] = 0;
   for (const i of inReviewIssues) {
+    if (isReviewDispatchSkipped(i, cfg)) continue;
     const name = idToName[i.assignee_id];
     if (name) counts[name] += 1;
   }
@@ -99,23 +138,49 @@ export function computeReviewInflight(inReviewIssues, cfg) {
 }
 
 // Pick the review-lane agent with the most free capacity (lowest current+projected
-// load) that is still under its maxInflight. Returns null when the lane is full.
-export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRuntimes = new Set()) {
+// load) that is still under its maxInflight, its runtime bucket's RUNTIME_CAP and
+// the per-cycle-per-agent cap. Returns null when the lane is full.
+// cycleCaps: { perAgentCycle, maxPerAgent } — this cycle's dispatch counts so far.
+export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRuntimes = new Set(), cycleCaps = {}, trace = null) {
   const lane = cfg.REVIEW_LANE || [];
-  const eligible = lane.filter((name) => {
+  const perAgentCycle = cycleCaps.perAgentCycle || {};
+  const maxPerAgent = cycleCaps.maxPerAgent ?? Infinity;
+  const loadOf = (name) => (reviewInflight[name] || 0) + (projected[name] || 0);
+  const skipReason = (name) => {
     const a = cfg.AGENTS[name];
-    if (!a) return false;
-    if (a.available === false) return false; // PAN-8645: offline runtime
-    if (blockedRuntimes.has(a.runtime)) return false; // PANT-587: skip rate-limited runtimes
-    const now = (reviewInflight[name] || 0) + (projected[name] || 0);
-    return now < (a.maxInflight ?? Infinity);
-  });
-  if (!eligible.length) return null;
+    if (!a) return 'unknown_agent';
+    if (a.available === false) return 'agent_offline'; // PAN-8645: offline runtime
+    if (blockedRuntimes.has(a.runtime)) return 'runtime_blocked'; // PANT-587: skip rate-limited runtimes
+    if ((perAgentCycle[name] || 0) >= maxPerAgent) return 'per_cycle_per_agent_cap'; // PANT-814: perCyclePerAgent
+    // PANT-814: the review bucket's RUNTIME_CAP (e.g. 'claude-review') was never read.
+    const rtCap = (cfg.RUNTIME_CAP || {})[a.runtime];
+    if (rtCap != null) {
+      const rtNow = lane.filter((n) => cfg.AGENTS[n]?.runtime === a.runtime).reduce((sum, n) => sum + loadOf(n), 0);
+      if (rtNow >= rtCap) return 'runtime_at_capacity';
+    }
+    return loadOf(name) < (a.maxInflight ?? Infinity) ? null : 'agent_at_capacity';
+  };
+  const skips = new Map(lane.map((name) => [name, skipReason(name)]));
+  const eligible = lane.filter((name) => skips.get(name) === null);
   eligible.sort((x, y) => {
     const lx = (reviewInflight[x] || 0) + (projected[x] || 0);
     const ly = (reviewInflight[y] || 0) + (projected[y] || 0);
     if (lx !== ly) return lx - ly;
     return lane.indexOf(x) - lane.indexOf(y);
   });
-  return eligible[0];
+  const chosen = eligible[0] ?? null;
+  if (trace) trace.candidates = laneCandidates(lane, chosen, skips, cfg.AGENTS);
+  return chosen;
+}
+
+// The decision record's `candidates` list (PANT-816): every lane agent
+// considered, the chosen one marked, each rejected one with its skip reason.
+// An agent that was eligible but lost the load/lane-order tiebreak is
+// 'lower_ranked'.
+export function laneCandidates(lane, chosen, skips, agents = {}) {
+  return lane.map((agent) => {
+    const runtime = agents[agent]?.runtime ?? null;
+    if (agent === chosen) return { agent, runtime, selected: true };
+    return { agent, runtime, selected: false, skip: skips.get(agent) || 'lower_ranked' };
+  });
 }

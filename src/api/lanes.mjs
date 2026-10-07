@@ -1,7 +1,8 @@
 // GET /api/lanes — live lane state: per-agent inflight/queued counts, runtime
 // totals vs caps, and whether the router process itself is alive. Reads the
-// board fresh on every call (mca/core are injected so this stays testable
-// against fixtures instead of the live Multica CLI).
+// board fresh on every call through the injected backlog adapter (Pantheon
+// core-api in production, see src/server.mjs); backlog/core are injected so
+// this stays testable against fixtures.
 import express from 'express';
 import fs from 'node:fs';
 
@@ -17,13 +18,13 @@ function routerAlive(pidfile) {
   }
 }
 
-export function createLanesRouter(cfg, mca, core, opts = {}) {
+export function createLanesRouter(cfg, backlog, core, opts = {}) {
   const pidfile = opts.pidfile || process.env.AURIGA_PIDFILE || '/tmp/auriga-router.pid';
   const router = express.Router();
 
   router.get('/api/lanes', (req, res) => {
     try {
-      const issues = mca.listAllIssues(cfg.PROJECT_IDS);
+      const issues = backlog.listAllIssues(cfg.PROJECT_IDS);
       const inflight = core.computeInflight(issues, cfg.AGENTS);
       const queued = core.computeAssignedQueued(issues, cfg.AGENTS);
       const runtimeInflight = core.computeRuntimeInflight(inflight, cfg.AGENTS);

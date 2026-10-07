@@ -73,7 +73,10 @@ export function descStoryDeps(issue = {}) {
   // matters because a Minerva story's `steps:` block further down carries per-phase
   // `depends_on: [research]` lines; parsing inline-anywhere-first would grab a phase
   // dep and shadow the real story dep declared at the top (the rsh-03/PAN-5830 bug).
-  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|\r?\n(?:[ \t]*-[ \t]*[^\n]+\r?\n?)+)/i);
+  // The block-list branch also spans blank separator lines between items (valid YAML
+  // a human may add when editing); it stops only at the first non-blank, non-item
+  // line. Without this, deps after a blank line were silently dropped (PANT-415).
+  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|(?:\r?\n[ \t]*(?:-[ \t]*[^\n]+)?)+)/i);
   let raw = [];
   if (m) {
     const body = m[2];
