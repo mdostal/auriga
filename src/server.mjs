@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Auriga Config-Expose API — read-only REST surface over the router's config,
-// live lane state, and computed gaps. Data layer for the Janus UI and the
+// live lane state, computed gaps, and the router's decision records. Data layer for the Janus UI and the
 // Cura sync-check. Phase 1 (MVP): GET-only. Phase 2 (PATCH /api/config,
 // POST /api/config/reload) is deferred.
 //
@@ -15,6 +15,7 @@ import { selectBacklogAdapter } from './router/lib/adapters/select-backlog.mjs';
 import { createConfigRouter } from './api/config.mjs';
 import { createLanesRouter } from './api/lanes.mjs';
 import { createGapsRouter } from './api/gaps.mjs';
+import { createDecisionsRouter } from './api/decisions.mjs';
 
 export function createApp(opts = {}) {
   const app = express();
@@ -34,6 +35,7 @@ export function createApp(opts = {}) {
   app.use(createConfigRouter(cfg));
   app.use(createLanesRouter(cfg, backlog, core));
   app.use(createGapsRouter(cfg, backlog, core));
+  app.use(createDecisionsRouter({ env: opts.env || process.env }));
 
   return app;
 }

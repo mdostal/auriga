@@ -1,6 +1,7 @@
 // Container-ready runtime signals for the router (PANT-817): the JSONL log
-// sink, the per-cycle `cycle_summary` event, and the heartbeat file a
-// container HEALTHCHECK reads. Kept out of auriga-router.mjs so each piece is
+// sink, the per-cycle `cycle_summary` event, the heartbeat file a container
+// HEALTHCHECK reads, and the bounded decision-records file auriga-api serves
+// (PANT-1024). Kept out of auriga-router.mjs so each piece is
 // unit-testable without importing the daemon.
 
 import fs from 'node:fs';
@@ -16,12 +17,16 @@ export const HEARTBEAT_BASENAME = 'auriga-router.heartbeat';
 // Env is read per call (not captured at import) so the sink follows the live
 // process env; a failed file append falls back to stdout rather than dropping
 // the line.
+// AURIGA_RECORDS_FILE set -> RECORD_EVENTS are ALSO appended to that file
+// (bounded, see appendRecord), whichever sink the full log goes to.
 export function createLogger({ env = process.env, stdout = process.stdout } = {}) {
+  const records = createRecordsSink(env);
   return function log(event, data) {
     const rec = { ts: new Date().toISOString(), event, ...data };
     if (env.AURIGA_INSTANCE_ID) rec.instance_id = env.AURIGA_INSTANCE_ID;
     if (env.AURIGA_TENANT_ID && !('tenant_id' in rec)) rec.tenant_id = env.AURIGA_TENANT_ID;
     const line = JSON.stringify(rec) + '\n';
+    if (RECORD_EVENTS.has(event)) records(line);
     if (env.AURIGA_LOG) {
       try { fs.appendFileSync(env.AURIGA_LOG, line); return; } catch {}
     }
@@ -100,4 +105,72 @@ export function checkHeartbeat(file, maxAgeMs, now = Date.now()) {
   const ageMs = Math.max(0, now - stat.mtimeMs);
   if (ageMs > maxAgeMs) return { ok: false, reason: `heartbeat ${file} is ${ageMs}ms old (max ${maxAgeMs}ms)`, ageMs };
   return { ok: true, reason: `heartbeat ${ageMs}ms old`, ageMs };
+}
+
+// ---- decision records file (PANT-1024) -------------------------------------
+// The routing records Janus Insights reads through auriga-api's
+// GET /api/decisions, so it never has to scrape `docker logs`. The router and
+// auriga-api run in separate containers and share this file over a volume.
+export const RECORD_EVENTS = new Set(['decision', 'verify_ok', 'advance', 'zombie', 'review', 'scan']);
+export const DEFAULT_RECORDS_MAX_LINES = 5000;
+
+function countLines(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n += 1;
+    return n;
+  } catch { return 0; }
+}
+
+// Keeps only the last `maxLines` lines. Atomic (write + rename) so a reader
+// never sees a half-trimmed file.
+export function trimRecords(file, maxLines) {
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, lines.slice(-maxLines).map((l) => l + '\n').join(''));
+  fs.renameSync(tmp, file);
+}
+
+// Returns an append(line) for AURIGA_RECORDS_FILE (a no-op when unset). The
+// file is trimmed back to AURIGA_RECORDS_MAX_LINES once it grows 20% past it,
+// so it stays bounded without a rewrite on every append. The line count is
+// read once per process (the router may run as a `--once` loop) and then
+// tracked in memory. A failed write never breaks the log call.
+export function createRecordsSink(env = process.env) {
+  const file = env.AURIGA_RECORDS_FILE;
+  if (!file) return () => {};
+  const maxLines = parseInt(env.AURIGA_RECORDS_MAX_LINES, 10) || DEFAULT_RECORDS_MAX_LINES;
+  const trimAt = Math.ceil(maxLines * 1.2);
+  let count = null;
+  return function append(line) {
+    try {
+      if (count === null) count = countLines(file);
+      fs.appendFileSync(file, line);
+      count += 1;
+      if (count > trimAt) {
+        trimRecords(file, maxLines);
+        count = maxLines;
+      }
+    } catch {}
+  };
+}
+
+// Reads the records file, oldest first. `since` (ISO) keeps records strictly
+// newer than it. With `since` the first `limit` matches are returned, so a
+// caller can page forward from the last ts it saw; without it, the newest
+// `limit`. Unparseable lines are skipped. A missing file is no records.
+export function readRecords(file, { since = null, limit = 2000 } = {}) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const sinceMs = since ? new Date(since).getTime() : null;
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line) continue;
+    let rec;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (sinceMs != null && !(new Date(rec.ts).getTime() > sinceMs)) continue;
+    out.push(rec);
+  }
+  return sinceMs != null ? out.slice(0, limit) : out.slice(-limit);
 }
