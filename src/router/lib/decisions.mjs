@@ -18,14 +18,14 @@ export const REVIEW_TIERS = Object.freeze(['full', 'light', 'backend', 'standard
 // reasons. dispatchEligible()'s hyphenated reasons map here via reasonCode().
 export const DECISION_REASONS = Object.freeze([
   // dispatch
-  'hive_story', 'tree_attachment', 'project_lane', 'default_lane', 'seed_planning',
+  'hive_story', 'tree_attachment', 'project_lane', 'default_lane', 'methodology_lane', 'seed_planning',
   'existing_assignee', ...REVIEW_TIERS.map((t) => `review_tier_${t}`),
   'no_local_route', 'project_route_child',
   // skip: dispatchEligible() guards
   'max_assign', 'pass_cap', 'agent_parked', 'seed', 'runtime_blocked',
   'assignee_runtime_blocked', 'per_cycle_per_agent_cap',
   // skip: pass-local
-  'no_capacity', 'give_up_max_attempts', 'unknown_child', 'child_unreachable',
+  'no_capacity', 'no_capable_lane', 'give_up_max_attempts', 'unknown_child', 'child_unreachable',
 ]);
 
 const REASON_SET = new Set(DECISION_REASONS);

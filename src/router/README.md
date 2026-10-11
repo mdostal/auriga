@@ -154,9 +154,9 @@ Every field is always present. A field is `null` when it doesn't apply, never mi
 
 | Group | Values |
 |---|---|
-| Dispatch | `project_lane`, `default_lane` (project has no lane of its own), `hive_story` (hive lane), `tree_attachment` (`TREE_AGENT_ATTACHMENTS`), `seed_planning` (seed routed to the planning agent), `existing_assignee` (a rerun on the current assignee), `review_tier_full` / `review_tier_light` / `review_tier_backend` / `review_tier_standard` (review, by squad tier), `no_local_route` (hand-up), `project_route_child` (hand-down). |
+| Dispatch | `project_lane`, `default_lane` (project has no lane of its own), `methodology_lane` (no project lane, and the story declares a methodology/skill not every `DEFAULT_LANE` agent can run — see `RUNTIME_CAPABILITIES`), `hive_story` (hive lane), `tree_attachment` (`TREE_AGENT_ATTACHMENTS`), `seed_planning` (seed routed to the planning agent), `existing_assignee` (a rerun on the current assignee), `review_tier_full` / `review_tier_light` / `review_tier_backend` / `review_tier_standard` (review, by squad tier), `no_local_route` (hand-up), `project_route_child` (hand-down). |
 | Guard skips (`dispatchEligible()`) | `max_assign`, `pass_cap`, `agent_parked`, `seed`, `runtime_blocked`, `assignee_runtime_blocked`, `per_cycle_per_agent_cap`. |
-| Other skips | `no_capacity` (no lane agent free), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human), `unknown_child` / `child_unreachable` (hand-down config rejected). |
+| Other skips | `no_capacity` (no lane agent free), `no_capable_lane` (no `DEFAULT_LANE`/`HIVE_LANE` agent can run the story's declared methodology/skills), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human), `unknown_child` / `child_unreachable` (hand-down config rejected). |
 
 `skip` records are rate-limited to one per issue per
 `CAPS.decisionSkipWindowCycles` cycles (default 10), so an issue a guard

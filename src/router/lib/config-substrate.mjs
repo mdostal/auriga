@@ -233,6 +233,19 @@ export const DEFAULT_LANE = _ext.DEFAULT_LANE ?? ['auriga-dev', 'heimdall-dev-co
 // routing a hive story there causes a silent self-block (PAN-6636, PAN-6640, PAN-6646).
 export const HIVE_LANE = _ext.HIVE_LANE ?? ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
 
+// Methodology-aware DEFAULT_LANE (VISION.md ②): runtime -> methodologies/skills
+// its agents can run. A non-PROJECT_LANE story that declares one (core.mjs's
+// declaredRequirements: `methodology:`/`skills:` lines or labels) is routed to
+// the DEFAULT_LANE/HIVE_LANE agents that list it instead of the flat
+// DEFAULT_LANE (methodologyFallbackLane). An AGENTS entry may set its own
+// `capabilities` array to override its runtime's list. Only the claude runtime
+// carries plugin-hive (see HIVE_LANE above); codex/opencode list nothing.
+export const RUNTIME_CAPABILITIES = _ext.RUNTIME_CAPABILITIES ?? {
+  claude: ['hive', 'classic', 'tdd', 'bdd'],
+  codex: [],
+  opencode: [],
+};
+
 // The review/ship lane: in_review stories with an open PR route here. The
 // review agent itself ('auriga-review') is added to AGENTS, and its runtime
 // bucket ('claude-review') capped in RUNTIME_CAP above, by lib/config.mjs

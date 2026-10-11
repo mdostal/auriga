@@ -64,6 +64,88 @@ export function isHiveStory(issue = {}) {
   return HIVE_METHODOLOGY_RE.test(desc) && HIVE_STEPS_RE.test(desc) && HIVE_STEP_AGENT_RE.test(desc);
 }
 
+// What a story declares it needs to run: its methodology and any named skills.
+// isHiveStory only catches the full Minerva shape (methodology + hive steps);
+// this catches a bare declaration too, so a `methodology: tdd` story without a
+// steps block doesn't fall to a lane that can't run it. Sources:
+//   - description `methodology: <name>` line
+//   - description `skills: a, b` / `skills: [a, b]` / `skills:` + `- a` list,
+//     or a single `skill: <name>` line
+//   - labels `methodology:<name>` / `skill:<name>`
+// Returns a sorted, lowercased, de-duplicated array.
+const METHODOLOGY_LINE_RE = /^\s*methodology:\s*([\w-]+)/im;
+const SKILL_LINE_RE = /^\s*skill:\s*([\w:-]+)/im;
+const SKILLS_LINE_RE = /^(\s*)skills:[ \t]*([^\r\n]*)/im;
+const REQUIREMENT_LABEL_RE = /^(?:methodology|skill):\s*([\w:-]+)$/i;
+
+export function declaredRequirements(issue = {}) {
+  const out = new Set();
+  const desc = issue.description || '';
+  const m = METHODOLOGY_LINE_RE.exec(desc);
+  if (m) out.add(m[1]);
+  const s = SKILL_LINE_RE.exec(desc);
+  if (s) out.add(s[1]);
+  const list = SKILLS_LINE_RE.exec(desc);
+  if (list) {
+    const inline = list[2].replace(/[[\]]/g, '').trim();
+    if (inline) {
+      for (const name of inline.split(',')) if (name.trim()) out.add(name.trim());
+    } else {
+      // YAML block list: the `- name` lines directly under `skills:`.
+      const rest = desc.slice(list.index + list[0].length).split(/\r?\n/).slice(1);
+      for (const line of rest) {
+        const item = /^\s*-\s*([\w:-]+)\s*$/.exec(line);
+        if (!item) break;
+        out.add(item[1]);
+      }
+    }
+  }
+  for (const l of Array.isArray(issue.labels) ? issue.labels : []) {
+    const name = typeof l === 'string' ? l : (l && l.name) || '';
+    const lm = REQUIREMENT_LABEL_RE.exec(name.trim());
+    if (lm) out.add(lm[1]);
+  }
+  return [...out].map((r) => r.toLowerCase()).sort();
+}
+
+// An agent's capabilities: its own `capabilities` list if AGENTS declares one,
+// else its runtime's entry in RUNTIME_CAPABILITIES.
+export function agentCapabilities(name, cfg) {
+  const agent = cfg.AGENTS && cfg.AGENTS[name];
+  if (!agent) return [];
+  const caps = Array.isArray(agent.capabilities)
+    ? agent.capabilities
+    : (cfg.RUNTIME_CAPABILITIES && cfg.RUNTIME_CAPABILITIES[agent.runtime]) || [];
+  return caps.map((c) => String(c).toLowerCase());
+}
+
+// Methodology-aware DEFAULT_LANE (VISION.md ②). Pure. The fallback lane for a
+// story with no PROJECT_LANE entry, narrowed to agents that can run what the
+// story declares (declaredRequirements). Returns { lane, reason, required }:
+//   - nothing declared, or every DEFAULT_LANE agent can run it
+//       -> DEFAULT_LANE unchanged, reason 'default_lane'
+//   - otherwise -> the capable agents from DEFAULT_LANE then HIVE_LANE, in that
+//       order, reason 'methodology_lane'
+//   - none of them can -> [] with reason 'no_capable_lane'; the story is held
+//       (or handed up) rather than sent to a lane that would self-block
+// A requirement no agent in AGENTS declares at all is ignored: the router has
+// no way to tell which lane can run it, so it routes as before instead of
+// stranding the story on a typo.
+export function methodologyFallbackLane(issue, cfg) {
+  const defaultLane = cfg.DEFAULT_LANE || [];
+  const known = new Set(Object.keys(cfg.AGENTS || {}).flatMap((n) => agentCapabilities(n, cfg)));
+  const required = declaredRequirements(issue || {}).filter((r) => known.has(r));
+  const canRun = (name) => {
+    const caps = new Set(agentCapabilities(name, cfg));
+    return required.every((r) => caps.has(r));
+  };
+  if (!required.length || defaultLane.every(canRun)) {
+    return { lane: defaultLane, reason: 'default_lane', required };
+  }
+  const lane = [...new Set([...defaultLane, ...(cfg.HIVE_LANE || [])])].filter(canRun);
+  return { lane, reason: lane.length ? 'methodology_lane' : 'no_capable_lane', required };
+}
+
 // storyKey/slugKey/descStoryDeps/descStoryId now live in
 // ./story-identity.mjs — imported + re-exported above (t011 decomposition).
 
@@ -245,15 +327,29 @@ function rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntim
 
 // Choose the best lane agent for a project: hive-tagged stories go to HIVE_LANE
 // (never codex/opencode) regardless of project; everything else honors PROJECT_LANE
-// order, else DEFAULT_LANE. Picks the candidate with the lowest current+projected
-// load that still has capacity.
+// order, else the methodology-aware DEFAULT_LANE (methodologyFallbackLane —
+// needs `issue`; without it the plain DEFAULT_LANE). Picks the candidate with
+// the lowest current+projected load that still has capacity.
 // trace (optional object): filled with { reason, candidates } for the decision
 // record (PANT-816) — the lane it routed by and every agent it considered.
-export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null) {
-  const lane = isHive ? cfg.HIVE_LANE : (cfg.PROJECT_LANE[projectId] || cfg.DEFAULT_LANE);
+export function chooseAgentForProject(projectId, cfg, inflight, runtimeInflight, projected, isHive = false, blockedRuntimes = new Set(), maxPerAgent = Infinity, trace = null, issue = null) {
+  let lane;
+  let reason;
+  if (isHive) {
+    lane = cfg.HIVE_LANE;
+    reason = 'hive_story';
+  } else if (cfg.PROJECT_LANE[projectId]) {
+    lane = cfg.PROJECT_LANE[projectId];
+    reason = 'project_lane';
+  } else if (issue) {
+    ({ lane, reason } = methodologyFallbackLane(issue, cfg));
+  } else {
+    lane = cfg.DEFAULT_LANE;
+    reason = 'default_lane';
+  }
   const { chosen, candidates } = rankLane(lane, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent);
   if (trace) {
-    trace.reason = isHive ? 'hive_story' : (cfg.PROJECT_LANE[projectId] ? 'project_lane' : 'default_lane');
+    trace.reason = reason;
     trace.candidates = candidates;
   }
   return chosen;
@@ -278,7 +374,7 @@ export function chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, proje
     }
     treeCandidates = tree.candidates;
   }
-  const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent, trace);
+  const agent = chooseAgentForProject(issue.project_id, cfg, inflight, runtimeInflight, projected, false, blockedRuntimes, maxPerAgent, trace, issue);
   if (trace && treeCandidates.length) trace.candidates = [...treeCandidates, ...trace.candidates];
   return agent;
 }

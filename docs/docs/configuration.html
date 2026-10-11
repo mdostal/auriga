@@ -299,7 +299,11 @@ RUNTIME_CAP['claude-review'] = 1;</pre>
           </tr>
           <tr>
             <td class="name">DEFAULT_LANE</td>
-            <td>Fallback lane when no PROJECT_LANE entry matches (used for non-hive stories).</td>
+            <td>Fallback lane when no PROJECT_LANE entry matches (used for non-hive stories). Methodology-aware: a story that declares a methodology or skill (a <code>methodology:</code>/<code>skills:</code> line, or a <code>methodology:&lt;name&gt;</code>/<code>skill:&lt;name&gt;</code> label) not every DEFAULT_LANE agent can run goes to the DEFAULT_LANE/HIVE_LANE agents that can.</td>
+          </tr>
+          <tr>
+            <td class="name">RUNTIME_CAPABILITIES</td>
+            <td>Map from runtime → methodologies/skills its agents can run (default: <code>claude</code> runs <code>hive</code>, <code>classic</code>, <code>tdd</code>, <code>bdd</code>; codex/opencode none). An AGENTS entry's own <code>capabilities</code> array overrides its runtime's list.</td>
           </tr>
           <tr>
             <td class="name">HIVE_LANE</td>
