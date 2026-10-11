@@ -13,6 +13,7 @@
 // `unavailable` with the reason. They are never silently reported as `[]`
 // (that would read as "no gaps") and never fetched from Multica directly.
 import express from 'express';
+import { isTerminalIssueStatus } from '../router/lib/issue-status.mjs';
 
 // Mirrors the target_repo resolution order build agents use: a `target_repo:`
 // line in the issue's own YAML description body, else metadata.target_repo.
@@ -100,9 +101,11 @@ export function createGapsRouter(cfg, backlog, core, opts = {}) {
       }
 
       const issues = backlog.listAllIssues(cfg.PROJECT_IDS);
+      // Open stories only: a done/cancelled story without target_repo will
+      // never be dispatched, so it is not a gap (PANT-1024).
       const missingTargetRepo = issues
-        .filter((i) => !resolveTargetRepo(i))
-        .map((i) => ({ identifier: i.identifier, title: i.title, project_id: i.project_id }));
+        .filter((i) => !isTerminalIssueStatus((i.status || '').toLowerCase()) && !resolveTargetRepo(i))
+        .map((i) => ({ identifier: i.identifier, title: i.title, project_id: i.project_id, status: i.status }));
 
       const inflight = core.computeInflight(issues, cfg.AGENTS);
       const queued = core.computeAssignedQueued(issues, cfg.AGENTS);

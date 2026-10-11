@@ -193,6 +193,24 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=2 \
 (Adjust `/app` to wherever the image copies the repo. Keep `--start-period`
 longer than the first cycle, because no heartbeat exists before it finishes.)
 
+### Shared state with auriga-api
+
+When the router and auriga-api run in separate containers, mount one volume
+(e.g. `/var/lib/auriga`) into both and point both at the same files:
+
+- `AURIGA_HEARTBEAT_FILE` — auriga-api's `GET /api/lanes` reports
+  `runnerStatus: running` while the heartbeat is newer than
+  `AURIGA_RUNNER_STALE_MS` (default 3 × `AURIGA_CYCLE_MS`), and
+  `runnerLastCycleAt` from the heartbeat's `ts`. The pidfile check remains a
+  fallback for same-host runs.
+- `AURIGA_RECORDS_FILE` — the router also appends its `decision`, `verify_ok`,
+  `advance`, `zombie`, `review` and `scan` events to this JSONL file, trimmed
+  back to the last `AURIGA_RECORDS_MAX_LINES` (default 5000) lines once it
+  grows 20% past that. auriga-api serves it as
+  `GET /api/decisions?since=<iso>&limit=<n>` → `{ records }`, oldest first
+  (limit default 2000, max 10000). With `since` it returns the first `limit`
+  records after it; without it, the newest `limit`.
+
 ## Human-todo filter (priority-1)
 
 Issues labeled `human-todo`, or carrying metadata `waiting_on: <human name>`

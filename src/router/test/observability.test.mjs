@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { cycle } from '../auriga-router.mjs';
 import * as cfg from '../lib/config.mjs';
-import { checkHeartbeat, createLogger, defaultHeartbeatFile, passForEvent, SUMMARY_PASSES } from '../lib/observability.mjs';
+import { checkHeartbeat, createLogger, defaultHeartbeatFile, passForEvent, readRecords, RECORD_EVENTS, SUMMARY_PASSES } from '../lib/observability.mjs';
 import { createLogSink } from './support/mock-mca.mjs';
 
 const NOOP_SLEEP = async () => {};
@@ -131,6 +131,55 @@ test('createLogger falls back to stdout when the AURIGA_LOG file is unwritable',
   log('a', { n: 1 });
   assert.equal(out.length, 1);
   assert.equal(JSON.parse(out[0]).event, 'a');
+});
+
+// ---- decision records file (PANT-1024) -----------------------------------------
+test('AURIGA_RECORDS_FILE: only record events are appended, alongside the normal log', () => {
+  const file = path.join(tmpDir(), 'router-records.jsonl');
+  const out = [];
+  const log = createLogger({ env: { AURIGA_RECORDS_FILE: file, AURIGA_TENANT_ID: 't1' }, stdout: { write: (s) => out.push(JSON.parse(s)) } });
+  for (const event of [...RECORD_EVENTS, 'cycle_summary', 'route', 'zombie_error']) log(event, { n: 1 });
+  const recs = readRecords(file);
+  assert.deepEqual(recs.map((r) => r.event), [...RECORD_EVENTS]);
+  assert.deepEqual([...RECORD_EVENTS].sort(), ['advance', 'decision', 'review', 'scan', 'verify_ok', 'zombie']);
+  assert.equal(recs[0].tenant_id, 't1');
+  assert.equal(out.length, RECORD_EVENTS.size + 3, 'stdout still gets every event');
+});
+
+test('AURIGA_RECORDS_FILE stays bounded to the last AURIGA_RECORDS_MAX_LINES lines', () => {
+  const file = path.join(tmpDir(), 'router-records.jsonl');
+  const env = { AURIGA_RECORDS_FILE: file, AURIGA_RECORDS_MAX_LINES: '10' };
+  const quiet = { write: () => {} };
+  // Two loggers = two `--once` processes sharing the file.
+  const first = createLogger({ env, stdout: quiet });
+  for (let i = 0; i < 8; i++) first('decision', { i });
+  const second = createLogger({ env, stdout: quiet });
+  for (let i = 8; i < 50; i++) second('decision', { i });
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  assert.ok(lines.length <= 12, `bounded (got ${lines.length})`);
+  assert.ok(lines.length >= 10);
+  assert.equal(JSON.parse(lines.at(-1)).i, 49, 'newest record kept');
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), ['router-records.jsonl'], 'no temp files left behind');
+});
+
+test('AURIGA_RECORDS_FILE unwritable never breaks the log call', () => {
+  const out = [];
+  const log = createLogger({ env: { AURIGA_RECORDS_FILE: path.join(tmpDir(), 'missing-dir', 'r.jsonl') }, stdout: { write: (s) => out.push(s) } });
+  log('decision', {});
+  assert.equal(out.length, 1);
+});
+
+test('the --once router writes the heartbeat before it exits, even when the cycle fails', () => {
+  const dir = tmpDir();
+  const heartbeat = path.join(dir, 'auriga-router.heartbeat');
+  const res = spawnSync(process.execPath, [path.join(ROUTER_DIR, 'auriga-router.mjs'), '--once', '--dry-run', '--no-zombie'], {
+    env: { ...process.env, AURIGA_MULTI_TENANT: '', AURIGA_PIDFILE: path.join(dir, 'r.pid'), AURIGA_HEARTBEAT_FILE: heartbeat, AURIGA_LOG: path.join(dir, 'log.jsonl'), PANTHEON_API_URL: 'http://127.0.0.1:1' },
+    encoding: 'utf8', timeout: 30000,
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(checkHeartbeat(heartbeat, 60000).ok);
+  assert.ok(JSON.parse(fs.readFileSync(heartbeat, 'utf8')).ts);
+  assert.equal(fs.existsSync(path.join(dir, 'r.pid')), false, 'pidfile removed on exit');
 });
 
 // ---- cycle_summary -----------------------------------------------------------
