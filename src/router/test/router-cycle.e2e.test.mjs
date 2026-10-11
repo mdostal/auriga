@@ -546,6 +546,73 @@ test('PANT-444: review give-up sets metadata.blocked_reason so isAgentParked ret
     'review give-up must also set status to blocked');
 });
 
+// ---- PANT-1025 / GH #254: provider quota failures are transient ----
+
+function reviewGiveUpFixture(name, runsFor) {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const fixtureCfg = {
+    ...withFixtureLanes({ [name]: ['auriga-review'] }),
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts: 5, reviewFairnessMaxAttempts: 10 },
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const stuck = makeIssue({ project_id: name, status: 'in_review', assignee_id: REVIEW_AGENT_ID, labels: ['not-a-seed'] });
+  const mocks = createMockAdapters([stuck], fixtureCfg.AGENTS);
+  mocks.runsByIdentifier[stuck.identifier] = runsFor(REVIEW_AGENT_ID);
+  return { fixtureCfg, stuck, ...mocks };
+}
+
+test('PANT-1025: 5 session-limit review failures leave the issue in_review — no give-up, no comment, no re-dispatch', async () => {
+  const now = Date.now();
+  const { fixtureCfg, stuck, backlog, spawn, calls } = reviewGiveUpFixture('pant1025-quota-proj', (agentId) =>
+    [0, 1, 2, 3, 4].map((k) => ({
+      agent_id: agentId, status: 'failed', failure_reason: 'agent_error.unknown',
+      error: "You've hit your session limit · resets 9:20pm (UTC)",
+      created_at: new Date(now - (8 - k) * 60_000).toISOString(),
+      completed_at: new Date(now - (8 - k) * 60_000 + 1000).toISOString(),
+    })));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now });
+
+  assert.equal(stuck.status, 'in_review');
+  assert.equal(log.byEvent('review_give_up').length, 0);
+  assert.equal(calls.status.filter((s) => s.identifier === stuck.identifier).length, 0);
+  assert.equal(calls.comment.filter((c) => c.identifier === stuck.identifier).length, 0);
+  assert.equal(calls.metadata.filter((m) => m.identifier === stuck.identifier).length, 0);
+  assert.equal(calls.rerun.filter((r) => r.identifier === stuck.identifier).length, 0, 'must wait out the reset');
+  assert.equal(calls.assign.filter((a) => a.identifier === stuck.identifier).length, 0);
+});
+
+test('PANT-1025: a review give-up after real errors quotes the error and makes no hang claim', async () => {
+  const stale = Date.now() - 60 * 60_000;
+  const { fixtureCfg, stuck, backlog, spawn, calls } = reviewGiveUpFixture('pant1025-error-proj', (agentId) =>
+    Array.from({ length: 5 }, () => ({
+      agent_id: agentId, status: 'failed', error: 'fatal: could not read from remote repository',
+      created_at: new Date(stale).toISOString(),
+    })));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(log.byEvent('review_give_up').length, 1);
+  const body = calls.comment.find((c) => c.identifier === stuck.identifier)?.body || '';
+  assert.match(body, /> fatal: could not read from remote repository/);
+  assert.doesNotMatch(body, /Playwright|startup hang|zero output tokens/);
+});
+
+test('PANT-1025: a review give-up offers the startup-hang hypothesis only when runs show no error and no output', async () => {
+  const stale = Date.now() - 60 * 60_000;
+  const { fixtureCfg, stuck, backlog, spawn, calls } = reviewGiveUpFixture('pant1025-hang-proj', (agentId) =>
+    Array.from({ length: 5 }, () => ({ agent_id: agentId, status: 'running', created_at: new Date(stale).toISOString() })));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.equal(log.byEvent('review_give_up').length, 1);
+  const body = calls.comment.find((c) => c.identifier === stuck.identifier)?.body || '';
+  assert.match(body, /startup hang/);
+});
+
 // ---- PANT-930 / GH #244: stale give-up reason cleared, ticket reviewed ----
 
 test('PANT-930: an in_review ticket with a stale zombie give-up reason is cleared and dispatched for review', async () => {

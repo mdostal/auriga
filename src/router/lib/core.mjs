@@ -8,7 +8,7 @@ import {
   assignmentFingerprintMatches,
   isRouterManagedAssignment,
 } from './fingerprint.mjs';
-import { classifyRun, hasActiveRun, latestRun } from './run-classification.mjs';
+import { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns } from './run-classification.mjs';
 import { storyKey, slugKey, descStoryDeps, descStoryId } from './story-identity.mjs';
 import {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
@@ -24,7 +24,7 @@ import {
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
-export { classifyRun, hasActiveRun, latestRun };
+export { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
 export { storyKey, slugKey, descStoryDeps, descStoryId };
 export {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
@@ -684,7 +684,10 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
-    const buildRuns = runs.filter((r) => !reviewAgentIds.has(r.agent_id));
+    // PANT-1025: a provider quota failure is transient — wait out the reset
+    // instead of re-firing every cycle, and never count it as an attempt.
+    if (quotaHoldUntilMs(runs, now, cfg.CAPS.redispatchCooldownMs)) continue;
+    const buildRuns = countedRuns(runs, now).filter((r) => !reviewAgentIds.has(r.agent_id));
     if (buildRuns.length >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({
         identifier: i.identifier,
@@ -806,7 +809,15 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
   const formerReviewIds = new Set((cfg.FORMER_REVIEW_AGENT_IDS || []).filter((id) => id && !reviewAgentIds.has(id)));
   const reviewPhaseIds = new Set([...reviewAgentIds, ...formerReviewIds]);
   const reviewMaxAttempts = (cfg.CAPS && cfg.CAPS.reviewMaxAttempts) ?? 5;
-  const reviewRunsOf = (runs) => runs.filter((r) => reviewPhaseIds.has(r.agent_id)).length;
+  // PANT-1025: provider quota failures are not review attempts (countedRuns).
+  const reviewPhaseRuns = (runs) => countedRuns(runs, now).filter((r) => reviewPhaseIds.has(r.agent_id));
+  const reviewRunsOf = (runs) => reviewPhaseRuns(runs).length;
+  const quotaCooldownMs = (cfg.CAPS && cfg.CAPS.redispatchCooldownMs) ?? 15 * 60 * 1000;
+  const giveUpReview = (i, agent, runs) => ({
+    identifier: i.identifier, issueId: i.id, projectId: i.project_id,
+    agent, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
+    diagnosis: diagnoseFailedRuns(reviewPhaseRuns(runs)),
+  });
 
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
@@ -868,16 +879,16 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       const lr = latestRun(runs);
       const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > staleMs;
       if (!stale) continue; // finished recently — give the agent time to act
+      // PANT-1025: the last run hit a provider limit — wait out the reset rather
+      // than re-dispatching into an exhausted account every cycle.
+      if (quotaHoldUntilMs(runs, now, quotaCooldownMs)) continue;
       // PANT-262: give-up after reviewMaxAttempts review-phase runs, parallel to detectZombies'
       // own give-up path (zombieMaxAttempts). PANT-531: count only review-phase runs
       // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
       // give-up-review on its very first review dispatch. The give-up action sets the issue
       // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
       if (reviewRunsOf(runs) >= reviewMaxAttempts) {
-        giveUps.push({
-          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-          agent: idToName[i.assignee_id], action: 'give-up-review', reason: 'review-max-attempts-exhausted',
-        });
+        giveUps.push(giveUpReview(i, idToName[i.assignee_id], runs));
         continue;
       }
       const rerAgentName = idToName[i.assignee_id];
@@ -895,12 +906,10 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     if (formerReviewIds.has(i.assignee_id)) {
       if (hasActiveRun(runs, now, staleMs)) continue; // let the former reviewer's live run finish
       if (reviewRunsOf(runs) >= reviewMaxAttempts) {
-        giveUps.push({
-          identifier: i.identifier, issueId: i.id, projectId: i.project_id,
-          agent: `former-review:${i.assignee_id}`, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
-        });
+        giveUps.push(giveUpReview(i, `former-review:${i.assignee_id}`, runs));
         continue;
       }
+      if (quotaHoldUntilMs(runs, now, quotaCooldownMs)) continue; // PANT-1025
     }
 
     // not yet under review — pick a review agent with free capacity. Dispatch is
