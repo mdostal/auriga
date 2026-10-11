@@ -1723,6 +1723,39 @@ test('detectUnblocks: needs-plan seed blocked with satisfied deps is NOT auto-un
   assert.equal(core.detectUnblocks([seed], statusById, [seed]).length, 0);
 });
 
+// PANT-1052: PANT-1031 was parked in `blocked` by its build agent with a
+// `[needs-decision]` comment but no metadata.blocked_reason. Its deps were all done,
+// so the unblock pass flipped it to todo three times and each flip re-dispatched it.
+test('detectUnblocks: blocked story that already has runs is NOT unblocked (PANT-1031 repro)', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PANT-1031', project_id: 'PCORE', status: 'blocked', title: 'work', labels: ['not-a-seed'], metadata: { depends_on: 'dep1' } };
+  const runs = { 'PANT-1031': [{ status: 'completed' }, { status: 'completed' }, { status: 'completed' }] };
+  assert.equal(core.detectUnblocks([b], statusById, [b], {}, (i) => runs[i.identifier] || []).length, 0);
+});
+
+test('detectUnblocks: blocked story with zero runs still unblocks when runsOf is given (PANT-1052)', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', labels: ['not-a-seed'], metadata: { depends_on: 'dep1' } };
+  const acts = core.detectUnblocks([b], statusById, [b], {}, () => []);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'unblock-to-todo');
+});
+
+test('detectUnblocks: unknown runs (failed fetch) keep the story blocked (PANT-1052)', () => {
+  const statusById = new Map([['dep1', 'done']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', labels: ['not-a-seed'], metadata: { depends_on: 'dep1' } };
+  assert.equal(core.detectUnblocks([b], statusById, [b], {}, () => null).length, 0);
+});
+
+test('detectUnblocks: runsOf is only consulted for stories that pass every other check (PANT-1052)', () => {
+  const statusById = new Map([['dep1', 'in_progress']]);
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'work', labels: ['not-a-seed'], metadata: { depends_on: 'dep1' } };
+  const noDeps = { id: 'T', identifier: 'PAN-2', project_id: 'PCORE', status: 'blocked', title: 'parked', labels: ['not-a-seed'], metadata: {} };
+  const asked = [];
+  core.detectUnblocks([b, noDeps], statusById, [b, noDeps], {}, (i) => { asked.push(i.identifier); return []; });
+  assert.deepEqual(asked, []);
+});
+
 test('detectUnblocks: seed issue with all deps satisfied is NOT unblocked', () => {
   const statusById = new Map([['dep1', 'done']]);
   const seed = { id: 'S2', identifier: 'PAN-2', project_id: 'PCORE', status: 'blocked', title: 'epic plan', labels: ['needs-plan'], metadata: { depends_on: 'dep1' } };

@@ -266,6 +266,33 @@ test('selectReviewDispatch is never handed another tenant\'s in_review issue —
   );
 });
 
+// PANT-1052: PANT-1031 sat in `blocked` after its build agent parked it with a
+// `[needs-decision]` comment but no metadata.blocked_reason. Its deps were done and
+// it already had completed runs. Both the unblock pass and the cascade pass flipped
+// it back to todo and re-dispatched it. Neither may touch a blocked story with runs.
+test('PANT-1052: a blocked story with prior runs and no blocked_reason is neither unblocked nor cascaded', async () => {
+  const OWN_PROJECT = projectId('Pantheon Core');
+  const dep = makeIssue({ project_id: OWN_PROJECT, status: 'done' });
+  const parked = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: dep.id } });
+  const fresh = makeIssue({ project_id: OWN_PROJECT, status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: dep.id } });
+  const boardIssues = [dep, parked, fresh];
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters(boardIssues, cfg.AGENTS);
+  // Completed well outside the redispatch cooldown, so only the new guard stops it.
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  runsByIdentifier[parked.identifier] = [1, 2, 3].map(() => ({ status: 'completed', created_at: old, dispatched_at: old, completed_at: old }));
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP });
+
+  assert.deepEqual(calls.status.filter((s) => s.identifier === parked.identifier), [], 'parked story must stay blocked');
+  assert.equal(parked.status, 'blocked');
+  assert.ok(!calls.assign.some((a) => a.identifier === parked.identifier), 'parked story must not be assigned');
+  assert.ok(!calls.rerun.some((r) => r.identifier === parked.identifier), 'parked story must not be rerun');
+  assert.ok(!calls.unassign.some((u) => u.identifier === parked.identifier), 'parked story must not be unassigned');
+  // Control: a plan-time park with zero runs still unblocks.
+  assert.deepEqual(calls.status.filter((s) => s.identifier === fresh.identifier).map((s) => s.status), ['todo']);
+});
+
 // PANT-40 regression, continued: the review-dispatch leak above was one of SIX
 // status-mutating passes that shared the same unscoped-board-read bug (unblock,
 // parent-rollup, run-completion, review-dispatch, changeback, false-done). This
@@ -1343,19 +1370,20 @@ test('PANT-726: dispatch-review DOES call rerunIssue when assignIssue did not en
 });
 
 test('cascade: skips (logs redispatch-cooldown) when last run completed within redispatchCooldownMs', async () => {
-  // A cascade candidate exists (done parent + blocked child with metadata dep),
-  // but the child's most recent run completed only 30 s ago — well within the
+  // A cascade candidate exists (done parent + unassigned todo child with metadata
+  // dep), but the child's most recent run completed only 30 s ago — well within the
   // 15-min cooldown window. The router must NOT assign/rerun the child and must
-  // log cascade_skip(reason: 'redispatch-cooldown').
+  // log cascade_skip(reason: 'redispatch-cooldown'). (A BLOCKED child with any run
+  // is skipped outright as parked — PANT-1052 — so the cooldown is exercised on todo.)
   const fixtureCfg = withFixtureLanes({ 'cooldown-proj': ['auriga-dev'] });
   const FIXED_NOW = Date.now();
   const doneParent = makeIssue({ project_id: 'cooldown-proj', status: 'done' });
-  const blockedChild = makeIssue({ project_id: 'cooldown-proj', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const todoChild = makeIssue({ project_id: 'cooldown-proj', status: 'todo', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
   const { backlog, spawn, calls, log } = (() => {
-    const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+    const adapters = createMockAdapters([doneParent, todoChild], fixtureCfg.AGENTS);
     // Seed a completed run that finished 30 s ago — within cooldown
     const recentCompletedAt = new Date(FIXED_NOW - 30_000).toISOString();
-    adapters.runsByIdentifier[blockedChild.identifier] = [
+    adapters.runsByIdentifier[todoChild.identifier] = [
       { status: 'completed', completed_at: recentCompletedAt, created_at: recentCompletedAt },
     ];
     return { ...adapters, log: createLogSink() };
@@ -1363,10 +1391,10 @@ test('cascade: skips (logs redispatch-cooldown) when last run completed within r
 
   await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
 
-  assert.ok(!calls.assign.some((r) => r.identifier === blockedChild.identifier),
+  assert.ok(!calls.assign.some((r) => r.identifier === todoChild.identifier),
     'cascade must NOT assign a child whose last run completed within the cooldown window');
   const skipLog = log.byEvent('cascade_skip').find(
-    (e) => e.identifier === blockedChild.identifier && e.reason === 'redispatch-cooldown'
+    (e) => e.identifier === todoChild.identifier && e.reason === 'redispatch-cooldown'
   );
   assert.ok(skipLog, 'cascade_skip(redispatch-cooldown) must be logged for a recently-completed run');
 });
@@ -1378,18 +1406,18 @@ test('cascade: dispatches normally when last run completed beyond redispatchCool
   const FIXED_NOW = Date.now();
   const cooldownMs = cfg.CAPS.redispatchCooldownMs;
   const doneParent = makeIssue({ project_id: 'cooldown-proj-2', status: 'done' });
-  const blockedChild = makeIssue({ project_id: 'cooldown-proj-2', status: 'blocked', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
-  const adapters = createMockAdapters([doneParent, blockedChild], fixtureCfg.AGENTS);
+  const todoChild = makeIssue({ project_id: 'cooldown-proj-2', status: 'todo', labels: ['not-a-seed'], metadata: { depends_on: doneParent.id } });
+  const adapters = createMockAdapters([doneParent, todoChild], fixtureCfg.AGENTS);
   // Seed a completed run that finished 20 min ago — beyond cooldown
   const oldCompletedAt = new Date(FIXED_NOW - cooldownMs - 5 * 60_000).toISOString();
-  adapters.runsByIdentifier[blockedChild.identifier] = [
+  adapters.runsByIdentifier[todoChild.identifier] = [
     { status: 'completed', completed_at: oldCompletedAt, created_at: oldCompletedAt },
   ];
   const log = createLogSink();
 
   await cycle({ backlog: adapters.backlog, spawn: adapters.spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: FIXED_NOW });
 
-  assert.ok(adapters.calls.assign.some((r) => r.identifier === blockedChild.identifier),
+  assert.ok(adapters.calls.assign.some((r) => r.identifier === todoChild.identifier),
     'cascade must dispatch a child whose last run is older than redispatchCooldownMs');
 });
 

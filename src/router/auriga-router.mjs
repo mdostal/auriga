@@ -568,7 +568,13 @@ async function runCycle(opts, state) {
     const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
     // Pass the WHOLE board so DESCRIPTION-declared slug deps resolve against siblings
     // (metadata-only dep resolution missed the m-02-depends-on-m-01 case).
-    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl);
+    // Zero-prior-runs guard (PANT-1052): a failed fetch returns null, which keeps the
+    // story blocked this cycle rather than risk re-dispatching a parked ticket.
+    const runsOf = (i) => {
+      try { return backlog.getIssueRuns(i.identifier); }
+      catch (e) { logImpl('unblock_runs_error', { identifier: i.identifier, error: e.message }); return null; }
+    };
+    const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl, runsOf);
     for (const u of unblocks) {
       logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
       if (!dryRun) {
@@ -724,8 +730,18 @@ async function runCycle(opts, state) {
       }
       // Idempotency 1: never re-fire a story that already has an active run.
       let issueRuns = [];
+      let runsKnown = true;
       try { issueRuns = backlog.getIssueRuns(c.identifier); }
-      catch (e) { logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
+      catch (e) { runsKnown = false; logImpl('cascade_runs_error', { identifier: c.identifier, error: e.message }); }
+      // PANT-1052: a BLOCKED dependent that already ran was parked by an agent or a
+      // human, not by its deps — never flip it back to todo and rerun it. Same
+      // zero-prior-runs guard as the blocked->todo pass; unknown runs count as "ran".
+      if (c.status === ISSUE_STATUS.BLOCKED && (!runsKnown || issueRuns.length > 0)) {
+        const reason = runsKnown ? 'parked-with-runs' : 'runs-unknown';
+        logImpl('cascade_skip', { identifier: c.identifier, reason });
+        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason });
+        continue;
+      }
       if (issueRuns.some((r) => coreImpl.classifyRun(r, now).active)) {
         logImpl('cascade_skip', { identifier: c.identifier, reason: 'active-run' }); continue;
       }
