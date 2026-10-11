@@ -322,15 +322,28 @@ function parkForHuman(dc, identifier, { blockedReason, comment, errorEvent }) {
   catch (e) { dc.log(errorEvent, { identifier, op: 'comment', error: e.message }); }
 }
 
-function reviewGiveUpComment(cfgImpl) {
-  return `Auriga review dispatch accumulated ${cfgImpl.CAPS.reviewMaxAttempts ?? 5}+ runs with no successful output (status: blocked).\n\n` +
-    'The live process showed zero output tokens and near-zero CPU — consistent with a startup hang before prompt processing.\n\n' +
-    '**Leading hypothesis (PANT-262 / GitHub #94):** a Playwright/E2E MCP server registered for the auriga-review agent hangs on startup — browser binary missing or network-blocked install.\n\n' +
-    'Human investigation required:\n' +
-    '1. Inspect MCP server registrations in the auriga-review runtime: `claude mcp list` (or `claude mcp get <name>` per server)\n' +
-    '2. Look for a Playwright / browser-automation MCP server that fails to start (missing binary, blocked network)\n' +
-    '3. Either pre-install the browser binary or remove the problematic MCP registration\n' +
-    '4. Once the root cause is fixed, reset this ticket to `in_review` to re-enter the review queue';
+// PANT-1025: the comment states what the run records show. The startup-hang
+// hypothesis (PANT-262) is only offered when the runs look like a hang (no
+// error, no output); otherwise the real error is quoted.
+function reviewGiveUpComment(cfgImpl, diagnosis = { kind: 'unknown' }) {
+  const head = `Auriga review dispatch accumulated ${cfgImpl.CAPS.reviewMaxAttempts ?? 5}+ runs with no successful output (status: blocked).\n\n`;
+  const reset = '\n\nOnce the root cause is fixed, reset this ticket to `in_review` to re-enter the review queue.';
+  if (diagnosis.kind === 'error') {
+    const quoted = diagnosis.error.split('\n').slice(0, 5).map((l) => `> ${l}`).join('\n');
+    return head +
+      `The run records report this error (${diagnosis.count} of ${diagnosis.total} review run(s)):\n\n${quoted}\n\n` +
+      'Human investigation required: check the review runs (`multica issue runs <issue>`) and fix what that error points at.' + reset;
+  }
+  if (diagnosis.kind === 'hang') {
+    return head +
+      'The review runs recorded no error and no output — consistent with a startup hang before prompt processing.\n\n' +
+      '**Possible cause (PANT-262 / GitHub #94):** an MCP server registered for the review agent (for example Playwright/E2E) hangs on startup — browser binary missing or network-blocked install.\n\n' +
+      'Human investigation required:\n' +
+      '1. Inspect MCP server registrations in the review runtime: `claude mcp list` (or `claude mcp get <name>` per server)\n' +
+      '2. Look for an MCP server that fails to start (missing binary, blocked network)\n' +
+      '3. Either pre-install what it needs or remove the problematic registration' + reset;
+  }
+  return head + 'The run records carry no error text to quote. Human investigation required: check the review runs (`multica issue runs <issue>`).' + reset;
 }
 
 function zombieGiveUpComment(cfgImpl) {
@@ -833,7 +846,7 @@ async function runCycle(opts, state) {
       recordDecision(dc, { identifier: r.identifier, pass: 'review', action: 'skip', reason: 'give_up_max_attempts', candidates: [] });
       if (!dryRun) {
         parkForHuman(dc, r.identifier, {
-          blockedReason: 'review-give-up-max-attempts', comment: reviewGiveUpComment(cfgImpl), errorEvent: 'review_give_up_error',
+          blockedReason: 'review-give-up-max-attempts', comment: reviewGiveUpComment(cfgImpl, r.diagnosis), errorEvent: 'review_give_up_error',
         });
       }
       continue;

@@ -13,6 +13,7 @@ All notable changes to Auriga are documented in this file.
 ### Fixed
 
 - `GET /api/gaps` `stories_missing_target_repo` counts only open stories (not done/cancelled) and includes each story's `status` (PANT-1024).
+- **Provider quota errors no longer burn review attempts** (PANT-1025, GH #254): a run that failed on a provider limit ("session limit", usage limit, 429, `out_of_credit`) no longer counts toward `reviewMaxAttempts` or `zombieMaxAttempts`. The issue waits for the reset time the error gives (or `redispatchCooldownMs`) before it is re-dispatched, instead of being re-dispatched every cycle. The review give-up comment now quotes the error from the run records. The Playwright startup-hang hypothesis appears only when the runs recorded no error and no output.
 
 ## [0.3.0] - 2026-09-06
 
