@@ -6,9 +6,28 @@
 // review slot, and with a RUNTIME_CAP of 1 a single phantom freezes every
 // review in the tenant (PANT-737 seeds, PANT-843 parked tickets).
 
-// Ignore smoke/scratch/verification tickets by title.
-export function isSmokeScratch(title = '') {
-  return /\b(smoke|scratch)\b/i.test(title) || /verification-swarm/i.test(title);
+// PANT-1008 (GH #251): smoke/scratch tickets are recognised by an EXPLICIT
+// marker only — a `smoke`/`scratch` label, or a `[smoke]` / `[scratch]` /
+// `SMOKE:` / `SCRATCH:` title prefix — plus generated `verification-swarm`
+// sub-issues. Matching the bare words anywhere in a title dropped real stories
+// ("ABI smoke harness", PANT-995) from dispatch with no log line.
+export const SMOKE_SCRATCH_LABELS = Object.freeze(['smoke', 'scratch']);
+const SMOKE_SCRATCH_TITLE_PREFIX = /^\s*(?:\[(?:smoke|scratch)\]|(?:smoke|scratch):)/i;
+
+// Returns why an issue (or bare title) is a smoke/scratch ticket, or null.
+export function smokeScratchReason(issueOrTitle = '') {
+  const issue = typeof issueOrTitle === 'string' ? { title: issueOrTitle } : issueOrTitle || {};
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.some((l) => SMOKE_SCRATCH_LABELS.includes(l))) return 'smoke-scratch-label';
+  const title = issue.title || '';
+  if (SMOKE_SCRATCH_TITLE_PREFIX.test(title)) return 'smoke-scratch-title-prefix';
+  if (/verification-swarm/i.test(title)) return 'verification-swarm';
+  return null;
+}
+
+// Accepts an issue (labels + title) or a bare title string.
+export function isSmokeScratch(issueOrTitle = '') {
+  return smokeScratchReason(issueOrTitle) !== null;
 }
 
 export const HUMAN_TODO_LABEL = 'human-todo';
@@ -65,7 +84,7 @@ export function isSeedByLabel(issue) {
 // True when selectReviewDispatch never acts on this in_review ticket — and so
 // computeReviewInflight must never count it against review capacity.
 export function isReviewDispatchSkipped(issue, cfg) {
-  if (isSmokeScratch(issue.title)) return true;
+  if (isSmokeScratch(issue)) return true;
   if (isAgentParked(issue)) return true;
   if (isHumanTodo(issue, cfg)) return true; // human controls this review
   if (isSeedByLabel(issue)) return true; // PANT-625/PANT-737: seeds are planning-lane

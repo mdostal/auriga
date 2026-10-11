@@ -20,7 +20,7 @@ import {
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
 import {
-  isSmokeScratch, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isSeedByLabel, isReviewDispatchSkipped,
+  isSmokeScratch, smokeScratchReason, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isSeedByLabel, isReviewDispatchSkipped,
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
@@ -35,7 +35,7 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
-export { isSmokeScratch, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
+export { isSmokeScratch, smokeScratchReason, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
 
 // isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
 // ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.
@@ -418,19 +418,27 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // dependency gate can resolve a dep in any state (done/in_progress/todo/...).
   const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
 
-  // Candidate pool: unassigned or router-managed assigned, status todo, not smoke/scratch,
-  // project in scan set, NOT a human-todo (priority-1 rule — see isHumanTodo; routed to the
-  // human queue instead via scripts/export-human-queue.mjs), and with its depends_on graph
+  // Candidate pool: unassigned or router-managed assigned, status todo, project in scan
+  // set, not smoke/scratch (explicit marker only — see smokeScratchReason), NOT a
+  // human-todo (priority-1 rule — see isHumanTodo; routed to the human queue instead
+  // via scripts/export-human-queue.mjs), and with its depends_on graph
   // satisfied (never dispatch a decomposed story whose dependency stories aren't done yet).
   // Router-managed assigned todos are included so idempotent dispatch can re-evaluate them
   // (PAN-8245: content changes trigger reassignment; unchanged router assignments noop).
+  // PANT-1008: smoke/scratch drops are returned as data (candidateSkips) so the
+  // router logs a candidate_skip with the reason instead of dropping silently.
+  const candidateSkips = [];
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter(isPlainTodo) // PANT-931: a backlog/blocked column mapped onto todo is parked, not work
     .filter((i) => !exclude.has(i.identifier))
     .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
-    .filter((i) => !isSmokeScratch(i.title))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
+    .filter((i) => {
+      const reason = smokeScratchReason(i);
+      if (reason) candidateSkips.push({ identifier: i.identifier, issueId: i.id, reason });
+      return !reason;
+    })
     .filter((i) => !isHumanTodo(i, cfg))
     .filter((i) => !isAgentParked(i))
     .filter((i) => allDepsSatisfied(i, statusById, issues));
@@ -565,6 +573,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   chosen.handDowns = handDowns;
   chosen.handDownRejected = handDownRejected;
   chosen.seedNoPlanning = seedNoPlanning;
+  chosen.candidateSkips = candidateSkips;
   return chosen;
 }
 
@@ -576,7 +585,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
 export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.now(), cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of inProgressIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // label-only: heuristic fires on any top-level in_progress story
@@ -601,7 +610,7 @@ export function detectRunCompletions(inProgressIssues, runsByIssue, now = Date.n
 export function detectVerifiedDone(inReviewIssues, prsByIssue, cfg = {}, allIssues = []) {
   const actions = [];
   for (const i of inReviewIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedForTenant(i, allIssues, cfg)) continue; // seeds have planning PRs that must not advance the epic to done
@@ -644,7 +653,7 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
   // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
   const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
   for (const i of inProgressIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
@@ -983,7 +992,7 @@ export function allDepsSatisfied(issue, statusById, allIssues = []) {
 export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = {}) {
   const actions = [];
   for (const i of blockedIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isSeedForTenant(i, allIssues, cfg)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
@@ -1028,7 +1037,7 @@ export function samePrUrl(a, b) {
 export function detectFalseDone(doneIssues, openPrs = [], cfg = {}, allIssues = [], mergedPrs = []) {
   const actions = [];
   for (const i of doneIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (allIssues.length > 0 && isSeedForTenant(i, allIssues, cfg)) continue; // seeds must not be demoted to in_review — review lane dispatches build artifacts, not planning docs
@@ -1108,7 +1117,7 @@ export function detectParentDone(issues, cfg = {}) {
   for (const [parentId, kids] of childrenByParent) {
     const parent = byId.get(parentId);
     if (!parent) continue; // parent not in scanned set — can't judge
-    if (isSmokeScratch(parent.title)) continue;
+    if (isSmokeScratch(parent)) continue;
     if (isAgentParked(parent)) continue; // agent parked: human must close
     if (isHumanTodo(parent, cfg)) continue; // human-todo gate: never auto-close
     const pst = (parent.status || '').toLowerCase();
@@ -1210,7 +1219,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
     // todo is recovered by detectAssignedIdle instead, on its CURRENT assignee.
     if (i.assignee_id && st === ISSUE_STATUS.TODO) continue;
     if (isAgentParked(i)) continue; // parked for a human — never cascade-redispatch
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (aligned.size && !aligned.has(i.project_id)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // seeds belong to the planning lane — never cascade to build
@@ -1231,7 +1240,7 @@ export function detectCascadeDispatch(issues, completedIds, statusById, cfg = {}
 export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIssues = []) {
   const actions = [];
   for (const i of changesRequestedIssues) {
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // never override a human changes_requested on a labeled planning seed
@@ -1293,7 +1302,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
   for (const i of todoIssues) {
     if (!isPlainTodo(i)) continue; // PANT-844: never backlog / blocked / custom non-todo columns
     if (!i.assignee_id || !knownAgentIds.has(i.assignee_id)) continue;
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isAwaitingDecision(i)) continue; // PANT-844: waits on a human answer, not a rerun
@@ -1377,7 +1386,7 @@ export function detectArchivedAssignments(todoIssues, cfg, knownAgentIds = agent
   for (const i of todoIssues) {
     if ((i.status || '').toLowerCase() !== 'todo') continue;
     if (!i.assignee_id || knownAgentIds.has(i.assignee_id)) continue;
-    if (isSmokeScratch(i.title)) continue;
+    if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     actions.push({

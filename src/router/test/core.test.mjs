@@ -60,10 +60,46 @@ const story = (id, project, num, parentId, assignee = null, title = 'work') =>
 
 test('isSmokeScratch matches smoke/scratch/verification tickets only', () => {
   assert.ok(core.isSmokeScratch('SMOKE: dispatch nurse test'));
-  assert.ok(core.isSmokeScratch('SCRATCH curl-probe sub-issue'));
+  assert.ok(core.isSmokeScratch('[scratch] curl-probe sub-issue'));
+  assert.ok(core.isSmokeScratch('  [Smoke] check health'));
   assert.ok(core.isSmokeScratch('verification-swarm sub-issue 2'));
   assert.ok(!core.isSmokeScratch('[P1] Rate-floor filter'));
-  assert.ok(!core.isSmokeScratch('Implement smokestack monitor')); // word-boundary: "smokestack" != "smoke"
+  assert.ok(!core.isSmokeScratch('Implement smokestack monitor'));
+});
+
+test('isSmokeScratch: real stories that merely mention smoke/scratch are NOT dropped — PANT-1008', () => {
+  // PANT-995 sat undispatched for an hour on the old \b(smoke|scratch)\b title match.
+  assert.ok(!core.isSmokeScratch('[minerva] ABI smoke harness plus docs/abi.md'));
+  assert.ok(!core.isSmokeScratch('Add a smoke check to the deploy script'));
+  assert.ok(!core.isSmokeScratch('Write results to a scratch file'));
+  assert.ok(!core.isSmokeScratch('SCRATCH curl-probe sub-issue')); // no colon/brackets: not a marker
+  assert.ok(!core.isSmokeScratch({ title: 'Fix the [smoke] prefix parser' })); // marker must lead the title
+});
+
+test('smokeScratchReason: label or title-prefix marker, with the reason — PANT-1008', () => {
+  assert.equal(core.smokeScratchReason({ title: 'ABI smoke harness', labels: ['smoke'] }), 'smoke-scratch-label');
+  assert.equal(core.smokeScratchReason({ title: 'probe', labels: [{ name: 'Scratch' }] }), 'smoke-scratch-label');
+  assert.equal(core.smokeScratchReason({ title: '[smoke] check health', labels: [] }), 'smoke-scratch-title-prefix');
+  assert.equal(core.smokeScratchReason('scratch: try a thing'), 'smoke-scratch-title-prefix');
+  assert.equal(core.smokeScratchReason({ title: 'verification-swarm sub-issue 2' }), 'verification-swarm');
+  assert.equal(core.smokeScratchReason({ title: 'ABI smoke harness', labels: ['build'] }), null);
+  assert.equal(core.smokeScratchReason(undefined), null);
+  assert.equal(core.smokeScratchReason({}), null);
+});
+
+test('selectAssignments: smoke/scratch drops are reported as candidateSkips; a "smoke harness" story dispatches — PANT-1008', () => {
+  const issues = [
+    story('s1', 'AURIGA', 1, 'EPIC1', null, '[smoke] dispatch probe'),
+    { ...story('s2', 'AURIGA', 2, 'EPIC1'), labels: ['scratch'] },
+    story('r1', 'AURIGA', 3, 'EPIC1', null, 'ABI smoke harness plus docs'),
+    story('x1', 'OTHER-PROJECT', 4, 'EPIC1', null, '[smoke] not ours'),
+  ];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['r1']);
+  assert.deepEqual(picks.candidateSkips, [
+    { identifier: 's1', issueId: 's1', reason: 'smoke-scratch-title-prefix' },
+    { identifier: 's2', issueId: 's2', reason: 'smoke-scratch-label' },
+  ], 'only in-scope todos are reported; other projects are not ours to log');
 });
 
 test('classifyRun distinguishes active/done/failed', () => {
@@ -1166,7 +1202,7 @@ test('computeReviewInflight: counts exactly the reviewer-assigned tickets select
   // Every skip reason in selectReviewDispatch (smoke, parked, human-todo label,
   // waiting_on a human, seed) must also be excluded from inflight.
   const skipped = [
-    inReview('SK-1', 1, 'RV', { title: 'smoke test ticket' }),
+    inReview('SK-1', 1, 'RV', { title: '[smoke] test ticket' }),
     inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'waiting for human sign-off' } }),
     inReview('SK-3', 3, 'RV', { labels: [{ name: 'human-todo' }] }),
     inReview('SK-4', 4, 'RV', { metadata: { waiting_on: 'Mathew' } }),
@@ -1665,7 +1701,7 @@ test('detectUnblocks: blocked story with NO declared deps is left untouched', ()
 
 test('detectUnblocks: smoke/scratch blocked story ignored even with satisfied deps', () => {
   const statusById = new Map([['dep1', 'done']]);
-  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'SMOKE test', parent_issue_id: 'parent-x', metadata: { depends_on: 'dep1' } };
+  const b = { id: 'S', identifier: 'PAN-1', project_id: 'PCORE', status: 'blocked', title: 'SMOKE: test', parent_issue_id: 'parent-x', metadata: { depends_on: 'dep1' } };
   assert.equal(core.detectUnblocks([b], statusById).length, 0);
 });
 

@@ -53,8 +53,8 @@ test('isHumanTodoBroad: a normal non-human issue is excluded', () => {
   assert.equal(isHumanTodoBroad(i, CFG), false);
 });
 
-test('buildExtractionReport: smoke/scratch titles are excluded even if they would otherwise match', () => {
-  const i = issue('s1', { title: 'HUMAN TODO smoke test scratch harness', labels: ['human-todo'] });
+test('buildExtractionReport: smoke/scratch-marked issues are excluded even if they would otherwise match', () => {
+  const i = issue('s1', { title: '[smoke] HUMAN TODO test harness', labels: ['human-todo'] });
   const report = buildExtractionReport([i], CFG);
   assert.deepEqual(report.entries, []);
 });
