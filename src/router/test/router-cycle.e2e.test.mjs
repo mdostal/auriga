@@ -1129,6 +1129,23 @@ test('cascade: skips (does not call rerunIssue) when all agents are at capacity'
   assert.ok(skipLog, 'cascade_skip(no-capacity) must be logged when skipping due to full inflight');
 });
 
+test('PANT-1008: a smoke-marked todo logs candidate_skip with its reason and a scan count; a "smoke harness" story dispatches', async () => {
+  const fixtureCfg = withFixtureLanes({ 'smoke-proj': ['auriga-dev'] });
+  const marked = makeIssue({ project_id: 'smoke-proj', title: '[smoke] dispatch probe', labels: ['not-a-seed'] });
+  const real = makeIssue({ project_id: 'smoke-proj', title: 'ABI smoke harness plus docs/abi.md', labels: ['not-a-seed'] });
+  const { backlog, spawn, calls } = createMockAdapters([marked, real], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  assert.deepEqual(calls.assign.map((a) => a.identifier), [real.identifier]);
+  const skips = log.byEvent('candidate_skip');
+  assert.deepEqual(skips.map((e) => [e.identifier, e.reason]), [[marked.identifier, 'smoke-scratch-title-prefix']]);
+  const [scan] = log.byEvent('scan');
+  assert.equal(scan.todoUnassigned, 1);
+  assert.equal(scan.todoSmokeScratch, 1);
+});
+
 test('maxAssign respected by selectAssignments maxTotal (remaining=0 yields maxTotal=0 not perCycleTotal)', async () => {
   // maxAssign:0 means no assignments should happen. Before the fix,
   // remaining=0 would fall back to perCycleTotal via the || operator, passing

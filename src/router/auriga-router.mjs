@@ -507,10 +507,13 @@ async function runCycle(opts, state) {
   // signal that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
-  const todo = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id && !coreImpl.isSmokeScratch(i.title));
+  const todoAll = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id);
+  const todo = todoAll.filter((i) => !coreImpl.isSmokeScratch(i));
   logImpl('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
+    // PANT-1008: unassigned todos held back as smoke/scratch, so they're never invisible.
+    todoSmokeScratch: todoAll.length - todo.length,
     inflight,
     runtimeInflight,
     assignedQueued,
@@ -1045,6 +1048,10 @@ async function runCycle(opts, state) {
   // labeled ones are held. Log both every cycle so neither is ever silent.
   for (const s of picks.seedNoPlanning || []) {
     logImpl('seed_no_planning_agent', { identifier: s.identifier, planningAgent: coreImpl.PLANNING_AGENT, fallback: s.fallback ? 'build_lane' : 'held' });
+  }
+  // PANT-1008: todos dropped from the candidate pool as smoke/scratch, with the marker that matched.
+  for (const s of picks.candidateSkips || []) {
+    logImpl('candidate_skip', { identifier: s.identifier, reason: s.reason });
   }
 
   for (const p of picks) {
