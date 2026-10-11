@@ -949,9 +949,11 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 // blocked work.
 //
 // The router applies the transition (status->todo + unassign so it re-enters
-// routing as a fresh candidate) and separately guards with a zero-prior-runs
-// check, so a story that was parked in `blocked` but already carries runs / an
-// open PR (an anomaly) is never re-dispatched.
+// routing as a fresh candidate). Zero-prior-runs guard (PANT-1052): the router
+// passes `runsOf`, and a blocked story that already carries runs is never
+// unblocked. A plan-time dependency park has never run; one with runs was parked
+// by an agent or a human (e.g. a `[needs-decision]` park that didn't set
+// metadata.blocked_reason — PANT-1031 was flipped back to todo three times).
 // Are this story's DESCRIPTION-declared dependency slugs all satisfied? Each dep
 // slug (e.g. "m-01-core-recall-interface" or "p1-router-capability-routing") is
 // resolved to its SIBLING story (same parent_issue_id) by, in order:
@@ -998,7 +1000,10 @@ export function allDepsSatisfied(issue, statusById, allIssues = []) {
 // 2026-07-31) lets the pass resolve DESCRIPTION-declared slug deps against siblings,
 // not just metadata ticket-id deps — the m-02-depends-on-m-01 case, where the dep
 // lived only in the description and the child never unblocked though its dep was done.
-export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = {}) {
+// `runsOf` (optional): (issue) => runs[] | null. When given, a story with any run is
+// skipped, and so is one whose runs are unknown (null — a failed fetch); it is only
+// consulted for stories that pass every other check, so the fetch stays bounded.
+export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = {}, runsOf = null) {
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i)) continue;
@@ -1007,6 +1012,10 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
+    if (runsOf) {
+      const runs = runsOf(i);
+      if (!Array.isArray(runs) || runs.length > 0) continue; // PANT-1052: already ran -> parked, not dependency-blocked
+    }
     actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
   }
   return actions;
