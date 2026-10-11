@@ -741,13 +741,14 @@ async function runCycle(opts, state) {
       // force-reruns, whether or not the assign already enqueued a run.
       const maxPerAgentCascade = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
       const trace = {};
-      const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, coreImpl.isHiveStory(issueObj), blockedRuntimes, maxPerAgentCascade, trace);
+      const agent = coreImpl.chooseAgentForProject(c.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, coreImpl.isHiveStory(issueObj), blockedRuntimes, maxPerAgentCascade, trace, issueObj);
       // Skip only when no agent has capacity AND the issue has no existing assignee.
       // If the issue already has an assignee, rerunIssue re-enqueues it without a
       // new assignment — no need to skip; the assigned-idle path's ~10 min lag is avoided.
       if (!agent && !issueObj.assignee_id) {
-        logImpl('cascade_skip', { identifier: c.identifier, reason: 'no-capacity' });
-        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason: 'no-capacity', candidates: trace.candidates });
+        const reason = trace.reason === 'no_capable_lane' ? 'no-capable-lane' : 'no-capacity';
+        logImpl('cascade_skip', { identifier: c.identifier, reason });
+        skipDecision(dc, { identifier: c.identifier, pass: 'cascade', reason, candidates: trace.candidates });
         continue;
       }
       // PANT-648: with no lane agent, the rerun goes to the existing assignee, and
@@ -935,10 +936,11 @@ async function runCycle(opts, state) {
         // needs (re)routing — route via its lane
         const maxPerAgentZombie = cfgImpl.CAPS.perCyclePerAgent ?? Infinity;
         const trace = {};
-        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, z.isHive, blockedRuntimes, maxPerAgentZombie, trace);
+        const agent = coreImpl.chooseAgentForProject(z.projectId, cfgImpl, inflight, runtimeInflight, { perAgent: {}, perRuntime: loopRtProjected, perAgentCycle: priorAgentCycleAssigns }, z.isHive, blockedRuntimes, maxPerAgentZombie, trace, zIssue);
         if (!agent) {
-          logImpl('zombie_skip', { ...z, reason: 'no-lane-capacity' });
-          skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason: 'no-lane-capacity', candidates: trace.candidates });
+          const reason = trace.reason === 'no_capable_lane' ? 'no-capable-lane' : 'no-lane-capacity';
+          logImpl('zombie_skip', { ...z, reason });
+          skipDecision(dc, { identifier: z.identifier, pass: 'zombie', reason, candidates: trace.candidates });
           continue;
         }
         const zAgentRt = cfgImpl.AGENTS[agent]?.runtime;

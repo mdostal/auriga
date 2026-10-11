@@ -22,14 +22,14 @@
 import {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
   RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
+  RUNTIME_CAPABILITIES, REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 } from './config-substrate.mjs';
 import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
   RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
+  RUNTIME_CAPABILITIES, REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 };
 
 // Task type -> preferred model name (PAN-7938: model selection routing).

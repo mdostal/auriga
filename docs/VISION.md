@@ -23,8 +23,10 @@ What works, honestly:
 - **Capability-aware routing** — `isHiveStory()` detects plugin-hive/Minerva-planned stories (by
   label, or by the `methodology:` + `steps:` + hive-role `agent:` shape Minerva emits) and forces
   them onto `HIVE_LANE` (Claude + plugin-hive), because Codex/Opencode lanes have no plugin-hive
-  install and would silently self-block. Everything else honors `PROJECT_LANE`, falling back to
-  `DEFAULT_LANE`.
+  install and would silently self-block. Everything else honors `PROJECT_LANE`, falling back to a
+  methodology-aware `DEFAULT_LANE`: a story that declares a methodology or skill (a
+  `methodology:`/`skills:` line or label) lands only on agents whose runtime can run it
+  (`RUNTIME_CAPABILITIES`, `methodologyFallbackLane()` in `core.mjs`).
 - **Pure-code state-machine transitions** — `in_progress → in_review` when the latest run is done
   and not failed; `in_review → done` **only** when a linked PR has actually merged — run status
   alone is never trusted as completion. The PR facts come from the board's own issue→PR linkage
@@ -91,15 +93,22 @@ separable.
   registered parent's board (a genuinely new `createIssue` adapter capability — confirmed live
   against `core-api`'s real `POST /api/backlog/issues`), then closed/commented/unassigned locally.
   No configured parent falls through to the existing human-todo path unchanged. Recursive by
-  construction — see §③. Hand-down (`t016`) is queued next, reusing the same primitive.
+  construction — see §③.
+- **Orchestrator hand-down** (`t016`, PANT-820, shipped 2026-09-27) — a `PROJECT_ROUTE` entry
+  `{ kind: 'child', childId }` sends that project's todos to a registered child board through the
+  same cross-board `createIssue` primitive; an unknown or unreachable child holds the ticket for a
+  human instead of building it locally.
+- **Decision records** (PANT-816, shipped 2026-09-28) — one versioned `decision` JSONL event per
+  routing choice (pass, action, agent, runtime, reason, candidates, caps), so routing policy can be
+  compared across runs. Schema: `src/router/README.md` ("Decision records").
+- **Methodology-aware `DEFAULT_LANE`** (PANT-997) — a non-`PROJECT_LANE` story that declares a
+  methodology or skill its default lane can't run is routed to `DEFAULT_LANE`/`HIVE_LANE` agents
+  whose runtime can (`RUNTIME_CAPABILITIES`), instead of the flat Codex spread.
 
 **What is genuinely not built yet:**
 
-- Hand-**down** (parent→child) on top of the orchestrator topology — see `t016` in §③.
 - Dynamic lane/agent discovery — `config-substrate.mjs`'s `AGENTS`/`PROJECT_LANE` are still
   hand-maintained against a specific workspace, not discovered live.
-- Decision-record metrics — no per-assignment structured log (lane/runtime/rationale) exists yet
-  for A/B-ing routing policy.
 - A second real board adapter (Linear/Jira/GitHub Issues) — the adapter *interface* generalizes
   cleanly, but only Multica/Pantheon has an implementation.
 - The earlier `feat/routing-engine` TypeScript board-state consumer (adapters, escalation,
@@ -111,18 +120,10 @@ separable.
 
 ## ② Goals — near-term next steps
 
-- **Orchestrator hand-down (`t016`)** (see §③) — the concrete next slice now that hand-up (`t015`)
-  has shipped: a `PROJECT_LANE`-style routing-table extension so a project can resolve to a specific
-  CHILD board instead of a local agent, reusing `t015`'s cross-board `createIssue` primitive
-  unchanged.
-- **Methodology-aware `DEFAULT_LANE`.** Today `DEFAULT_LANE` is a flat spread across Codex agents;
-  make the fallback itself capability/methodology-aware so a non-`PROJECT_LANE` story still lands on
-  a runtime that can actually execute its declared methodology.
 - **Dynamic lane/agent discovery.** Stop hand-maintaining agent UUIDs; discover lanes and their
   capabilities from the substrate.
-- **Metrics at every decision.** Emit a decision record per routing choice (lane, runtime, why) so
-  routing policy can be A/B'd — the platform-wide toggle-and-compare model, applied to the router
-  itself.
+- **A/B on the decision records.** Decision records now exist (see §①); the next step is the
+  toggle-and-compare tooling that reads them to compare routing policies.
 
 ---
 
@@ -165,7 +166,7 @@ Sequenced as two epics sharing that one primitive: **`t015` (shipped)** did the 
 (one parent, no selection ambiguity, explicit-label-triggered) — no auto-detection of "doesn't
 fit," no operator-chat ticket-origination surface (a separate, bigger question: does a top-level
 orchestrator even have its own board, or does it work from pure conversational input?). **`t016`**
-(queued next, not started) adds hand-down: a `PROJECT_LANE`-style routing-table extension so a
+(shipped 2026-09-27) added hand-down: a `PROJECT_LANE`-style routing-table extension so a
 project can resolve to `{ kind: 'child', childId }` instead of `{ kind: 'agent', lane }`, reusing
 `t015`'s cross-board-write primitive unchanged.
 
