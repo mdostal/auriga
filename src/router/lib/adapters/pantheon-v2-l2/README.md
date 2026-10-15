@@ -41,6 +41,21 @@ access to `core-api` (`PANTHEON_API_URL`, defaulting to
 `http://core-api:3012`, matching docker-compose's internal hostname). Only
 `core-api` itself ever holds a real Multica PAT.
 
+**Operator token (PANT-1078):** core-api checks Pantheon's operator token on
+every write (`PANTHEON_REQUIRE_OPERATOR_TOKEN`, PANT-1028), so every mutating
+call this adapter makes carries `x-pantheon-operator-token`
+(`./operator-token.mjs`, wired through `./http-runner.mjs`'s `operatorToken`
+hook). The token comes from Pantheon's secrets facade: `POST
+/api/secrets/inject` (`tags=provider=pantheon,kind=operator-token`,
+`target:"file"`, a fresh path in the shared `/pantheon-secrets` volume) → read
+→ delete. It is looked up lazily on the first write, once per process, held
+only in memory, and handed to curl on stdin rather than argv. A miss
+(standalone Auriga, core-api down, volume not mounted) is logged once; writes
+go out without it and the next write retries, at most once a minute. A 401 on
+a write drops the token so it is looked up again. `PANTHEON_OPERATOR_TOKEN`
+overrides the facade for local dev; `AURIGA_OPERATOR_TOKEN_SOURCE=none` turns
+the lookup off.
+
 **Known, deliberate scope boundaries** (see `index.mjs`'s own comments for
 the full reasoning on each):
 
