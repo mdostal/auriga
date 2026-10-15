@@ -35,6 +35,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { makeHttpRun } from './http-runner.mjs';
+import { createOperatorTokenSource } from './operator-token.mjs';
 import { makeDispatch, makeDescribeLanes } from '../spawn-dispatch.mjs';
 import {
   PROJECT_LANE as SUBSTRATE_PROJECT_LANE,
@@ -52,6 +53,29 @@ const DEFAULT_BASE_URL = 'http://core-api:3012';
 // board that genuinely has one project.
 export const PANTHEON_BOARD_SENTINEL = '__pantheon_board__';
 const DEFAULT_VERIFY_DELAY_MS = 6000;
+
+// One operator-token source per core-api base URL, shared by every adapter
+// this process builds (backlog + spawn, every tenant, every multi-tenant
+// rebuild), so the token is looked up once per process, not once per
+// adapter (PANT-1078, see ./operator-token.mjs). cfg.operatorToken overrides.
+const operatorTokenSources = new Map();
+function operatorTokenFor(cfg, exec, baseUrl) {
+  if (cfg.operatorToken) return cfg.operatorToken;
+  if (!operatorTokenSources.has(baseUrl)) {
+    operatorTokenSources.set(baseUrl, createOperatorTokenSource({ exec, baseUrl }));
+  }
+  return operatorTokenSources.get(baseUrl);
+}
+
+function makeAdapterRun(cfg) {
+  const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
+  const exec = cfg.exec || execFileSync;
+  return makeHttpRun(exec, BASE_URL, {
+    ...(TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {}),
+    operatorToken: operatorTokenFor(cfg, exec, BASE_URL),
+  });
+}
 
 // Real synchronous sleep — ported verbatim from multica/spawn.mjs (same
 // Atomics.wait-on-a-throwaway-SharedArrayBuffer trick; see that file's own
@@ -110,10 +134,7 @@ function toRawIssue(issue) {
  * @returns {import('../backlog-adapter.mjs').BacklogAdapter}
  */
 export function createPantheonV2L2BacklogAdapter(cfg = {}) {
-  const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
-  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
-    TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
+  const run = makeAdapterRun(cfg);
 
   // Per-project issue list. NOT called by auriga-router.mjs's own cycle()
   // today (it uses listAllIssues below instead) but part of the
@@ -269,10 +290,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
  * @returns {import('../spawn-adapter.mjs').SpawnAdapter}
  */
 export function createPantheonV2L2SpawnAdapter(cfg = {}) {
-  const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
-  const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
-  const run = makeHttpRun(cfg.exec || execFileSync, BASE_URL,
-    TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {});
+  const run = makeAdapterRun(cfg);
   const VERIFY_DELAY_MS = cfg.verifyDelayMs ?? DEFAULT_VERIFY_DELAY_MS;
   const sleep = cfg.sleep || sleepSync;
 

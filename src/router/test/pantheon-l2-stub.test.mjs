@@ -12,6 +12,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+// These suites pin the request each adapter method makes, so the operator-token
+// lookup (an extra POST /api/secrets/inject before the first write) stays off
+// here; operator-token.test.mjs covers it.
+process.env.AURIGA_OPERATOR_TOKEN_SOURCE = 'none';
+
 let importCounter = 0;
 async function freshAdapterModule() {
   importCounter++;
