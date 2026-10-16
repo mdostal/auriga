@@ -445,3 +445,53 @@ test('PANT-844: isAwaitingDecision matches label, status and status_name only', 
   assert.equal(core.isAwaitingDecision({ status: 'todo', labels: [{ name: 'decision' }] }), false);
   assert.equal(core.isAwaitingDecision({}), false);
 });
+
+// PANT-1154 / auriga#261: a run that is only waiting in the queue is behind a
+// saturated runtime, not hung. Rerunning it cancels it and loses its place.
+const queuedRun = (createdAt = OLD) => ({ status: 'queued', created_at: new Date(createdAt).toISOString() });
+
+test('PANT-1154: a ticket whose only run is queued and never started is not rerun, however long it waited', () => {
+  for (const waited of [OLD, NOW - 24 * 60 * 60 * 1000]) {
+    const runs = { 'FFE-83': [queuedRun(waited)] };
+    const actions = core.detectAssignedIdle([assignedTodo('FFE-83', 'M')], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+    assert.deepEqual(actions, [], `queued run created ${(NOW - waited) / 60000} min ago must not be rerun`);
+  }
+  const pending = { 'FFE-84': [{ status: 'pending', created_at: new Date(OLD).toISOString() }] };
+  assert.deepEqual(core.detectAssignedIdle([assignedTodo('FFE-84', 'M')], pending, CFG, core.agentIdSet(CFG.AGENTS), NOW), []);
+});
+
+test('PANT-1154: a run genuinely stuck in running past staleMs is still recovered as a hang', () => {
+  const runs = { 'FFE-85': [{ status: 'running', created_at: new Date(OLD).toISOString(), started_at: new Date(OLD).toISOString() }] };
+  const actions = core.detectAssignedIdle([assignedTodo('FFE-85', 'M')], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-stale');
+});
+
+test('PANT-1154: a dispatched-but-never-started or picked-up queued run still goes stale', () => {
+  const dispatched = { 'FFE-98': [{ status: 'dispatched', created_at: new Date(OLD).toISOString(), dispatched_at: new Date(OLD).toISOString() }] };
+  const queuedPickedUp = { 'FFE-99': [{ status: 'queued', created_at: new Date(OLD).toISOString(), dispatched_at: new Date(OLD).toISOString() }] };
+  const issues = [assignedTodo('FFE-98', 'M'), assignedTodo('FFE-99', 'M')];
+  const actions = core.detectAssignedIdle(issues, { ...dispatched, ...queuedPickedUp }, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => a.identifier), ['FFE-98', 'FFE-99']);
+});
+
+test('PANT-1154: assignedIdleQueuedStaleMs bounds queue wait when configured', () => {
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, assignedIdleQueuedStaleMs: 2 * 60 * 60 * 1000 } };
+  const fresh = { 'FFE-83': [queuedRun(OLD)] }; // 1h in queue < 2h cap
+  assert.deepEqual(core.detectAssignedIdle([assignedTodo('FFE-83', 'M')], fresh, cfg, core.agentIdSet(CFG.AGENTS), NOW), []);
+  const old = { 'FFE-83': [queuedRun(NOW - 3 * 60 * 60 * 1000)] }; // 3h > 2h cap
+  const actions = core.detectAssignedIdle([assignedTodo('FFE-83', 'M', NOW - 3 * 60 * 60 * 1000)], old, cfg, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+});
+
+test('PANT-1154: hasActiveRun keeps its old staleMs behavior unless queuedStaleMs is passed', () => {
+  const stale = 10 * 60 * 1000;
+  assert.equal(core.hasActiveRun([queuedRun(OLD)], NOW, stale), false);
+  assert.equal(core.hasActiveRun([queuedRun(OLD)], NOW, stale, Infinity), true);
+  const running = { status: 'running', created_at: new Date(OLD).toISOString(), started_at: new Date(OLD).toISOString() };
+  assert.equal(core.hasActiveRun([running], NOW, stale, Infinity), false);
+  assert.equal(core.isQueuedNotStarted(queuedRun(OLD), NOW), true);
+  assert.equal(core.isQueuedNotStarted({ ...queuedRun(OLD), started_at: new Date(OLD).toISOString() }, NOW), false);
+  assert.equal(core.isQueuedNotStarted({ status: 'cancelled', created_at: new Date(OLD).toISOString() }, NOW), false);
+});
