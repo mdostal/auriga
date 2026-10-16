@@ -2382,3 +2382,68 @@ test('isHiveStory: detects hive labels when labels are API objects with .name, n
   assert.ok(!core.isHiveStory({ labels: [{ id: 5, name: 'feature' }] }),
     'object label with name:"feature" must NOT match HIVE_LABELS');
 });
+
+// ---- PANT-1117: identifier deps, foundations first, dependency-park re-queue ----
+test('descIdentifierDeps parses Depends on / Depends-on / Blocked by identifier lines', () => {
+  const desc = [
+    'Intro mentions FFE-1 but not as a dependency.',
+    'Depends on: FFE-86',
+    '**Depends-on:** FFE-87, [FFE-88](mention://issue/abc)',
+    '- blocked by: PANT-12 PANT-13',
+    'depends_on: [m-01-core]',
+  ].join('\n');
+  assert.deepEqual(core.descIdentifierDeps({ description: desc }), ['FFE-86', 'FFE-87', 'FFE-88', 'PANT-12', 'PANT-13']);
+  assert.deepEqual(core.descIdentifierDeps({ description: 'depends_on: [m-01-core, cm-07-e2e]' }), [], 'lowercase slugs are not identifiers');
+  assert.deepEqual(core.descIdentifierDeps({}), []);
+});
+
+test('identifier deps resolve across parents and gate allDepsSatisfied', () => {
+  const foundation = { id: 'u86', identifier: 'FFE-86', status: 'in_progress', parent_issue_id: 'EPIC-A', project_id: 'FLAYR' };
+  const dependent = { id: 'u90', identifier: 'FFE-90', status: 'todo', parent_issue_id: 'EPIC-B', project_id: 'FLAYR', description: 'Depends on: FFE-86' };
+  const all = [foundation, dependent];
+  const statusById = new Map(all.map((i) => [i.id, i.status]));
+  assert.equal(core.hasDeclaredDeps(dependent), true);
+  assert.equal(core.allDepsSatisfied(dependent, statusById, all), false, 'cross-parent dep in progress blocks');
+  const done = [{ ...foundation, status: 'done' }, dependent];
+  assert.equal(core.allDepsSatisfied(dependent, new Map(done.map((i) => [i.id, i.status])), done), true);
+  assert.equal(core.allDepsSatisfied({ ...dependent, description: 'Depends on: ZZZ-1' }, statusById, all), true, 'unseen identifier does not block');
+  assert.deepEqual([...core.dependedOnIds(all)], ['u86']);
+});
+
+test('selectAssignments: foundation first, unmet identifier dependents held back — PANT-1117', () => {
+  const issues = [
+    { ...story('u1', 'AURIGA', 1, 'EPIC1'), identifier: 'AUR-1' },
+    { ...story('u90', 'AURIGA', 90, 'EPIC2'), identifier: 'AUR-90', description: 'Depends on: AUR-100' },
+    { ...story('u100', 'AURIGA', 100, 'EPIC3'), identifier: 'AUR-100' },
+  ];
+  const picks = core.selectAssignments(issues, CFG, {}, {});
+  assert.deepEqual(picks.map((p) => p.identifier), ['AUR-100', 'AUR-1']);
+});
+
+test('isAgentParked: a dependency: blocked_reason is not a human park — PANT-1117', () => {
+  assert.equal(core.isAgentParked({ status: 'blocked', metadata: { blocked_reason: 'dependency:FFE-86' } }), false);
+  assert.equal(core.isAgentParked({ status: 'blocked', metadata: { blocked_reason: 'needs-operator: pick a vendor' } }), true);
+  assert.deepEqual(core.dependencyParkIds({ metadata: { blocked_reason: 'dependency: FFE-86, FFE-87 u-123' } }), ['FFE-86', 'FFE-87', 'u-123']);
+  assert.equal(core.dependencyParkIds({ metadata: { blocked_reason: 'needs-operator: x' } }), null);
+});
+
+test('detectUnblocks: dependency-parked story with prior runs is re-queued once deps are terminal — PANT-1117', () => {
+  const dep = { id: 'u86', identifier: 'FFE-86', status: 'done', project_id: 'PCORE' };
+  const b = { id: 'u90', identifier: 'FFE-90', project_id: 'PCORE', status: 'blocked', title: 'work', parent_issue_id: 'EPIC', metadata: { blocked_reason: 'dependency:FFE-86' } };
+  const all = [dep, b];
+  const statusById = new Map(all.map((i) => [i.id, i.status]));
+  const acts = core.detectUnblocks([b], statusById, all, {}, () => [{ id: 'r1', status: 'completed' }]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  assert.equal(acts[0].clearBlockedReason, true);
+
+  const pending = [{ ...dep, status: 'in_review' }, b];
+  assert.equal(core.detectUnblocks([b], new Map(pending.map((i) => [i.id, i.status])), pending, {}, () => [{ id: 'r1' }]).length, 0, 'unmet dep keeps it blocked');
+
+  const humanPark = { ...b, metadata: { blocked_reason: 'needs-operator: x' }, description: 'Depends on: FFE-86' };
+  assert.equal(core.detectUnblocks([humanPark], statusById, [dep, humanPark], {}, () => []).length, 0, 'non-dependency reasons stay parked');
+
+  const descOnly = { ...b, metadata: {}, description: 'Depends on: FFE-86' };
+  assert.equal(core.detectUnblocks([descOnly], statusById, [dep, descOnly], {}, () => [{ id: 'r1' }]).length, 0, 'zero-runs guard still applies without a dependency: park');
+  assert.equal(core.detectUnblocks([descOnly], statusById, [dep, descOnly], {}, () => []).length, 1);
+});

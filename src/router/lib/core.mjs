@@ -9,7 +9,7 @@ import {
   isRouterManagedAssignment,
 } from './fingerprint.mjs';
 import { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns } from './run-classification.mjs';
-import { storyKey, slugKey, descStoryDeps, descStoryId } from './story-identity.mjs';
+import { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds } from './story-identity.mjs';
 import {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
   repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
@@ -25,7 +25,7 @@ import {
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
 export { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
-export { storyKey, slugKey, descStoryDeps, descStoryId };
+export { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds };
 export {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
   repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
@@ -443,9 +443,15 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     .filter((i) => !isAgentParked(i))
     .filter((i) => allDepsSatisfied(i, statusById, issues));
 
-  // Stable ordering: by project scan order, then by issue number ascending
-  // (older/foundational tickets first).
+  // Stable ordering. PANT-1117: foundations first: a candidate some other open
+  // ticket depends on goes ahead of one nothing depends on, whatever its project
+  // or number (FFE-90/91/94 were picked before their foundation FFE-86). Then by
+  // project scan order, then by issue number ascending.
+  const foundations = dependedOnIds(issues);
   candidates.sort((a, b) => {
+    const fa = foundations.has(a.id) ? 0 : 1;
+    const fb = foundations.has(b.id) ? 0 : 1;
+    if (fa !== fb) return fa - fb;
     const pa = cfg.PROJECT_IDS.indexOf(a.project_id);
     const pb = cfg.PROJECT_IDS.indexOf(b.project_id);
     if (pa !== pb) return pa - pb;
@@ -983,17 +989,95 @@ export function descDepsSatisfied(issue, allIssues = []) {
   return true;
 }
 
-// True when a story DECLARES a dependency graph anywhere (metadata OR description).
+// PANT-1117: issue-identifier deps, from human-written "Depends on: FFE-86" /
+// "Blocked by:" description lines plus a `dependency:<ids>` blocked_reason.
+// Resolved by identifier (or issue id) across the WHOLE scanned board, not only
+// siblings, so a cross-parent or cross-project foundation is seen.
+export function identifierDeps(issue = {}) {
+  const ids = [...descIdentifierDeps(issue), ...(dependencyParkIds(issue) || [])];
+  return [...new Set(ids)].filter((d) => d !== issue.identifier && d !== issue.id);
+}
+
+// identifier/id -> issue over one scanned board, cached per board array so the
+// per-candidate gate stays linear.
+const boardIndexCache = new WeakMap();
+function boardIndex(allIssues = []) {
+  let idx = boardIndexCache.get(allIssues);
+  if (!idx) {
+    idx = new Map();
+    for (const i of allIssues) {
+      if (i.id) idx.set(i.id, i);
+      if (i.identifier) idx.set(String(i.identifier).toUpperCase(), i);
+    }
+    boardIndexCache.set(allIssues, idx);
+  }
+  return idx;
+}
+
+function resolveIdentifierDep(dep, allIssues) {
+  const idx = boardIndex(allIssues);
+  return idx.get(dep) || idx.get(String(dep).toUpperCase()) || null;
+}
+
+// A resolved identifier dep BLOCKS unless terminal. An identifier we can't see on
+// the scanned board doesn't block, the same anti-deadlock rule as depsSatisfied.
+export function identifierDepsSatisfied(issue, allIssues = []) {
+  for (const dep of identifierDeps(issue)) {
+    const d = resolveIdentifierDep(dep, allIssues);
+    if (!d) continue;
+    if (!isTerminalIssueStatus((d.status || '').toLowerCase())) return false;
+  }
+  return true;
+}
+
+// True when a story DECLARES a dependency graph anywhere (metadata, description
+// slugs, description identifiers, or a `dependency:` blocked_reason).
 export function hasDeclaredDeps(issue) {
   const raw = issue && issue.metadata && issue.metadata.depends_on;
   if (raw != null && String(raw).trim() !== '') return true;
-  return descStoryDeps(issue).length > 0;
+  return descStoryDeps(issue).length > 0 || identifierDeps(issue).length > 0;
 }
 
-// A story's full dependency gate: BOTH its metadata ticket-id deps (depsSatisfied)
-// AND its description slug deps (descDepsSatisfied) must be satisfied.
+// A story's full dependency gate: its metadata ticket-id deps (depsSatisfied),
+// its description slug deps (descDepsSatisfied) AND its identifier deps
+// (identifierDepsSatisfied) must all be satisfied.
 export function allDepsSatisfied(issue, statusById, allIssues = []) {
-  return depsSatisfied(issue, statusById) && descDepsSatisfied(issue, allIssues);
+  return depsSatisfied(issue, statusById) && descDepsSatisfied(issue, allIssues)
+    && identifierDepsSatisfied(issue, allIssues);
+}
+
+// Ids of every issue this story depends on that can be resolved: metadata ids
+// as given, slug deps via resolveDepSibling, identifier deps via the board.
+export function resolvedDepIds(issue, allIssues = []) {
+  const out = new Set();
+  const raw = issue && issue.metadata && issue.metadata.depends_on;
+  if (raw != null && raw !== '') {
+    for (const id of String(raw).split(',').map((s) => s.trim()).filter(Boolean)) out.add(id);
+  }
+  const slugs = descStoryDeps(issue);
+  if (slugs.length) {
+    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
+    for (const slug of slugs) {
+      const dep = resolveDepSibling(slug, siblings);
+      if (dep) out.add(dep.id);
+    }
+  }
+  for (const dep of identifierDeps(issue)) {
+    const d = resolveIdentifierDep(dep, allIssues);
+    if (d) out.add(d.id);
+  }
+  return out;
+}
+
+// PANT-1117: ids that some NON-terminal ticket on the board depends on, the
+// foundations selectAssignments dispatches first.
+export function dependedOnIds(allIssues = []) {
+  const out = new Set();
+  for (const i of allIssues) {
+    if (isTerminalIssueStatus((i.status || '').toLowerCase())) continue;
+    for (const id of resolvedDepIds(i, allIssues)) out.add(id);
+  }
+  return out;
 }
 
 // blocked -> todo when a story's declared deps clear. `allIssues` (optional, added
@@ -1012,11 +1096,17 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
     if (isHumanTodo(i, cfg)) continue;
     if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
     if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
-    if (runsOf) {
+    // PANT-1117: an agent's `dependency:<ids>` park is re-queued once its deps
+    // are terminal even though it has runs; every other blocked ticket keeps the
+    // zero-runs guard.
+    const dependencyPark = dependencyParkIds(i) !== null;
+    if (runsOf && !dependencyPark) {
       const runs = runsOf(i);
       if (!Array.isArray(runs) || runs.length > 0) continue; // PANT-1052: already ran -> parked, not dependency-blocked
     }
-    actions.push({ identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' });
+    const action = { identifier: i.identifier, issueId: i.id, projectId: i.project_id, action: 'unblock-to-todo' };
+    if (dependencyPark) action.clearBlockedReason = true;
+    actions.push(action);
   }
   return actions;
 }
@@ -1190,22 +1280,12 @@ export function resolveDepSibling(slug, siblings = []) {
 }
 
 // Does this story declare a dependency on ANY of the given completed story ids?
-// Resolves BOTH metadata ticket-id deps and description slug deps (the latter via
-// resolveDepSibling, so an ambiguous short key never mis-attributes a dependency).
+// Resolves metadata ticket-id deps, description slug deps (via resolveDepSibling,
+// so an ambiguous short key never mis-attributes a dependency) and identifier deps.
 export function dependsOnAny(issue, completedIds, allIssues = []) {
   if (!completedIds || completedIds.size === 0) return false;
-  const raw = issue && issue.metadata && issue.metadata.depends_on;
-  if (raw != null && raw !== '') {
-    const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
-    if (ids.some((id) => completedIds.has(id))) return true;
-  }
-  const slugs = descStoryDeps(issue);
-  if (slugs.length) {
-    const siblings = allIssues.filter((s) => s.id !== issue.id && s.parent_issue_id === issue.parent_issue_id);
-    for (const slug of slugs) {
-      const dep = resolveDepSibling(slug, siblings);
-      if (dep && completedIds.has(dep.id)) return true;
-    }
+  for (const id of resolvedDepIds(issue, allIssues)) {
+    if (completedIds.has(id)) return true;
   }
   return false;
 }
