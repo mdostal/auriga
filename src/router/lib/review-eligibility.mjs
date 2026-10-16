@@ -66,9 +66,13 @@ export function isStaleRouterPark(issue = {}) {
 // These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
 // A router give-up reason only parks while the issue is still `blocked` (isStaleRouterPark);
 // any other (agent/human-written) reason parks in every status.
+// PANT-1117: a `dependency:<ids>` reason is NOT a park for a human: the agent is
+// waiting on other tickets, and detectUnblocks re-queues it once they're terminal
+// (see dependencyParkIds in story-identity.mjs, which owns the same prefix).
 export function isAgentParked(issue = {}) {
   const r = issue && issue.metadata && issue.metadata.blocked_reason;
   if (typeof r !== 'string' || r.trim() === '') return false;
+  if (r.trim().toLowerCase().startsWith('dependency:')) return false;
   return !isStaleRouterPark(issue);
 }
 

@@ -576,11 +576,17 @@ async function runCycle(opts, state) {
     };
     const unblocks = coreImpl.detectUnblocks(blockedIssues, statusById, issues, cfgImpl, runsOf);
     for (const u of unblocks) {
-      logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun });
+      logImpl('advance', { identifier: u.identifier, from: ISSUE_STATUS.BLOCKED, to: ISSUE_STATUS.TODO, applied: !dryRun, ...(u.clearBlockedReason ? { reason: 'dependency-park-cleared' } : {}) });
       if (!dryRun) {
         try {
           backlog.setIssueStatus(u.identifier, ISSUE_STATUS.TODO);
           try { spawn.unassignIssue(u.identifier); } catch (e) { logImpl('unblock_unassign_error', { identifier: u.identifier, error: e.message }); }
+          // PANT-1117: a re-queued `dependency:<ids>` park drops its reason so the
+          // ticket no longer reads as parked.
+          if (u.clearBlockedReason && typeof backlog.setIssueMetadata === 'function') {
+            try { backlog.setIssueMetadata(u.identifier, { blocked_reason: '' }); }
+            catch (e) { logImpl('unblock_clear_reason_error', { identifier: u.identifier, error: e.message }); }
+          }
         } catch (e) { logImpl('advance_error', { identifier: u.identifier, to: ISSUE_STATUS.TODO, error: e.message }); }
       }
     }
