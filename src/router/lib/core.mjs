@@ -8,7 +8,7 @@ import {
   assignmentFingerprintMatches,
   isRouterManagedAssignment,
 } from './fingerprint.mjs';
-import { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns } from './run-classification.mjs';
+import { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns } from './run-classification.mjs';
 import { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds } from './story-identity.mjs';
 import {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
@@ -24,7 +24,7 @@ import {
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
-export { classifyRun, hasActiveRun, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
+export { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
 export { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds };
 export {
   hasTargetRepo, prReferencesIssue, prMatchesStory, prIdentityMatchesStory,
@@ -1390,6 +1390,11 @@ function toMs(ts) {
 // pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), _allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
+  // PANT-1154 / auriga#261: a run still waiting in the queue is behind a
+  // saturated runtime, not hung. Rerunning it cancels it (Multica's rerun is
+  // destructive) and sends the ticket to the back of the line, so it never
+  // reaches the front. Unbounded by default; set the cap to bound queue wait.
+  const queuedStaleMs = cfg.CAPS.assignedIdleQueuedStaleMs ?? Infinity;
   // PANT-736: review-lane agents on todo (not in_review) tickets must be unassigned,
   // not re-dispatched — re-running the reviewer on a non-in_review ticket causes a
   // tight loop that starves the review queue (confirmed live: 7 reruns in 1 hour).
@@ -1421,7 +1426,7 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     const idleAgeMs = baseTime > 0 ? now - baseTime : Infinity;
     if (idleAgeMs < staleMs) continue;
 
-    if (hasActiveRun(runs, now, staleMs)) continue;
+    if (hasActiveRun(runs, now, staleMs, queuedStaleMs)) continue;
 
     if (reviewLaneIds.has(i.assignee_id)) {
       actions.push({

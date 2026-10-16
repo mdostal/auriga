@@ -25,13 +25,29 @@ export function classifyRun(run, now = Date.now()) {
   return { active, failed, done: hasCompleted && !failed, ageMs, status };
 }
 
+// Run statuses that mean "waiting for a runtime slot", not "executing".
+const QUEUED_RUN_STATUSES = new Set(['queued', 'pending']);
+
+// Is this run still waiting in the queue — queued/pending and never picked
+// up (no started_at / dispatched_at)? Such a run is behind a saturated
+// runtime, not hung: re-enqueueing it only cancels it and loses its place
+// (auriga#261, PANT-1154).
+export function isQueuedNotStarted(run, now = Date.now()) {
+  if (!run || run.started_at || run.dispatched_at) return false;
+  const c = classifyRun(run, now);
+  return c.active && QUEUED_RUN_STATUSES.has(c.status);
+}
+
 // Given an issue's runs (array), is any run currently active AND fresh?
 // A run stuck in "running" longer than staleMs is treated as a silent hang
-// (not active) so it can be recovered.
-export function hasActiveRun(runs = [], now = Date.now(), staleMs = Infinity) {
+// (not active) so it can be recovered. A run still waiting in the queue
+// (isQueuedNotStarted) is measured against queuedStaleMs instead, which
+// defaults to staleMs so callers that don't opt in keep the old behavior.
+export function hasActiveRun(runs = [], now = Date.now(), staleMs = Infinity, queuedStaleMs = staleMs) {
   return runs.some((r) => {
     const c = classifyRun(r, now);
-    return c.active && c.ageMs < staleMs;
+    if (!c.active) return false;
+    return c.ageMs < (isQueuedNotStarted(r, now) ? queuedStaleMs : staleMs);
   });
 }
 
