@@ -37,7 +37,7 @@ function audit(rec) {
 const ids = mca.listAllProjectIds();
 const issues = mca.listAllIssues(ids.length ? ids : cfg.PROJECT_IDS);
 const statusById = new Map(issues.map((i) => [i.id, (i.status || '').toLowerCase()]));
-const blocked = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked' && !core.isSmokeScratch(i.title));
+const blocked = issues.filter((i) => (i.status || '').toLowerCase() === 'blocked' && !core.isSmokeScratch(i));
 
 const unblock = [];
 const leaveNoRepo = [];

@@ -74,7 +74,7 @@ test('cutover-e2e: cycle() runs end-to-end on stub adapters only, zero execFileS
   const execFileSyncMock = t.mock.fn(() => {
     throw new Error('execFileSync must never be called when cycle() is driven only by stub adapters');
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: execFileSyncMock } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: execFileSyncMock } });
 
   // Dynamic import AFTER the module mock above is registered, so any
   // transitive import of node:child_process (via lib/adapters/multica/*.mjs,
@@ -94,7 +94,7 @@ test('cutover-e2e: cycle() runs end-to-end on stub adapters only, zero execFileS
 });
 
 test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/assign observed)', async (t) => {
-  t.mock.module('node:child_process', { exports: { execFileSync: () => { throw new Error('must not be called'); } } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: () => { throw new Error('must not be called'); } } });
   const { cycle } = await import('../auriga-router.mjs');
   const { backlog, spawn } = seedAdapters();
   const log = createLogSink();
@@ -114,7 +114,7 @@ test('cutover-e2e: PROFILE_TODO is a live dispatch candidate (route/assign obser
 });
 
 test('cutover-e2e: PROFILE_IN_PROGRESS_DONE_RUN advances in_progress -> in_review on a completed run', async (t) => {
-  t.mock.module('node:child_process', { exports: { execFileSync: () => { throw new Error('must not be called'); } } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: () => { throw new Error('must not be called'); } } });
   const { cycle } = await import('../auriga-router.mjs');
   const { backlog, spawn } = seedAdapters();
   const log = createLogSink();
@@ -129,7 +129,7 @@ test('cutover-e2e: PROFILE_IN_PROGRESS_DONE_RUN advances in_progress -> in_revie
 });
 
 test('cutover-e2e: PROFILE_IN_REVIEW_MERGED_PR advances in_review -> done on a real merged PR (getIssuePullRequests wired)', async (t) => {
-  t.mock.module('node:child_process', { exports: { execFileSync: () => { throw new Error('must not be called'); } } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: () => { throw new Error('must not be called'); } } });
   const { cycle } = await import('../auriga-router.mjs');
   const { backlog, spawn } = seedAdapters();
   const log = createLogSink();
@@ -143,7 +143,7 @@ test('cutover-e2e: PROFILE_IN_REVIEW_MERGED_PR advances in_review -> done on a r
 });
 
 test('cutover-e2e: PROFILE_BLOCKED_CLEARED unblocks blocked -> todo once its dependency is done, and is unassigned', async (t) => {
-  t.mock.module('node:child_process', { exports: { execFileSync: () => { throw new Error('must not be called'); } } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: () => { throw new Error('must not be called'); } } });
   const { cycle } = await import('../auriga-router.mjs');
   const { backlog, spawn } = seedAdapters();
   const log = createLogSink();

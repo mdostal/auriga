@@ -50,7 +50,7 @@ const REGISTRY_PATH_ENV_VAR = 'AURIGA_PROJECTS_REGISTRY_PATH';
 // missing/malformed-file failure. Matches PROJECT_NAMES/PROJECT_IDS/
 // PROJECT_LANE's real shapes (dict, array, dict) so a caller (core.mjs) never
 // sees `undefined` where it expects one of these three.
-const EMPTY_CONFIG = Object.freeze({ PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {} });
+const EMPTY_CONFIG = Object.freeze({ PROJECT_NAMES: {}, PROJECT_IDS: [], PROJECT_LANE: {}, PROJECT_ROUTE: {} });
 
 /**
  * Reads and JSON-parses the registry file. Throws on any failure (file
@@ -139,7 +139,30 @@ export function deriveProjectLane(data) {
 }
 
 /**
- * All three derived shapes at once — the one function config-substrate.mjs
+ * Project UUID -> child-board route (t016 — orchestrator hand-down), over
+ * every registered project whose entry carries `route: { kind: 'child',
+ * childId }`. A project's route is either that child board or today's agent
+ * lane (`{ kind: 'agent', lane }`); the agent form is the implicit default,
+ * so a legacy entry (no `route` field, or `route.kind: 'agent'`) is simply
+ * absent here and keeps routing through PROJECT_LANE/DEFAULT_LANE exactly as
+ * before. `childId` is NOT validated against orchestrator-topology.json here
+ * — this module never reads the topology; core.mjs's resolveRouteTarget()
+ * does that per cycle, rejecting an unknown child with a warning and holding
+ * the issue for a human instead of dispatching it to an agent.
+ * @param {{ projects?: object[] }} data
+ * @returns {Record<string, { kind: 'child', childId: string }>}
+ */
+export function deriveProjectRoute(data) {
+  const route = {};
+  for (const p of (data && data.projects) || []) {
+    if (!p || !p.id || !p.route || p.route.kind !== 'child') continue;
+    route[p.id] = { kind: 'child', childId: p.route.childId };
+  }
+  return route;
+}
+
+/**
+ * All derived shapes at once — the one function config-substrate.mjs
  * needs at import time, wrapping readRegistryFile()'s throw-on-failure with
  * this codebase's own graceful-degrade convention (see this file's header
  * comment). NEVER throws: a missing or malformed registry file logs a loud
@@ -147,7 +170,7 @@ export function deriveProjectLane(data) {
  * PROJECT_LANE) instead of crashing the importing module.
  * @param {(path: string, encoding: string) => string} readFileSync
  * @param {string} [path]
- * @returns {{ PROJECT_NAMES: Record<string,string>, PROJECT_IDS: string[], PROJECT_LANE: Record<string,string[]> }}
+ * @returns {{ PROJECT_NAMES: Record<string,string>, PROJECT_IDS: string[], PROJECT_LANE: Record<string,string[]>, PROJECT_ROUTE: Record<string,{kind: 'child', childId: string}> }}
  */
 export function loadRegistryConfig(readFileSync, path = DEFAULT_REGISTRY_PATH) {
   try {
@@ -156,6 +179,7 @@ export function loadRegistryConfig(readFileSync, path = DEFAULT_REGISTRY_PATH) {
       PROJECT_NAMES: deriveProjectNames(data),
       PROJECT_IDS: deriveProjectIds(data),
       PROJECT_LANE: deriveProjectLane(data),
+      PROJECT_ROUTE: deriveProjectRoute(data),
     };
   } catch (e) {
     process.stderr.write(
@@ -164,7 +188,7 @@ export function loadRegistryConfig(readFileSync, path = DEFAULT_REGISTRY_PATH) {
       + 'are dispatch-eligible until this is fixed. Never fabricating routing data '
       + 'for a missing/malformed registry file.\n'
     );
-    return { PROJECT_NAMES: { ...EMPTY_CONFIG.PROJECT_NAMES }, PROJECT_IDS: [...EMPTY_CONFIG.PROJECT_IDS], PROJECT_LANE: { ...EMPTY_CONFIG.PROJECT_LANE } };
+    return { PROJECT_NAMES: { ...EMPTY_CONFIG.PROJECT_NAMES }, PROJECT_IDS: [...EMPTY_CONFIG.PROJECT_IDS], PROJECT_LANE: { ...EMPTY_CONFIG.PROJECT_LANE }, PROJECT_ROUTE: { ...EMPTY_CONFIG.PROJECT_ROUTE } };
   }
 }
 
@@ -175,7 +199,7 @@ export function loadRegistryConfig(readFileSync, path = DEFAULT_REGISTRY_PATH) {
 // want full isolation always inject their own readFileSync double too, and
 // never accidentally exercise the real filesystem.
 /**
- * @returns {{ PROJECT_NAMES: Record<string,string>, PROJECT_IDS: string[], PROJECT_LANE: Record<string,string[]> }}
+ * @returns {{ PROJECT_NAMES: Record<string,string>, PROJECT_IDS: string[], PROJECT_LANE: Record<string,string[]>, PROJECT_ROUTE: Record<string,{kind: 'child', childId: string}> }}
  */
 export function loadRealRegistryConfig() {
   const path = process.env[REGISTRY_PATH_ENV_VAR] || DEFAULT_REGISTRY_PATH;
@@ -270,14 +294,18 @@ export function isKnownBoardProject(backlog, id) {
  * omitted `lane` falls back to `[]` (falls back to DEFAULT_LANE downstream,
  * unchanged from today per deriveProjectLane's own contract).
  *
+ * `child` (t016) sets `route: { kind: 'child', childId: child }`, handing
+ * the project's todos down to that child board; `null` clears the route
+ * back to the agent lane; `undefined` leaves it untouched.
+ *
  * Pure: returns a NEW data object, never mutates the `data` argument.
  * @param {{ dispatch_order?: string[], projects?: object[] }} data
- * @param {{ id: string, name?: string, notes?: string, lane?: string[] }} fields
+ * @param {{ id: string, name?: string, notes?: string, lane?: string[], child?: string|null }} fields
  * @param {string} [now] ISO timestamp for a NEW registration's `registered_at` — injectable for tests
  * @returns {{ dispatch_order?: string[], projects: object[] }}
  */
 export function upsertProject(data, fields, now = new Date().toISOString()) {
-  const { id, name, notes, lane } = fields;
+  const { id, name, notes, lane, child } = fields;
   const projects = [...((data && data.projects) || [])];
   const idx = projects.findIndex((p) => p && p.id === id);
   if (idx === -1) {
@@ -287,6 +315,7 @@ export function upsertProject(data, fields, now = new Date().toISOString()) {
       notes: notes || '',
       lane: lane || [],
       registered_at: now,
+      ...(child ? { route: { kind: 'child', childId: child } } : {}),
     });
   } else {
     const existing = projects[idx];
@@ -296,6 +325,8 @@ export function upsertProject(data, fields, now = new Date().toISOString()) {
       notes: notes !== undefined ? notes : existing.notes,
       lane: lane !== undefined ? lane : existing.lane,
     };
+    if (child) projects[idx].route = { kind: 'child', childId: child };
+    else if (child === null) delete projects[idx].route;
   }
   return { ...data, projects };
 }

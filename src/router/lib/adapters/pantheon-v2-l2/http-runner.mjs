@@ -15,16 +15,31 @@
 // fresh binding each test, which only works if the caller (index.mjs) owns
 // its own cache-busted import of execFileSync and hands it in.
 
+import { OPERATOR_TOKEN_HEADER, isMutatingMethod } from './operator-token.mjs';
+
 const DEFAULT_TIMEOUT_SECONDS = 10;
+export const OPERATOR_TOKEN_UNAVAILABLE = 'OPERATOR_TOKEN_UNAVAILABLE';
 
 /**
  * @param {(cmd: string, args: string[], opts: object) => string} execFileSync
  *   Injected rather than imported by this module — see file header comment.
  * @param {string} baseUrl Pantheon's backlog API base URL (no trailing slash).
- * @param {{ staticQueryParams?: Record<string, string> }} [options]
+ * @param {{
+ *   staticQueryParams?: Record<string, string>,
+ *   operatorToken?: {
+ *     tokenFor: (method: string) => string | null,
+ *     ready?: () => { ok: boolean, reason?: string },
+ *     invalidate: () => void,
+ *   },
+ * }} [options]
  *   staticQueryParams: key=value pairs appended to every request URL (e.g. { tenant_id: 'firefly-events' }).
  *   Used by tenant-scoped Auriga instances to route all backlog API calls through the
  *   correct per-tenant board adapter in core-api (PANT-260).
+ *   operatorToken: the headers hook (PANT-1078, see ./operator-token.mjs). When it has a
+ *   token for the method, the request carries x-pantheon-operator-token; a 401 tells it the
+ *   token was rejected. While ready() reports the token unavailable (a transient lookup
+ *   failure, PANT-1159), a mutating request is never sent: it throws an error with
+ *   code OPERATOR_TOKEN_UNAVAILABLE instead, since core-api would refuse it with a 401.
  * @returns {(method: string, path: string, body?: object) => any}
  *   Returns the parsed JSON response body, or `null` for an empty body.
  *   Throws on any transport failure or non-2xx response.
@@ -61,11 +76,30 @@ export function makeHttpRun(execFileSync, baseUrl, options = {}) {
       args.push('-H', 'content-type: application/json', '-d', JSON.stringify(body));
     }
 
-    const out = execFileSync('curl', args, {
+    const execOpts = {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    };
+    // The operator token goes to curl on stdin (`-H @-`), never in argv, so it
+    // never shows up in a process listing.
+    const tokenSource = options.operatorToken;
+    if (tokenSource && tokenSource.ready && isMutatingMethod(method)) {
+      const gate = tokenSource.ready();
+      if (!gate.ok) {
+        const err = new Error(`Pantheon backlog API ${method} ${path} not sent: ${gate.reason}`);
+        err.code = OPERATOR_TOKEN_UNAVAILABLE;
+        throw err;
+      }
+    }
+    const token = tokenSource ? tokenSource.tokenFor(method) : null;
+    if (token) {
+      args.push('-H', '@-');
+      execOpts.stdio = ['pipe', 'pipe', 'pipe'];
+      execOpts.input = `${OPERATOR_TOKEN_HEADER}: ${token}\n`;
+    }
+
+    const out = execFileSync('curl', args, execOpts);
 
     const splitIdx = out.lastIndexOf('\n');
     const bodyText = splitIdx === -1 ? '' : out.slice(0, splitIdx);
@@ -73,6 +107,7 @@ export function makeHttpRun(execFileSync, baseUrl, options = {}) {
     const status = Number(statusText);
 
     if (!(status >= 200 && status < 300)) {
+      if (status === 401 && token) options.operatorToken.invalidate();
       throw new Error(`Pantheon backlog API ${method} ${path} failed: HTTP ${status} ${bodyText}`.trim());
     }
 
