@@ -1460,6 +1460,12 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
       continue;
     }
 
+    // PANT-1155 / auriga#263: a provider limit fails the run in ~1s, so the
+    // ticket is idle again at once and re-qualified every stale boundary
+    // (live: 71 session-limit failures in 2h). Wait out the reset, as
+    // detectZombies and the review paths already do.
+    if (quotaHoldUntilMs(runs, now, cfg.CAPS.redispatchCooldownMs)) continue;
+
     const lr = latestRun(runs);
     const classified = lr ? classifyRun(lr, now) : null;
     actions.push({

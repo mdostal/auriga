@@ -495,3 +495,57 @@ test('PANT-1154: hasActiveRun keeps its old staleMs behavior unless queuedStaleM
   assert.equal(core.isQueuedNotStarted({ ...queuedRun(OLD), started_at: new Date(OLD).toISOString() }, NOW), false);
   assert.equal(core.isQueuedNotStarted({ status: 'cancelled', created_at: new Date(OLD).toISOString() }, NOW), false);
 });
+
+// PANT-1155 / auriga#263: on hive 2026-10-17 assigned_idle reran PANT-1119..1124
+// and FFE-83..99 nine times each into a provider session limit (71 failures in
+// 2h, each ~1.4s). Fixture mirrors the live PANT-1122 rows: 9 failed runs ~10
+// min apart, the newest 604422ms before the cycle, the reset at 02:20Z.
+const SESSION_LIMIT = "You've hit your session limit · resets 2:20am (UTC)";
+const LIVE_NOW = Date.parse('2026-10-17T01:52:00Z');
+const sessionLimitRun = (startedAt, error = SESSION_LIMIT) => ({
+  status: 'failed', error, failure_reason: 'agent_error.unknown',
+  created_at: new Date(startedAt).toISOString(), started_at: new Date(startedAt).toISOString(),
+  completed_at: new Date(startedAt + 1400).toISOString(),
+});
+const liveRuns = (error) => Array.from({ length: 9 }, (_, k) => sessionLimitRun(LIVE_NOW - 604422 - (8 - k) * 10 * 60 * 1000, error));
+const liveTodo = (id) => assignedTodo(id, 'M', LIVE_NOW - 3 * 60 * 60 * 1000);
+
+test('PANT-1155: a ticket whose newest run hit an unreset session limit is not rerun', () => {
+  const runs = { 'PANT-1121': liveRuns(), 'PANT-1122': liveRuns(), 'PANT-1124': liveRuns() };
+  const issues = [liveTodo('PANT-1121'), liveTodo('PANT-1122'), liveTodo('PANT-1124')];
+  assert.equal(core.quotaHoldUntilMs(runs['PANT-1122'], LIVE_NOW), Date.parse('2026-10-17T02:20:00Z'));
+  assert.deepEqual(core.detectAssignedIdle(issues, runs, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW), []);
+});
+
+test('PANT-1155: once the stated reset passes, the session-limited ticket is rerun again', () => {
+  const runs = { 'PANT-1122': liveRuns() };
+  const after = Date.parse('2026-10-17T02:21:00Z');
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1122')], runs, CFG, core.agentIdSet(CFG.AGENTS), after);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-last-run-failed');
+});
+
+test('PANT-1155: a limit with no stated reset holds for redispatchCooldownMs after the failure', () => {
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, redispatchCooldownMs: 15 * 60 * 1000 } };
+  const failedAt = LIVE_NOW - 11 * 60 * 1000; // past the 10-min stale window, inside the cooldown
+  const runs = { 'FFE-83': [sessionLimitRun(failedAt, '429 Too Many Requests')] };
+  assert.deepEqual(core.detectAssignedIdle([liveTodo('FFE-83')], runs, cfg, core.agentIdSet(CFG.AGENTS), LIVE_NOW), []);
+  const later = core.detectAssignedIdle([liveTodo('FFE-83')], runs, cfg, core.agentIdSet(CFG.AGENTS), failedAt + 16 * 60 * 1000);
+  assert.equal(later.length, 1);
+});
+
+test('PANT-1155: a non-limit failure still gets its dead-zone rerun', () => {
+  const runs = { 'PANT-1120': liveRuns('process exited with code 1') };
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1120')], runs, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-last-run-failed');
+});
+
+test('PANT-1155: an older limit failure followed by a non-limit failure does not hold the rerun', () => {
+  const rows = liveRuns().slice(0, 8); // newest limit failure ~20 min ago
+  rows.push(sessionLimitRun(LIVE_NOW - 11 * 60 * 1000, 'process exited with code 1'));
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1119')], { 'PANT-1119': rows }, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW);
+  assert.equal(actions.length, 1);
+});
