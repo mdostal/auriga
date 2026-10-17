@@ -125,8 +125,8 @@ enums live in `lib/decisions.mjs`.
     { "agent": "auriga-build", "runtime": "claude", "selected": true }
   ],
   "caps": {
-    "agent_inflight": 1, "agent_max_inflight": 3, "agent_cycle_assigns": 0, "per_cycle_per_agent": 2,
-    "runtime_inflight": 2, "runtime_cap": 4, "assigned": 0, "max_assign": null
+    "agent_inflight": 1, "agent_queued": 1, "agent_max_inflight": 3, "agent_cycle_assigns": 0, "per_cycle_per_agent": 2,
+    "runtime_inflight": 2, "runtime_queued": 1, "runtime_cap": 4, "assigned": 0, "max_assign": null
   },
   "dry_run": false,
   "error": null
@@ -147,7 +147,7 @@ Every field is always present. A field is `null` when it doesn't apply, never mi
 | `lane` | The issue's project lane name. |
 | `reason` | Why, from the enum below. |
 | `candidates` | Every lane agent considered: the chosen one has `selected: true`, and each rejected one has a `skip` reason (`agent_offline`, `agent_at_capacity`, `runtime_at_capacity`, `runtime_blocked`, `per_cycle_per_agent_cap`, `unknown_agent`, or `lower_ranked` for an agent that was eligible but lost the load/lane-order tiebreak). Passes that rerun the current assignee list just that agent. |
-| `caps` | Headroom at decision time, before this dispatch was counted. `agent_inflight` / `agent_max_inflight`, `agent_cycle_assigns` / `per_cycle_per_agent`, `runtime_inflight` / `runtime_cap`, and `assigned` / `max_assign` (the cycle-wide cap). A `null` cap means uncapped. |
+| `caps` | Headroom at decision time, before this dispatch was counted. `agent_inflight` + `agent_queued` / `agent_max_inflight`, `agent_cycle_assigns` / `per_cycle_per_agent`, `runtime_inflight` + `runtime_queued` / `runtime_cap`, and `assigned` / `max_assign` (the cycle-wide cap). `*_inflight` counts running issues plus this cycle's dispatches. `*_queued` counts assigned `todo` issues with a live run the runtime hasn't started yet (PANT-1158): they hold a slot until the runtime is done with them. An assigned `todo` with no run (the dispatch dead-zone) holds none. A `null` cap means uncapped. |
 | `dry_run` | `true` on a `--dry-run` cycle. A dry run emits the same decisions the live cycle would, at the point it would dispatch. |
 | `error` | The adapter error message when the dispatch or hand-off failed, else `null`. |
 

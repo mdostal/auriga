@@ -63,8 +63,9 @@ export function computeInflight(issues, agents, liveness = {}) {
 }
 
 // Count assigned-but-not-running issues per agent (the old "inflight" definition).
-// Not used for capacity — kept for observability so the divergence between real
-// in-flight and the assigned-todo backlog stays visible in the scan log.
+// Not used for capacity: kept for observability so the divergence between real
+// in-flight and the raw assigned-todo backlog stays visible in the scan log.
+// computeQueuedHeld is the subset of it that holds a slot.
 export function computeAssignedQueued(issues, agents) {
   const idToName = {};
   for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
@@ -78,6 +79,44 @@ export function computeAssignedQueued(issues, agents) {
     if (st === ISSUE_STATUS.TODO) counts[name] += 1;
   }
   return counts;
+}
+
+// Queued-held count per agent (PANT-1158, auriga#266): assigned `todo` issues the
+// runtime is still holding, i.e. ones with a live run that has not started yet (or
+// has started but the issue hasn't moved to in_progress). Between assign and start
+// the issue is `todo`, so computeInflight never sees it. Live on hive 13 such tickets
+// sat queued against RUNTIME_CAP 2 with nothing capping them, and one provider session
+// limit failed 21 queued tasks in 15 seconds. These count against max_inflight and
+// RUNTIME_CAP alongside computeInflight.
+//
+// Only an issue with a live run counts. An assigned todo with no run (the dispatch
+// dead-zone) still holds nothing, so the 2026-07-28 deadlock (see computeInflight)
+// cannot come back: assigned-idle recovery reruns it under the same caps. "Live" is
+// the same hasActiveRun test detectAssignedIdle uses (staleMs / queuedStaleMs), so
+// a todo holds a slot exactly when assigned-idle leaves it alone, and frees it when
+// assigned-idle would rerun it. Runs not fetched (or the fetch failed) -> not counted.
+export function computeQueuedHeld(issues, agents, liveness = {}) {
+  const { runsByIssue = {}, now = Date.now(), staleMs = Infinity, queuedStaleMs = Infinity } = liveness;
+  const idToName = {};
+  for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
+  const counts = {};
+  for (const name of Object.keys(agents)) counts[name] = 0;
+  for (const i of issues) {
+    if (!i.assignee_id) continue;
+    const name = idToName[i.assignee_id];
+    if (!name) continue;
+    if ((i.status || '').toLowerCase() !== ISSUE_STATUS.TODO) continue;
+    const runs = runsByIssue[i.identifier];
+    if (runs && hasActiveRun(runs, now, staleMs, queuedStaleMs)) counts[name] += 1;
+  }
+  return counts;
+}
+
+// Per-name sum of two count maps: the slots held per agent, inflight + queued.
+export function addCounts(a = {}, b = {}) {
+  const out = { ...a };
+  for (const [name, n] of Object.entries(b)) out[name] = (out[name] || 0) + n;
+  return out;
 }
 
 // Runtime in-flight totals derived from per-agent counts.

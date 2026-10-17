@@ -230,9 +230,86 @@ test('decision: caps carry headroom as it was before the dispatch', async () => 
   const log = await runCycle(s, { cfg });
   const [d] = decisionsFor(log, s.subject);
   assert.deepEqual(d.caps, {
-    agent_inflight: 0, agent_max_inflight: 50, agent_cycle_assigns: 0, per_cycle_per_agent: 10,
-    runtime_inflight: 0, runtime_cap: 3, assigned: 0, max_assign: null,
+    agent_inflight: 0, agent_queued: 0, agent_max_inflight: 50, agent_cycle_assigns: 0, per_cycle_per_agent: 10,
+    runtime_inflight: 0, runtime_queued: 0, runtime_cap: 3, assigned: 0, max_assign: null,
   });
+});
+
+// PANT-1158 (auriga#266): an assigned todo with a queued run is the runtime's until
+// it finishes; it holds a slot and the record shows it.
+const queuedRun = () => [{ status: 'queued', created_at: new Date().toISOString() }];
+function queuedScenario(nQueued) {
+  const queued = Array.from({ length: nQueued }, () => makeIssue({ assignee_id: AGENTS['build-a'].id }));
+  const fresh = makeIssue();
+  return {
+    issues: [...queued, fresh],
+    runs: Object.fromEntries(queued.map((i) => [i.identifier, queuedRun()])),
+    subject: fresh.identifier,
+  };
+}
+
+test('decision: a queued-but-not-started task holds its runtime slot (PANT-1158)', async () => {
+  const s = queuedScenario(2);
+  const cfg = makeCfg({ lane: ['build-a'] });
+  cfg.RUNTIME_CAP = { 'rt-a': 2 };
+  const log = await runCycle(s, { cfg });
+  assert.deepEqual(decisionsFor(log, s.subject).filter((d) => d.action !== 'skip'), []);
+  const [scan] = log.byEvent('scan');
+  assert.deepEqual(scan.queuedHeld['build-a'], 2);
+  assert.deepEqual(scan.runtimeInflight['rt-a'], 2);
+});
+
+test('decision: a queued-but-not-started task holds its agent slot (PANT-1158)', async () => {
+  const s = queuedScenario(2);
+  const cfg = makeCfg({ agents: { ...AGENTS, 'build-a': { ...AGENTS['build-a'], maxInflight: 2 } }, lane: ['build-a'] });
+  const log = await runCycle(s, { cfg });
+  assert.deepEqual(decisionsFor(log, s.subject).filter((d) => d.action !== 'skip'), []);
+});
+
+test('decision: caps carry the queued count beside inflight (PANT-1158)', async () => {
+  const s = queuedScenario(2);
+  const cfg = makeCfg({ lane: ['build-a'] });
+  cfg.RUNTIME_CAP = { 'rt-a': 3 };
+  const log = await runCycle(s, { cfg });
+  const [d] = decisionsFor(log, s.subject);
+  assert.equal(d.action, 'assign');
+  assert.equal(d.agent, 'build-a');
+  assert.deepEqual(d.caps, {
+    agent_inflight: 0, agent_queued: 2, agent_max_inflight: 50, agent_cycle_assigns: 0, per_cycle_per_agent: 10,
+    runtime_inflight: 0, runtime_queued: 2, runtime_cap: 3, assigned: 0, max_assign: null,
+  });
+});
+
+test('decision: an assigned todo with no run (dead-zone) holds no slot (PANT-1158)', async () => {
+  const dead = makeIssue({ assignee_id: AGENTS['build-a'].id });
+  const fresh = makeIssue();
+  const cfg = makeCfg({ lane: ['build-a'] });
+  cfg.RUNTIME_CAP = { 'rt-a': 1 };
+  const log = await runCycle({ issues: [dead, fresh], runs: {}, subject: fresh.identifier }, { cfg });
+  const [d] = decisionsFor(log, fresh.identifier);
+  assert.equal(d.action, 'assign');
+  assert.equal(d.caps.agent_queued, 0);
+});
+
+// The acceptance invariant: however many cycles run, the queue a runtime holds
+// never outgrows its cap, so one provider limit can fail at most RUNTIME_CAP
+// queued dispatches. Each assign enqueues a run that never starts.
+test('decision: queue depth stays within RUNTIME_CAP across cycles (PANT-1158)', async () => {
+  const issues = Array.from({ length: 8 }, () => makeIssue());
+  const { backlog, spawn } = createAdapters(issues, {});
+  const runs = {};
+  backlog.getIssueRuns = (identifier) => runs[identifier] || [];
+  spawn.assignIssue = (identifier, agent) => {
+    issues.find((i) => i.identifier === identifier).assignee_id = AGENTS[agent].id;
+    runs[identifier] = queuedRun();
+  };
+  backlog.listAllIssues = () => issues;
+  const cfg = makeCfg({ lane: ['build-a'] });
+  cfg.RUNTIME_CAP = { 'rt-a': 2 };
+  for (let n = 0; n < 4; n++) {
+    await cycle({ backlog, spawn, cfg, log: createLogSink(), sleep: NOOP_SLEEP, loadTopology: () => TOPOLOGY, loadExternalConfig: () => ({}) });
+  }
+  assert.equal(Object.keys(runs).length, 2);
 });
 
 test('decision: a failed dispatch records its error', async () => {
