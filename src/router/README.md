@@ -90,6 +90,7 @@ to the existing `cycle_error` / `tenant_cycle_error` line.
 | `passes.*` | Decision events emitted per pass, counted whether applied or `dry_run`. `unblocked` / `parent_rollup` / `in_review` / `verified_done` / `changeback` = `advance` events of that kind; `cascade` = `cascade_dispatch`; `zombie` = `zombie` + `zombie_give_up`; `assigned_idle` = `assigned_idle` + `assigned_idle_unassign` + `archived_agent_unassign`; `review` = `review`; `routed` = `route`; `hand_up` = `hand_up`. Mapping: `passForEvent()` in `lib/observability.mjs`. |
 | `errors` | Number of `*_error` events this cycle, plus 1 if the cycle aborted. |
 | `aborted` / `abort_error` | `true` and the error message when a pass threw out of `cycle()`. |
+| `writes_held` | Present only when the cycle was held before any pass because core-api writes couldn't carry the operator token (a transient lookup failure, PANT-1159). A `cycle_writes_held` event carries the same reason. Nothing was written, and the next cycle decides again. |
 | `blocked_runtimes` | Runtimes rate-limit-blocked by the end of the cycle (sorted). |
 | `dry_run` | Whether the cycle ran with `--dry-run`. |
 

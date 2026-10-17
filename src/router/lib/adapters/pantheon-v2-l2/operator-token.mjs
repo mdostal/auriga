@@ -15,11 +15,22 @@
 // flow; this is its synchronous twin, since every adapter method here is
 // synchronous (see index.mjs's header comment).
 //
-// Lookup is lazy: the first write does it. A miss (standalone Auriga with no
-// core-api, core-api not up yet, no shared volume) is logged once, the write
-// goes out without the token and core-api's mode decides, and the next write
-// retries -- at most once per RETRY_MS, so a down core-api never costs a cycle
-// more than one extra call. Nothing here ever throws into a cycle.
+// Lookup is lazy: the first write does it, retried at most once per RETRY_MS
+// so a down core-api never costs a cycle more than one extra call. Nothing
+// here ever throws into a cycle.
+//
+// A miss is one of two kinds (PANT-1159, auriga#265):
+//   - transient: curl itself failed (timeout, connection refused) or the
+//     facade answered 5xx/408/429. The token most likely exists; core-api in
+//     enforce mode would refuse a write sent without it with a 401, and the
+//     decision behind that write would be lost. ready() reports it, the router
+//     holds the cycle's writes, and http-runner.mjs refuses to send a
+//     mutating request without the token, so the next cycle re-decides
+//     instead.
+//   - permanent: any other answer (4xx, no file in the shared volume, empty
+//     file) -- a configuration gap, not a blip. The write goes out without
+//     the token and core-api's mode decides, as before, so a warn-mode or
+//     tokenless install keeps working.
 //
 // Env:
 //   PANTHEON_OPERATOR_TOKEN        explicit token (local dev); wins over the facade.
@@ -39,6 +50,11 @@ export const RETRY_MS = 60_000;
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const INJECT_TIMEOUT_SECONDS = 10;
+const TRANSIENT_STATUSES = new Set([408, 429]);
+
+function isTransientStatus(status) {
+  return status >= 500 || TRANSIENT_STATUSES.has(status) || !Number.isFinite(status) || status === 0;
+}
 
 export function isMutatingMethod(method) {
   return MUTATING_METHODS.has(String(method || 'GET').toUpperCase());
@@ -56,10 +72,16 @@ export function isMutatingMethod(method) {
  *   exec is execFileSync, injected for the same reason http-runner.mjs's is.
  *   baseUrl is core-api's base URL with no tenant query: the operator token is
  *   install-wide, not per-tenant.
- * @returns {{ tokenFor: (method: string) => string | null, invalidate: () => void }}
+ * @returns {{
+ *   tokenFor: (method: string) => string | null,
+ *   ready: () => { ok: true } | { ok: false, reason: string },
+ *   invalidate: () => void,
+ * }}
  *   tokenFor returns the token for a mutating method (looking it up if
- *   needed) or null; it never throws. invalidate drops a facade-sourced token
- *   after core-api rejected it, so a later write looks it up again.
+ *   needed) or null; it never throws. ready says whether a write may go out
+ *   now (looking the token up if needed): false only while the last lookup
+ *   failed transiently. invalidate drops a facade-sourced token after core-api
+ *   rejected it, so a later write looks it up again.
  */
 export function createOperatorTokenSource({
   exec,
@@ -77,6 +99,8 @@ export function createOperatorTokenSource({
   let token = envToken || null;
   let lastAttemptAt = Number.NEGATIVE_INFINITY;
   let missLogged = false;
+  // The last lookup's failure, { transient, reason }, or null.
+  let lastMiss = null;
 
   // POST /api/secrets/inject -> read the shared-volume file -> delete it.
   // Same request shape as Janus's injectSecretFromPantheon and pantheon-v2's
@@ -101,7 +125,7 @@ export function createOperatorTokenSource({
         const text = splitIdx === -1 ? '' : out.slice(0, splitIdx);
         let message = `HTTP ${status}`;
         try { const parsed = JSON.parse(text); if (parsed && parsed.error) message = `HTTP ${status}: ${parsed.error}`; } catch { /* not JSON */ }
-        return { ok: false, reason: `secrets/inject failed: ${message}` };
+        return { ok: false, transient: isTransientStatus(status), reason: `secrets/inject failed: ${message}` };
       }
       if (!existsSync(filePath)) {
         return { ok: false, reason: `secrets/inject succeeded but ${sharedDir} has no file for it (is the pantheon-secrets volume mounted?)` };
@@ -115,28 +139,46 @@ export function createOperatorTokenSource({
       // curl's own failure (connection refused, timeout): first line only,
       // so a log line never carries more than the transport error.
       const message = String(e && e.message ? e.message : e).split('\n')[0];
-      return { ok: false, reason: `secrets/inject failed: ${message}` };
+      return { ok: false, transient: true, reason: `secrets/inject failed: ${message}` };
     } finally {
       try { if (existsSync(filePath)) unlinkSync(filePath); } catch { /* best-effort cleanup */ }
     }
   }
 
-  function tokenFor(method) {
-    if (!isMutatingMethod(method)) return null;
-    if (token) return token;
-    if (source !== 'pantheon') return null;
-    if (now() - lastAttemptAt < RETRY_MS) return null;
+  // Looks the token up unless it is held, the facade is off, or the last
+  // attempt was under RETRY_MS ago.
+  function resolve() {
+    if (token || source !== 'pantheon') return;
+    if (now() - lastAttemptAt < RETRY_MS) return;
     lastAttemptAt = now();
     const result = lookup();
     if (result.ok) {
       token = result.value;
+      lastMiss = null;
       missLogged = false;
       log('pantheon-v2-l2: operator token resolved via Pantheon secrets facade');
-    } else if (!missLogged) {
-      missLogged = true;
-      log(`pantheon-v2-l2: operator token unavailable (${result.reason}); core-api writes go out without it, retrying on a later write`);
+      return;
     }
+    const wasTransient = Boolean(lastMiss && lastMiss.transient);
+    lastMiss = { transient: Boolean(result.transient), reason: result.reason };
+    if (!missLogged || wasTransient !== lastMiss.transient) {
+      missLogged = true;
+      log(lastMiss.transient
+        ? `pantheon-v2-l2: operator token unavailable (${result.reason}); core-api writes are held, not sent without it, until a later cycle resolves it`
+        : `pantheon-v2-l2: operator token unavailable (${result.reason}); core-api writes go out without it, retrying on a later write`);
+    }
+  }
+
+  function tokenFor(method) {
+    if (!isMutatingMethod(method)) return null;
+    resolve();
     return token;
+  }
+
+  function ready() {
+    resolve();
+    if (token || !lastMiss || !lastMiss.transient) return { ok: true };
+    return { ok: false, reason: `operator token unavailable (${lastMiss.reason})` };
   }
 
   function invalidate() {
@@ -145,5 +187,5 @@ export function createOperatorTokenSource({
     log('pantheon-v2-l2: core-api rejected the operator token; looking it up again on a later write');
   }
 
-  return Object.freeze({ tokenFor, invalidate });
+  return Object.freeze({ tokenFor, ready, invalidate });
 }

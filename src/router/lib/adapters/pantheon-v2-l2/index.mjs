@@ -67,13 +67,29 @@ function operatorTokenFor(cfg, exec, baseUrl) {
   return operatorTokenSources.get(baseUrl);
 }
 
+// PANT-1159: whether this adapter's core-api writes may go out right now.
+// False only while the operator token's last lookup failed transiently; the
+// router checks it before a cycle and holds the cycle's writes when it is
+// false, so the next cycle re-decides instead of each write drawing a 401.
+function makeWritesReady(tokenSource) {
+  return () => (tokenSource && typeof tokenSource.ready === 'function' ? tokenSource.ready() : { ok: true });
+}
+
+function adapterBaseUrl(cfg) {
+  return (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+}
+
+function adapterTokenSource(cfg) {
+  return operatorTokenFor(cfg, cfg.exec || execFileSync, adapterBaseUrl(cfg));
+}
+
 function makeAdapterRun(cfg) {
-  const BASE_URL = (cfg.baseUrl || process.env.PANTHEON_API_URL || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const BASE_URL = adapterBaseUrl(cfg);
   const TENANT_ID = cfg.tenantId || process.env.AURIGA_TENANT_ID || null;
   const exec = cfg.exec || execFileSync;
   return makeHttpRun(exec, BASE_URL, {
     ...(TENANT_ID ? { staticQueryParams: { tenant_id: TENANT_ID } } : {}),
-    operatorToken: operatorTokenFor(cfg, exec, BASE_URL),
+    operatorToken: adapterTokenSource(cfg),
   });
 }
 
@@ -272,6 +288,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     commentOnIssue,
     createIssue,
     setIssueMetadata,
+    writesReady: makeWritesReady(adapterTokenSource(cfg)),
 
     // "Ported extra", not part of the BacklogAdapter typedef contract, but
     // REQUIRED by auriga-router.mjs's real cycle() — see this function's
@@ -433,5 +450,6 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
     unassignIssue,
     selectRoute,
     reportRouteOutcome,
+    writesReady: makeWritesReady(adapterTokenSource(cfg)),
   });
 }

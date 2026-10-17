@@ -398,6 +398,52 @@ test('route new todos: an assign failure logs assign_error with the expected ide
   assert.equal(log.byEvent('verify_ok').length, 0);
 });
 
+test('PANT-1159: an unavailable operator token holds the cycle\'s writes (no *_error, no lost dispatch); the next cycle dispatches', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn, calls } = createMockAdapters([story], cfg.AGENTS);
+  let ready = { ok: false, reason: 'operator token unavailable (secrets/inject failed: HTTP 502: This operation was aborted)' };
+  spawn.writesReady = () => ready;
+
+  const held = createLogSink();
+  const first = await cycle({ backlog, spawn, cfg, log: held, sleep: NOOP_SLEEP });
+
+  assert.equal(first.assigned, 0);
+  for (const [kind, list] of Object.entries(calls)) assert.deepEqual(list, [], `no ${kind} write while the token is unavailable`);
+  assert.equal(held.byEvent('cycle_writes_held').length, 1);
+  assert.match(held.byEvent('cycle_writes_held')[0].reason, /HTTP 502/);
+  assert.deepEqual(held.events.filter((e) => e.event.endsWith('_error')), [], 'a held cycle is not an error');
+  const [summary] = held.byEvent('cycle_summary');
+  assert.equal(summary.errors, 0);
+  assert.equal(summary.aborted, false);
+  assert.match(summary.writes_held, /operator token unavailable/);
+  assert.equal(story.assignee_id, null, 'the ticket is still unassigned todo for the next cycle');
+
+  ready = { ok: true };
+  const next = createLogSink();
+  const second = await cycle({ backlog, spawn, cfg, log: next, sleep: NOOP_SLEEP });
+
+  assert.equal(second.assigned, 1, 'picked up on the next cycle with no manual nursing');
+  assert.deepEqual(calls.assign.map((c) => c.identifier), [story.identifier]);
+  assert.equal(next.byEvent('cycle_writes_held').length, 0);
+  assert.equal(next.byEvent('cycle_summary')[0].writes_held, undefined);
+});
+
+test('PANT-1159: a dry run never consults writesReady', async () => {
+  const AURIGA = projectId('Pantheon Core');
+  const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
+  const { backlog, spawn } = createMockAdapters([story], cfg.AGENTS);
+  let asked = 0;
+  backlog.writesReady = () => { asked++; return { ok: false, reason: 'down' }; };
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP, dryRun: true });
+
+  assert.equal(asked, 0);
+  assert.equal(log.byEvent('cycle_writes_held').length, 0);
+  assert.equal(log.byEvent('route').length, 1, 'dry run still decides');
+});
+
 test('route new todos: no run row appearing within the verify wait logs verify_no_run and force-reruns (observed via spawn.calls.rerun)', async () => {
   const AURIGA = projectId('Pantheon Core'); // 'Auriga' pruned 2026-08-29 (stale workspace); this test doesn't care which real, dispatch-eligible project it uses
   const story = makeIssue({ project_id: AURIGA, parent_issue_id: 'fake-parent' });
