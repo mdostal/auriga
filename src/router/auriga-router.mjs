@@ -434,6 +434,7 @@ export async function cycle(opts = {}) {
       errors: counter.errors() + (thrown ? 1 : 0),
       aborted: Boolean(thrown),
       ...(thrown ? { abort_error: thrown.message } : {}),
+      ...(result && result.writesHeld ? { writes_held: result.writesHeld } : {}),
       blocked_runtimes: state.blockedRuntimes ? [...state.blockedRuntimes].sort() : [],
       dry_run: opts.dryRun ?? DRY,
     };
@@ -443,6 +444,17 @@ export async function cycle(opts = {}) {
       catch (e) { try { baseLog('heartbeat_error', { file: opts.heartbeatFile, error: e.message }); } catch {} }
     }
   }
+}
+
+// The first adapter's reason its writes may not go out now, or null.
+// writesReady is optional: adapters without one (stub, multica) never hold.
+function writesHeldReason(...adapters) {
+  for (const a of adapters) {
+    if (!a || typeof a.writesReady !== 'function') continue;
+    const r = a.writesReady();
+    if (r && r.ok === false) return r.reason || 'writes not ready';
+  }
+  return null;
 }
 
 async function runCycle(opts, state) {
@@ -456,6 +468,19 @@ async function runCycle(opts, state) {
   const noZombie = opts.noZombie ?? NO_ZOMBIE;
   const maxAssign = opts.maxAssign ?? Infinity;
   const now = opts.now ?? Date.now();
+
+  // PANT-1159 (auriga#265): when core-api writes can't carry the operator token
+  // right now (its lookup just failed transiently), hold the whole cycle rather
+  // than send writes core-api would refuse with a 401 -- a refused rerun or
+  // assign loses the decision behind it, while re-deciding next cycle is
+  // cheap. Checked before any pass so no pass starts work it can't finish.
+  if (!dryRun) {
+    const held = writesHeldReason(backlog, spawn);
+    if (held) {
+      logImpl('cycle_writes_held', { reason: held });
+      return { todo: null, picked: 0, assigned: 0, writesHeld: held };
+    }
+  }
 
   // t015 — orchestrator hand-up: read once per cycle, same pattern as every
   // other per-cycle config read. `createRemoteBacklog` is injectable so a

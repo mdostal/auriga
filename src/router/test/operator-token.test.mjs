@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import { createOperatorTokenSource, OPERATOR_TOKEN_HEADER, RETRY_MS } from '../lib/adapters/pantheon-v2-l2/operator-token.mjs';
-import { makeHttpRun } from '../lib/adapters/pantheon-v2-l2/http-runner.mjs';
+import { makeHttpRun, OPERATOR_TOKEN_UNAVAILABLE } from '../lib/adapters/pantheon-v2-l2/http-runner.mjs';
 
 const BASE_URL = 'http://core-api.test:3012';
 const TOKEN = 'tok-secret-123';
@@ -139,6 +139,65 @@ test('a non-2xx inject is a miss carrying core-api\'s error message', (t) => {
   assert.match(logs[0], /HTTP 404: no secret matches tags/);
 });
 
+// ---- PANT-1159: a transient miss holds writes; a permanent one degrades ---------------
+
+for (const [label, inject] of [
+  ['HTTP 502 from the facade', () => ({ status: 502, body: { error: 'This operation was aborted' } })],
+  ['HTTP 429 from the facade', () => ({ status: 429, body: { error: 'slow down' } })],
+  ['a curl transport failure', () => new Error('curl: (28) Operation timed out after 10001 milliseconds')],
+]) {
+  test(`PANT-1159: ${label} is a transient miss: ready() holds writes until a later lookup succeeds`, (t) => {
+    let clock = 0;
+    let fail = true;
+    const { exec, calls } = fakeCurl({ inject: () => (fail ? inject() : { status: 200, write: `PANTHEON_OPERATOR_TOKEN=${TOKEN}` }) });
+    const { src, logs } = source(t, exec, { now: () => clock });
+
+    const gate = src.ready();
+    assert.equal(gate.ok, false);
+    assert.match(gate.reason, /^operator token unavailable \(secrets\/inject failed: /);
+    assert.equal(src.tokenFor('POST'), null);
+    assert.equal(src.ready().ok, false, 'still held inside the retry window');
+    assert.equal(calls.length, 1, 'no second inject inside the retry window');
+    assert.match(logs[0], /writes are held, not sent without it/);
+
+    fail = false;
+    clock += RETRY_MS;
+    assert.deepEqual(src.ready(), { ok: true });
+    assert.equal(src.tokenFor('POST'), TOKEN);
+  });
+}
+
+test('PANT-1159: a permanent miss (4xx, no file) keeps the old degrade: ready() lets writes go out without the token', (t) => {
+  const { exec } = fakeCurl({ inject: () => ({ status: 404, body: { error: 'no secret matches tags' } }) });
+  const { src, logs } = source(t, exec);
+  assert.deepEqual(src.ready(), { ok: true });
+  assert.equal(src.tokenFor('POST'), null);
+  assert.match(logs[0], /writes go out without it/);
+
+  const { exec: noFileExec } = fakeCurl({ inject: () => ({ status: 200 }) });
+  const { src: noFile } = source(t, noFileExec);
+  assert.deepEqual(noFile.ready(), { ok: true });
+});
+
+test('PANT-1159: ready() is always ok for an env token or AURIGA_OPERATOR_TOKEN_SOURCE=none, with no lookup', (t) => {
+  const { exec, calls } = fakeCurl({ inject: () => ({ status: 502 }) });
+  assert.deepEqual(source(t, exec, { env: { PANTHEON_OPERATOR_TOKEN: 'env-tok' } }).src.ready(), { ok: true });
+  assert.deepEqual(source(t, exec, { env: { AURIGA_OPERATOR_TOKEN_SOURCE: 'none' } }).src.ready(), { ok: true });
+  assert.equal(calls.length, 0);
+});
+
+test('PANT-1159: a transient miss after a 401 invalidation holds writes again', (t) => {
+  let clock = 0;
+  let status = 200;
+  const { exec } = fakeCurl({ inject: () => (status === 200 ? { status, write: `PANTHEON_OPERATOR_TOKEN=${TOKEN}` } : { status }) });
+  const { src } = source(t, exec, { now: () => clock });
+  assert.equal(src.tokenFor('POST'), TOKEN);
+  src.invalidate();
+  status = 503;
+  clock += RETRY_MS;
+  assert.equal(src.ready().ok, false);
+});
+
 test('PANTHEON_OPERATOR_TOKEN in the environment wins and never calls the facade', (t) => {
   const { exec, calls } = fakeCurl();
   const { src } = source(t, exec, { env: { PANTHEON_OPERATOR_TOKEN: ' env-tok ' } });
@@ -206,6 +265,27 @@ test('a 401 on a write with a token invalidates it and still throws to the calle
   assert.equal(tok.state.invalidated, 1);
 });
 
+test('PANT-1159: while the token is transiently unavailable a write is never sent; a read still is', (t) => {
+  const { exec, calls } = fakeCurl({ inject: () => ({ status: 502, body: { error: 'This operation was aborted' } }) });
+  const { src } = source(t, exec);
+  const run = makeHttpRun(exec, BASE_URL, { operatorToken: src });
+
+  assert.throws(
+    () => run('POST', '/api/backlog/issues/FFE-93/rerun'),
+    (e) => e.code === OPERATOR_TOKEN_UNAVAILABLE && /POST \/api\/backlog\/issues\/FFE-93\/rerun not sent: operator token unavailable/.test(e.message),
+  );
+  assert.deepEqual(calls.filter((c) => !c.url.endsWith('/api/secrets/inject')), [], 'no tokenless write reaches core-api');
+
+  run('GET', '/api/backlog/issues');
+  assert.equal(calls.filter((c) => c.method === 'GET').length, 1);
+});
+
+test('PANT-1159: a token source without ready() (a fixed or injected one) is used as before', () => {
+  const { exec, calls } = fakeCurl();
+  makeHttpRun(exec, BASE_URL, { operatorToken: fixedToken(TOKEN) })('POST', '/api/backlog/issues/PAN-1/status', { status: 'done' });
+  assert.equal(calls[0].opts.input, `${OPERATOR_TOKEN_HEADER}: ${TOKEN}\n`);
+});
+
 // ---- adapters: one lookup per process, every write carries it ------------------------
 
 let importCounter = 0;
@@ -247,4 +327,25 @@ test('backlog + spawn adapters share one lookup and send the token on assign, st
   ]);
   for (const w of writes) assert.equal(w.opts.input, `${OPERATOR_TOKEN_HEADER}: ${TOKEN}\n`, `${w.method} ${w.url}`);
   for (const r of calls.filter((c) => c.method === 'GET')) assert.equal(r.opts.input, undefined, r.url);
+});
+
+test('PANT-1159: both adapters report writesReady from the shared token source', async (t) => {
+  const dir = secretsDir(t);
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  process.env.PANTHEON_SECRETS_SHARED_DIR = dir;
+  delete process.env.PANTHEON_OPERATOR_TOKEN;
+  delete process.env.AURIGA_OPERATOR_TOKEN_SOURCE;
+
+  const { exec, calls } = fakeCurl({ inject: () => ({ status: 502, body: { error: 'This operation was aborted' } }) });
+  importCounter++;
+  const mod = await import(`../lib/adapters/pantheon-v2-l2/index.mjs?operator-token=${importCounter}`);
+  const backlog = mod.createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL, exec, tenantId: 'acme' });
+  const spawn = mod.createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL, exec, tenantId: 'acme' });
+
+  assert.equal(backlog.writesReady().ok, false);
+  assert.match(spawn.writesReady().reason, /HTTP 502: This operation was aborted/);
+  assert.throws(() => spawn.rerunIssue('FFE-93'), /not sent: operator token unavailable/);
+  assert.equal(calls.filter((c) => c.url.endsWith('/api/secrets/inject')).length, 1, 'one lookup, shared');
+  assert.deepEqual(calls.filter((c) => !c.url.endsWith('/api/secrets/inject')), [], 'nothing reached core-api without the token');
 });
