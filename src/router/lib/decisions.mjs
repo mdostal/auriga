@@ -64,21 +64,34 @@ export function laneReason(projectId, cfg, isHive = false) {
 
 // Headroom for `agent` / `runtime` at decision time. Nulls when the pass has no
 // agent yet (a pre-selection skip). A null cap means uncapped.
-export function capsSnapshot({ agent, runtime, cfg, inflight = {}, loopRtProjected = {}, priorAgentCycleAssigns = {}, assigned = 0, maxAssign = Infinity }) {
+//
+// `inflight` is the slots held per agent, the map the capacity checks read:
+// running + this cycle's dispatches + `queued` (assigned todos the runtime still
+// holds, PANT-1158). The record splits it back out so `agent_inflight +
+// agent_queued` is what was compared to `agent_max_inflight`, and `runtime_inflight
+// + runtime_queued` to `runtime_cap`.
+export function capsSnapshot({ agent, runtime, cfg, inflight = {}, queued = {}, loopRtProjected = {}, priorAgentCycleAssigns = {}, assigned = 0, maxAssign = Infinity }) {
   const a = agent ? cfg.AGENTS?.[agent] : null;
   const rt = runtime ?? a?.runtime ?? null;
   let rtInflight = null;
+  let rtQueued = null;
   if (rt) {
     rtInflight = loopRtProjected[rt] || 0;
+    rtQueued = 0;
     for (const [name, n] of Object.entries(inflight)) if (cfg.AGENTS?.[name]?.runtime === rt) rtInflight += n;
+    for (const [name, n] of Object.entries(queued)) if (cfg.AGENTS?.[name]?.runtime === rt) rtQueued += n;
+    rtInflight -= rtQueued;
   }
+  const agentQueued = agent ? queued[agent] || 0 : null;
   const finite = (n) => (Number.isFinite(n) ? n : null);
   return {
-    agent_inflight: agent ? inflight[agent] || 0 : null,
+    agent_inflight: agent ? (inflight[agent] || 0) - agentQueued : null,
+    agent_queued: agentQueued,
     agent_max_inflight: finite(a?.maxInflight),
     agent_cycle_assigns: agent ? priorAgentCycleAssigns[agent] || 0 : null,
     per_cycle_per_agent: finite(cfg.CAPS?.perCyclePerAgent),
     runtime_inflight: rtInflight,
+    runtime_queued: rtQueued,
     runtime_cap: rt ? finite(cfg.RUNTIME_CAP?.[rt]) : null,
     assigned,
     max_assign: finite(maxAssign),

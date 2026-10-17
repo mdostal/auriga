@@ -15,7 +15,7 @@ import {
   repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
 } from './pr-matching.mjs';
 import {
-  computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
+  computeInflight, computeAssignedQueued, computeQueuedHeld, addCounts, computeRuntimeInflight, agentHasCapacity,
   agentCapacityReason, computeReviewInflight, chooseReviewAgent, laneCandidates,
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
@@ -31,7 +31,7 @@ export {
   repoFromPrUrl, prIsOpen, hasOpenPrForIssue, normalizeRepoSlug, targetRepoValue,
 };
 export {
-  computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
+  computeInflight, computeAssignedQueued, computeQueuedHeld, addCounts, computeRuntimeInflight, agentHasCapacity,
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
@@ -152,7 +152,7 @@ export function methodologyFallbackLane(issue, cfg) {
 // classifyRun/hasActiveRun/latestRun now live in ./run-classification.mjs —
 // imported + re-exported above (t011 decomposition).
 
-// computeInflight/computeAssignedQueued/computeRuntimeInflight/
+// computeInflight/computeAssignedQueued/computeQueuedHeld/computeRuntimeInflight/
 // agentHasCapacity now live in ./capacity.mjs — imported + re-exported
 // above (t011 decomposition).
 
@@ -1386,8 +1386,9 @@ function toMs(ts) {
 }
 
 // Detect assigned `todo` issues that should have dispatched already but are
-// still idle. These do not count as capacity, so recovery is a separate bounded
-// pass instead of part of route selection.
+// still idle. An idle one holds no slot (computeQueuedHeld counts only a todo
+// with a live run, by this same hasActiveRun test), so recovery is a separate
+// bounded pass instead of part of route selection.
 export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds = agentIdSet(cfg.AGENTS), now = Date.now(), _allIssues = []) {
   const staleMs = cfg.CAPS.assignedIdleStaleMs ?? cfg.CAPS.zombieStaleMs;
   // PANT-1154 / auriga#261: a run still waiting in the queue is behind a

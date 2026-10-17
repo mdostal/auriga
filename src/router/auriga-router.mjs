@@ -247,7 +247,7 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
 // records with dry_run: true at the point the live cycle would dispatch.
 function decisionCaps(dc, agent, runtime) {
   return capsSnapshot({
-    agent, runtime, cfg: dc.cfg, inflight: dc.inflight,
+    agent, runtime, cfg: dc.cfg, inflight: dc.inflight, queued: dc.queuedHeld,
     priorAgentCycleAssigns: dc.priorAgentCycleAssigns, assigned: dc.assigned, maxAssign: dc.maxAssign,
   });
 }
@@ -511,13 +511,33 @@ async function runCycle(opts, state) {
     try { runsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier); }
     catch (e) { logImpl('inflight_runs_error', { identifier: i.identifier, error: e.message }); }
   }
-  const inflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS, {
+  const runningInflight = coreImpl.computeInflight(issues, cfgImpl.AGENTS, {
     runsByIssue, now, staleMs: cfgImpl.CAPS.zombieStaleMs,
   });
+  // Assigned todos + their runs (PANT-1158, auriga#266). Between assign and start an
+  // issue is `todo`, so computeInflight misses it; one with a live run in the runtime
+  // still holds a slot. Fetched board-wide for this tenant's agents, like the
+  // in_progress runs above, and reused by the assigned-idle pass below. A failed fetch
+  // leaves the issue uncounted (computeQueuedHeld counts only a known live run).
+  const todoRunsByIssue = {};
+  for (const i of issues) {
+    if ((i.status || '').toLowerCase() !== ISSUE_STATUS.TODO || !agentIds.has(i.assignee_id)) continue;
+    try { todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier); }
+    catch (e) { logImpl('queued_runs_error', { identifier: i.identifier, error: e.message }); }
+  }
+  const queuedHeld = coreImpl.computeQueuedHeld(issues, cfgImpl.AGENTS, {
+    runsByIssue: todoRunsByIssue, now,
+    staleMs: cfgImpl.CAPS.assignedIdleStaleMs ?? cfgImpl.CAPS.zombieStaleMs,
+    queuedStaleMs: cfgImpl.CAPS.assignedIdleQueuedStaleMs ?? Infinity,
+  });
+  // Slots held per agent: running + queued. Every capacity check below (cascade,
+  // zombie, assigned-idle, fresh routing) reads this map, and commitDispatch adds to
+  // it, so a queued dispatch counts against max_inflight and RUNTIME_CAP.
+  const inflight = coreImpl.addCounts(runningInflight, queuedHeld);
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
-  // Observability only (NOT capacity): the assigned-todo backlog. If this climbs while
-  // inflight stays ~0, dispatch is happening but runs aren't starting (dead-zone) — the
-  // signal that used to hide inside the old inflight number and deadlock the router.
+  // Observability only (NOT capacity): the raw assigned-todo backlog. If this climbs
+  // while queuedHeld stays ~0, assigns are not enqueuing runs (dead-zone) — the signal
+  // that used to hide inside the old inflight number and deadlock the router.
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
   const todoAll = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id);
@@ -527,7 +547,8 @@ async function runCycle(opts, state) {
     todoUnassigned: todo.length,
     // PANT-1008: unassigned todos held back as smoke/scratch, so they're never invisible.
     todoSmokeScratch: todoAll.length - todo.length,
-    inflight,
+    inflight: runningInflight,
+    queuedHeld,
     runtimeInflight,
     assignedQueued,
   });
@@ -703,7 +724,7 @@ async function runCycle(opts, state) {
   skipLimiter.tick();
   const dc = {
     spawn, backlog, cfg: cfgImpl, core: coreImpl, log: logImpl, sleep: sleepImpl, now, issues,
-    blockedRuntimes, inflight, loopRtProjected, priorAgentCycleAssigns, assigned: 0,
+    blockedRuntimes, inflight, queuedHeld, loopRtProjected, priorAgentCycleAssigns, assigned: 0,
     dryRun, maxAssign, skipLimiter, skipWindow: cfgImpl.CAPS.decisionSkipWindowCycles ?? 10,
     tenantId: opts.tenantId ?? process.env.AURIGA_TENANT_ID ?? null,
     instanceId: process.env.AURIGA_INSTANCE_ID ?? null,
@@ -1017,8 +1038,11 @@ async function runCycle(opts, state) {
         i.assignee_id && agentIds.has(i.assignee_id) &&
         cfgImpl.PROJECT_IDS.includes(i.project_id)
     );
-    const todoRunsByIssue = {};
-    for (const i of todoAssigned) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+    // Runs were fetched at scan time (todoRunsByIssue); one whose fetch failed there
+    // is retried here so the error still surfaces in this pass.
+    for (const i of todoAssigned) {
+      if (!todoRunsByIssue[i.identifier]) todoRunsByIssue[i.identifier] = backlog.getIssueRuns(i.identifier);
+    }
     const idleActions = coreImpl.detectAssignedIdle(todoAssigned, todoRunsByIssue, cfgImpl, agentIds, now, issues);
     // PANT-736: unassign actions (review-lane agent on todo) bypass the capacity gate —
     // they don't dispatch a run so must not consume a slot or count against inflight.
