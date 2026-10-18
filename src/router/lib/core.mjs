@@ -1091,15 +1091,19 @@ export function detectUnblocks(blockedIssues, statusById, allIssues = [], cfg = 
   const actions = [];
   for (const i of blockedIssues) {
     if (isSmokeScratch(i)) continue;
-    if (isSeedForTenant(i, allIssues, cfg)) continue; // PANT-669: seeds must not auto-advance from blocked — human-gated planning step
-    if (isAgentParked(i)) continue;
-    if (isHumanTodo(i, cfg)) continue;
-    if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
-    if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     // PANT-1117: an agent's `dependency:<ids>` park is re-queued once its deps
     // are terminal even though it has runs; every other blocked ticket keeps the
     // zero-runs guard.
     const dependencyPark = dependencyParkIds(i) !== null;
+    // PANT-669: seeds must not auto-advance from blocked — human-gated planning step.
+    // A dependency park is not waiting on a human but on named tickets, so it skips
+    // this guard; otherwise every flat-filed (top-level, childless = heuristic seed)
+    // story parked on `dependency:<ids>` stayed blocked forever (PANT-1174, auriga#270).
+    if (!dependencyPark && isSeedForTenant(i, allIssues, cfg)) continue;
+    if (isAgentParked(i)) continue;
+    if (isHumanTodo(i, cfg)) continue;
+    if (!hasDeclaredDeps(i)) continue; // parked for a non-dependency reason — leave it
+    if (!allDepsSatisfied(i, statusById, allIssues)) continue; // a declared dep isn't done yet
     if (runsOf && !dependencyPark) {
       const runs = runsOf(i);
       if (!Array.isArray(runs) || runs.length > 0) continue; // PANT-1052: already ran -> parked, not dependency-blocked
