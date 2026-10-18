@@ -2,7 +2,7 @@
 // Everything here is deterministic and unit-tested with mocked inputs.
 
 import { isPrMerged } from './github-pr-state.mjs';
-import { ISSUE_STATUS, isTerminalIssueStatus } from './issue-status.mjs';
+import { ISSUE_STATUS, isTerminalIssueStatus, isPlainTodo, normStatus, NEEDS_DECISION } from './issue-status.mjs';
 import {
   assignmentFingerprint,
   assignmentFingerprintMatches,
@@ -1347,8 +1347,6 @@ export function detectChangesRequested(changesRequestedIssues, cfg = {}, _allIss
   return actions;
 }
 
-const NEEDS_DECISION = 'needs-decision';
-const normStatus = (v) => (typeof v === 'string' ? v.trim().toLowerCase().replace(/[\s_]+/g, '-') : '');
 
 // PANT-844: true when an issue is waiting on a human decision — labelled
 // `needs-decision`, or carrying that status (custom workflows surface it via
@@ -1358,19 +1356,6 @@ export function isAwaitingDecision(issue = {}) {
   const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
   if (labels.includes(NEEDS_DECISION)) return true;
   return [issue.status, issue.status_name].some((v) => normStatus(v) === NEEDS_DECISION);
-}
-
-// PANT-844: assigned-idle recovery is for genuine `todo` work only. A custom
-// workflow column (e.g. "Backlog" mapped onto the todo category) must not slip
-// through, so status_category must agree and status_name must not name a
-// parked column. status_name is free text ("To Do"), so only known parked
-// names are rejected rather than requiring an exact `todo`.
-const PARKED_STATUS_NAMES = new Set(['backlog', 'blocked', NEEDS_DECISION]);
-function isPlainTodo(issue = {}) {
-  if (normStatus(issue.status) !== 'todo') return false;
-  if (issue.status_category && normStatus(issue.status_category) !== 'todo') return false;
-  if (PARKED_STATUS_NAMES.has(normStatus(issue.status_name))) return false;
-  return true;
 }
 
 // ---- PAN-7492 self-heal: recover assigned-but-idle stories ----
@@ -1494,7 +1479,9 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
 export function detectArchivedAssignments(todoIssues, cfg, knownAgentIds = agentIdSet(cfg.AGENTS)) {
   const actions = [];
   for (const i of todoIssues) {
-    if ((i.status || '').toLowerCase() !== 'todo') continue;
+    // PANT-1173 (auriga#246): a backlog-parked ticket is never routed, so unassigning
+    // it to "re-enter the candidate pool" only rewrites a ticket a human parked.
+    if (!isPlainTodo(i)) continue;
     if (!i.assignee_id || knownAgentIds.has(i.assignee_id)) continue;
     if (isSmokeScratch(i)) continue;
     if (isAgentParked(i)) continue;
