@@ -141,6 +141,52 @@ test('PANT-931: a todo issue whose nativeStatus is backlog is never rerun by det
   assert.deepEqual(picks.map((p) => p.identifier), ['PANT-2']);
 });
 
+// PANT-1173 (auriga#246 / #237): backlog is a park in every pass, not just routing.
+// The live loop was `assigned-todo-stale` (the ticket HAD runs, all old), FFE-43 x17,
+// and the parked FFE tickets still showed up in the scan's assignedQueued.
+test('PANT-1173: a nativeStatus backlog ticket is never an assigned_idle candidate, not queued, and not unassigned', async (t) => {
+  const old = '2026-01-01T00:00:00Z';
+  const agent = { type: 'agent', id: 'AGENT' };
+  const archived = { type: 'agent', id: 'GONE' };
+  makeCurlMock(t, () => ({
+    status: 200,
+    body: {
+      issues: [
+        rawBoardIssue({ id: 'p1', identifier: 'FFE-43', number: 43, nativeStatus: 'backlog', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 'p2', identifier: 'FFE-26', number: 26, nativeStatus: 'Backlog', assignee: agent, parentId: 'EPIC', createdAt: old, labels: [] }),
+        rawBoardIssue({ id: 't1', identifier: 'FFE-1', number: 1, nativeStatus: 'todo', assignee: agent, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 'p3', identifier: 'FFE-54', number: 54, nativeStatus: 'backlog', assignee: archived, parentId: 'EPIC', createdAt: old }),
+        rawBoardIssue({ id: 't3', identifier: 'FFE-2', number: 2, nativeStatus: 'todo', assignee: archived, parentId: 'EPIC', createdAt: old }),
+      ],
+    },
+  }));
+  const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();
+  const core = await import('../lib/core.mjs');
+  const issues = createPantheonV2L2BacklogAdapter({ baseUrl: BASE_URL }).listAllIssues([]);
+
+  const cfg = {
+    AGENTS: { 'flayr-build': { id: 'AGENT', runtime: 'codex', maxInflight: 3 } },
+    PROJECT_IDS: ['proj-1'],
+    PROJECT_NAMES: {},
+    CAPS: { zombieStaleMs: 20 * 60 * 1000, assignedIdleStaleMs: 10 * 60 * 1000 },
+    HUMAN_NAMES: [],
+  };
+  const staleRun = [{ id: 'r1', status: 'completed', created_at: old, started_at: old, completed_at: old }];
+  const runsByIssue = Object.fromEntries(issues.map((i) => [i.identifier, staleRun]));
+  const now = Date.parse('2026-02-01T00:00:00Z');
+
+  // Rerun every cycle for a month: the parked tickets never become candidates.
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const idle = core.detectAssignedIdle(issues, runsByIssue, cfg, core.agentIdSet(cfg.AGENTS), now + cycle * 3600_000);
+    assert.deepEqual(idle.map((a) => [a.identifier, a.reason]), [['FFE-1', 'assigned-todo-stale']]);
+  }
+
+  assert.deepEqual(core.computeAssignedQueued(issues, cfg.AGENTS), { 'flayr-build': 1 });
+
+  const unassign = core.detectArchivedAssignments(issues, cfg, core.agentIdSet(cfg.AGENTS));
+  assert.deepEqual(unassign.map((a) => a.identifier), ['FFE-2']);
+});
+
 test('listAllProjectIds() returns a single sentinel (Pantheon backlog is board-wide, not project-scoped)', async (t) => {
   makeCurlMock(t, () => new Error('should never be called — listAllProjectIds is pure'));
   const { createPantheonV2L2BacklogAdapter } = await freshAdapterModule();

@@ -3,7 +3,7 @@
 // run-classification.mjs (leaf modules) —
 // no dependency on any of core.mjs's own dispatch/decision logic.
 
-import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './issue-status.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './issue-status.mjs';
 import { isReviewDispatchSkipped } from './review-eligibility.mjs';
 import { hasActiveRun } from './run-classification.mjs';
 
@@ -65,7 +65,8 @@ export function computeInflight(issues, agents, liveness = {}) {
 // Count assigned-but-not-running issues per agent (the old "inflight" definition).
 // Not used for capacity: kept for observability so the divergence between real
 // in-flight and the raw assigned-todo backlog stays visible in the scan log.
-// computeQueuedHeld is the subset of it that holds a slot.
+// computeQueuedHeld is the subset of it that holds a slot. PANT-1173 (auriga#237):
+// backlog-parked tickets are not queued work, so they are left out (isPlainTodo).
 export function computeAssignedQueued(issues, agents) {
   const idToName = {};
   for (const [name, a] of Object.entries(agents)) idToName[a.id] = name;
@@ -75,8 +76,7 @@ export function computeAssignedQueued(issues, agents) {
     if (!i.assignee_id) continue;
     const name = idToName[i.assignee_id];
     if (!name) continue;
-    const st = (i.status || '').toLowerCase();
-    if (st === ISSUE_STATUS.TODO) counts[name] += 1;
+    if (isPlainTodo(i)) counts[name] += 1;
   }
   return counts;
 }

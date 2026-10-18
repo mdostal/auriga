@@ -29,7 +29,7 @@
 import fs from 'node:fs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
-import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus } from './lib/issue-status.mjs';
+import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { dispatchEligible, isRateLimitError } from './lib/dispatch-guards.mjs';
@@ -566,12 +566,15 @@ async function runCycle(opts, state) {
   const assignedQueued = coreImpl.computeAssignedQueued(issues, cfgImpl.AGENTS);
 
   const todoAll = issues.filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO && !i.assignee_id);
-  const todo = todoAll.filter((i) => !coreImpl.isSmokeScratch(i));
+  // PANT-1173 (auriga#246): a backlog-parked todo is not routable work; count it apart.
+  const todoPlain = todoAll.filter(isPlainTodo);
+  const todo = todoPlain.filter((i) => !coreImpl.isSmokeScratch(i));
   logImpl('scan', {
     total: issues.length,
     todoUnassigned: todo.length,
     // PANT-1008: unassigned todos held back as smoke/scratch, so they're never invisible.
-    todoSmokeScratch: todoAll.length - todo.length,
+    todoSmokeScratch: todoPlain.length - todo.length,
+    todoParked: todoAll.length - todoPlain.length,
     inflight: runningInflight,
     queuedHeld,
     runtimeInflight,
