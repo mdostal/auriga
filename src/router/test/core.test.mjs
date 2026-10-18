@@ -1184,9 +1184,9 @@ test('selectReviewDispatch: parked (review-give-up) ticket assigned to reviewer 
   // skips it (isAgentParked) but computeReviewInflight counted it -> claude-review
   // RUNTIME_CAP=1 full -> 0 review dispatches across 18 in_review tickets.
   assert.equal(CFG.RUNTIME_CAP['claude-review'], 1);
-  // PANT-930: a router give-up reason no longer parks an in_review ticket (it is
-  // stale once the ticket left `blocked`), so model the park with an agent-written reason.
-  const parked = inReview('FFE-38', 38, 'RV', { metadata: { blocked_reason: 'waiting for human sign-off' } });
+  // PANT-930/PANT-1172: no blocked_reason parks an in_review ticket any more (it is
+  // stale once the ticket left `blocked`), so model the skipped ticket as human-held.
+  const parked = inReview('FFE-38', 38, 'RV', { metadata: { waiting_on: 'Mathew' } });
   const eligible = [inReview('FFE-46', 46), inReview('FFE-47', 47), inReview('FFE-48', 48)];
   const issues = [parked, ...eligible];
   const runs = { 'FFE-38': [doneStale], 'FFE-46': [], 'FFE-47': [], 'FFE-48': [] };
@@ -1199,11 +1199,12 @@ test('selectReviewDispatch: parked (review-give-up) ticket assigned to reviewer 
 });
 
 test('computeReviewInflight: counts exactly the reviewer-assigned tickets selectReviewDispatch processes — PANT-843', () => {
-  // Every skip reason in selectReviewDispatch (smoke, parked, human-todo label,
-  // waiting_on a human, seed) must also be excluded from inflight.
+  // Every skip reason in selectReviewDispatch (smoke, human-todo label, waiting_on
+  // a human, seed) must also be excluded from inflight. A blocked_reason no longer
+  // skips an in_review ticket (PANT-1172), so it is not in this set.
   const skipped = [
     inReview('SK-1', 1, 'RV', { title: '[smoke] test ticket' }),
-    inReview('SK-2', 2, 'RV', { metadata: { blocked_reason: 'waiting for human sign-off' } }),
+    inReview('SK-2', 2, 'RV', { labels: ['human-todo'] }),
     inReview('SK-3', 3, 'RV', { labels: [{ name: 'human-todo' }] }),
     inReview('SK-4', 4, 'RV', { metadata: { waiting_on: 'Mathew' } }),
     inReview('SK-5', 5, 'RV', { labels: [{ name: 'needs-plan' }] }),
@@ -1226,10 +1227,40 @@ test('isAgentParked: a router give-up reason parks only while the issue is block
     }
     assert.equal(core.isStaleRouterPark({ status: 'blocked', metadata: md }), false);
   }
-  // Any other reason is an explicit agent/human park and holds in every status.
-  assert.equal(core.isAgentParked({ status: 'in_review', metadata: { blocked_reason: 'waiting for human sign-off' } }), true);
+  // Any other reason is an explicit agent/human park and holds outside in_review.
   assert.equal(core.isAgentParked({ status: 'todo', metadata: { blocked_reason: 'needs API key from ops' } }), true);
   assert.equal(core.isStaleRouterPark({ status: 'in_review', metadata: { blocked_reason: 'waiting for human sign-off' } }), false);
+});
+
+// ---- PANT-1172 / GH #244: stale prose reason on in_review -----------------
+
+test('isAgentParked: no blocked_reason parks an in_review issue — PANT-1172', () => {
+  const prose = { blocked_reason: 'needs-operator: confirm the Stripe webhook secret' };
+  for (const status of ['blocked', 'todo', 'in_progress']) {
+    assert.equal(core.isAgentParked({ status, metadata: prose }), true, `a prose reason parks a ${status} issue`);
+    assert.equal(core.isStalePark({ status, metadata: prose }), false);
+  }
+  assert.equal(core.isAgentParked({ status: 'in_review', metadata: prose }), false);
+  assert.equal(core.isStaleReviewPark({ status: 'in_review', metadata: prose }), true);
+  assert.equal(core.isStalePark({ status: 'in_review', metadata: prose }), true);
+  for (const reason of ['zombie-give-up-max-attempts', 'dependency:FFE-86']) {
+    assert.equal(core.isStalePark({ status: 'in_review', metadata: { blocked_reason: reason } }), true, `${reason} is stale on in_review`);
+  }
+  assert.equal(core.isStalePark({ status: 'in_review', metadata: { blocked_reason: '  ' } }), false, 'a blank reason is no reason');
+  assert.equal(core.isStalePark({ status: 'in_review', metadata: {} }), false);
+});
+
+test('selectReviewDispatch: a ticket out of blocked with a prose reason is reviewed — PANT-1172 regression', () => {
+  // Live (firefly-events, 2026-10-18): FFE-102/FFE-104 were parked (blocked + a
+  // prose blocked_reason), then moved to in_review with the key still set. They
+  // sat unreviewable for two hours with the review slot free.
+  const stale = inReview('FFE-104', 104, null, { metadata: { blocked_reason: 'needs-operator: confirm the Stripe webhook secret' } });
+  assert.equal(core.isReviewDispatchSkipped(stale, CFG), false);
+  const reviewInflight = core.computeReviewInflight([stale], CFG);
+  const picks = core.selectReviewDispatch([stale], { 'FFE-104': [] }, CFG, reviewInflight, { now: NOW });
+  assert.equal(picks.length, 1);
+  assert.equal(picks[0].identifier, 'FFE-104');
+  assert.equal(picks[0].action, 'dispatch-review');
 });
 
 test('selectReviewDispatch: in_review ticket with a stale zombie give-up reason is reviewed — PANT-930 regression', () => {

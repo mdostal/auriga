@@ -716,6 +716,39 @@ test('PANT-930: an in_review ticket with a stale zombie give-up reason is cleare
   assert.equal(stillBlocked.metadata.blocked_reason, 'review-give-up-max-attempts', 'a live give-up park is untouched');
 });
 
+// ---- PANT-1172 / GH #244: stale prose reason on in_review cleared, ticket reviewed ----
+
+test('PANT-1172: a ticket out of blocked with a prose reason is cleared and dispatched for review', async () => {
+  const REVIEW_AGENT_ID = cfg.AGENTS['auriga-review']?.id;
+  const fixtureCfg = {
+    ...withFixtureLanes({ 'pant1172-proj': ['auriga-review'] }),
+    REVIEW_LANE: ['auriga-review'],
+  };
+  const reason = 'needs-operator: confirm the Stripe webhook secret';
+  const unparked = makeIssue({
+    project_id: 'pant1172-proj', status: 'in_review', labels: ['not-a-seed'],
+    metadata: { blocked_reason: reason },
+  });
+  const stillParked = makeIssue({
+    project_id: 'pant1172-proj', status: 'blocked', labels: ['not-a-seed'],
+    metadata: { blocked_reason: reason },
+  });
+  const { backlog, spawn, calls } = createMockAdapters([unparked, stillParked], fixtureCfg.AGENTS);
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
+
+  const clears = calls.metadata.filter((m) => m.metadataObj.blocked_reason === '');
+  assert.deepEqual(clears.map((m) => m.identifier), [unparked.identifier], 'only the in_review reason is cleared');
+  const cleared = log.byEvent('stale_park_cleared');
+  assert.equal(cleared.length, 1);
+  assert.equal(cleared[0].blocked_reason, reason, 'the old reason is kept in the log');
+  assert.ok(calls.assign.some((a) => a.identifier === unparked.identifier && a.agentName === 'auriga-review'),
+    'the unparked ticket must be dispatched for review');
+  assert.equal(unparked.assignee_id, REVIEW_AGENT_ID);
+  assert.equal(stillParked.metadata.blocked_reason, reason, 'a live park is untouched');
+});
+
 test('PANT-930: dry run logs the stale give-up reason but does not clear it', async () => {
   const fixtureCfg = { ...withFixtureLanes({ 'pant930-dry': ['auriga-review'] }), REVIEW_LANE: ['auriga-review'] };
   const reworked = makeIssue({

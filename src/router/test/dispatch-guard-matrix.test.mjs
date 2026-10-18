@@ -234,11 +234,24 @@ function baselineCell(pass) {
   };
 }
 
+// Review passes only see in_review issues, where a blocked_reason is a stale
+// leftover from an earlier park and must not hold the review back (PANT-1172).
+const REVIEW_PASSES = new Set(['review-dispatch', 'review-rerun']);
+
 function parkedCell(pass) {
+  if (REVIEW_PASSES.has(pass)) return staleParkCell(pass);
   return async () => {
     const sc = PASSES[pass].make({ metadata: { blocked_reason: 'waiting-on-human' } });
     const r = await run(sc);
     assert.deepEqual(r.dispatchesFor(sc.subject), [], `${pass}: an agent-parked issue was dispatched`);
+  };
+}
+
+function staleParkCell(pass) {
+  return async () => {
+    const sc = PASSES[pass].make({ metadata: { blocked_reason: 'waiting-on-human' } });
+    const r = await run(sc);
+    assert.ok(r.dispatchesFor(sc.subject).length > 0, `${pass}: an in_review issue with a stale blocked_reason was never dispatched`);
   };
 }
 
