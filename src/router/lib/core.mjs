@@ -20,7 +20,7 @@ import {
 } from './capacity.mjs';
 import { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary } from './review-squad.mjs';
 import {
-  isSmokeScratch, smokeScratchReason, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isSeedByLabel, isReviewDispatchSkipped,
+  isSmokeScratch, smokeScratchReason, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isStaleReviewPark, isStalePark, isSeedByLabel, isReviewDispatchSkipped,
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 export { isPrMerged };
@@ -35,7 +35,7 @@ export {
   computeReviewInflight, chooseReviewAgent,
 };
 export { DEFAULT_SQUAD_RULES, reviewSquadPlan, squadPlanSummary };
-export { isSmokeScratch, smokeScratchReason, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isReviewDispatchSkipped };
+export { isSmokeScratch, smokeScratchReason, isHumanTodo, isAgentParked, isSeedByLabel, isStaleRouterPark, isStaleReviewPark, isStalePark, isReviewDispatchSkipped };
 
 // isSmokeScratch/isHumanTodo/isAgentParked/isSeedByLabel live in
 // ./review-eligibility.mjs (shared with capacity.mjs) — imported + re-exported above.

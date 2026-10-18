@@ -62,10 +62,31 @@ export function isStaleRouterPark(issue = {}) {
   return String(issue.status || '').toLowerCase() !== 'blocked';
 }
 
+// PANT-1172 (GH #244): true when ANY blocked_reason sits on an `in_review` issue.
+// A park is `blocked` + blocked_reason (the platform's park contract); `in_review`
+// means the work was delivered and awaits acceptance, so a reason still on it was
+// written while the issue really was blocked and outlived that status. Nothing
+// deletes the key, so treating it as a live park hid the ticket from review
+// dispatch forever (live 2026-10-18: FFE-102/FFE-104 moved blocked -> in_review
+// with their prose reason; clearing it by hand got FFE-104 reviewed in 90s).
+export function isStaleReviewPark(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string' || r.trim() === '') return false;
+  return String(issue.status || '').toLowerCase() === 'in_review';
+}
+
+// A blocked_reason that no longer describes the issue's status: a router give-up
+// reason off `blocked` (isStaleRouterPark), or any reason on `in_review`
+// (isStaleReviewPark). Never a park; the router's hygiene pass clears the key.
+export function isStalePark(issue = {}) {
+  return isStaleRouterPark(issue) || isStaleReviewPark(issue);
+}
+
 // True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
 // These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
-// A router give-up reason only parks while the issue is still `blocked` (isStaleRouterPark);
-// any other (agent/human-written) reason parks in every status.
+// A stale reason (isStalePark) never parks: a router give-up reason only holds while
+// the issue is `blocked`, and no reason holds on `in_review`. Any other
+// (agent/human-written) reason parks in blocked, todo and in_progress.
 // PANT-1117: a `dependency:<ids>` reason is NOT a park for a human: the agent is
 // waiting on other tickets, and detectUnblocks re-queues it once they're terminal
 // (see dependencyParkIds in story-identity.mjs, which owns the same prefix).
@@ -73,7 +94,7 @@ export function isAgentParked(issue = {}) {
   const r = issue && issue.metadata && issue.metadata.blocked_reason;
   if (typeof r !== 'string' || r.trim() === '') return false;
   if (r.trim().toLowerCase().startsWith('dependency:')) return false;
-  return !isStaleRouterPark(issue);
+  return !isStalePark(issue);
 }
 
 // isSeed limited to the explicit-label legs only — used in detect* functions where
