@@ -2447,3 +2447,31 @@ test('detectUnblocks: dependency-parked story with prior runs is re-queued once 
   assert.equal(core.detectUnblocks([descOnly], statusById, [dep, descOnly], {}, () => [{ id: 'r1' }]).length, 0, 'zero-runs guard still applies without a dependency: park');
   assert.equal(core.detectUnblocks([descOnly], statusById, [dep, descOnly], {}, () => []).length, 1);
 });
+
+// PANT-1174 / auriga#270: FFE-103 was filed flat (top-level, childless -> heuristic
+// seed) and parked on `dependency:FFE-104`. FFE-104 reached done but the seed guard
+// fired before the dependency legs, so FFE-103 never left blocked.
+test('detectUnblocks: dependency-parked top-level childless story is re-queued once deps are terminal — PANT-1174', () => {
+  const dep = { id: 'u104', identifier: 'FFE-104', status: 'done', project_id: 'PCORE' };
+  const b = { id: 'u103', identifier: 'FFE-103', project_id: 'PCORE', status: 'blocked', title: 'voice v2 story', parent_issue_id: null, metadata: { blocked_reason: 'dependency:FFE-104' } };
+  const all = [dep, b];
+  assert.equal(core.isSeedForTenant(b, all, {}), true, 'precondition: heuristic seed');
+  const statusById = new Map(all.map((i) => [i.id, i.status]));
+  const acts = core.detectUnblocks([b], statusById, all, {}, () => [{ id: 'r1', status: 'completed' }]);
+  assert.equal(acts.length, 1);
+  assert.equal(acts[0].identifier, 'FFE-103');
+  assert.equal(acts[0].action, 'unblock-to-todo');
+  assert.equal(acts[0].clearBlockedReason, true);
+
+  // Several ids, all terminal (done + cancelled) -> re-queued; one still open -> stays blocked.
+  const d2 = { id: 'u105', identifier: 'FFE-105', status: 'cancelled', project_id: 'PCORE' };
+  const multi = { ...b, metadata: { blocked_reason: 'dependency:FFE-104,FFE-105' } };
+  const all2 = [dep, d2, multi];
+  assert.equal(core.detectUnblocks([multi], new Map(all2.map((i) => [i.id, i.status])), all2, {}, () => []).length, 1);
+  const open = [dep, { ...d2, status: 'in_progress' }, multi];
+  assert.equal(core.detectUnblocks([multi], new Map(open.map((i) => [i.id, i.status])), open, {}, () => []).length, 0, 'unmet dep keeps it blocked');
+
+  // A seed without a dependency park keeps the PANT-669 guard.
+  const descOnly = { ...b, metadata: {}, description: 'Depends on: FFE-104' };
+  assert.equal(core.detectUnblocks([descOnly], statusById, [dep, descOnly], {}, () => []).length, 0, 'non-dependency-park seed stays blocked');
+});
