@@ -73,7 +73,10 @@ export function descStoryDeps(issue = {}) {
   // matters because a Minerva story's `steps:` block further down carries per-phase
   // `depends_on: [research]` lines; parsing inline-anywhere-first would grab a phase
   // dep and shadow the real story dep declared at the top (the rsh-03/PAN-5830 bug).
-  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|\r?\n(?:[ \t]*-[ \t]*[^\n]+\r?\n?)+)/i);
+  // The block-list branch also spans blank separator lines between items (valid YAML
+  // a human may add when editing); it stops only at the first non-blank, non-item
+  // line. Without this, deps after a blank line were silently dropped (PANT-415).
+  const m = desc.match(/(^|\n)[ \t]*depends_on:[ \t]*(\[[^\]]*\]|(?:\r?\n[ \t]*(?:-[ \t]*[^\n]+)?)+)/i);
   let raw = [];
   if (m) {
     const body = m[2];
@@ -108,4 +111,39 @@ export function descStoryId(issue = {}) {
   const title = issue.title || '';
   const titleMatch = title.match(/^\s*\[\s*([a-z0-9][a-z0-9_-]*)\s*\]/i);
   return titleMatch ? titleMatch[1].trim().toLowerCase() : null;
+}
+
+// PANT-1117: human-written dependency lines that name ISSUE IDENTIFIERS, e.g.
+// "Depends on: FFE-86", "Depends-on: FFE-86, FFE-87", "Blocked by: PANT-12 PANT-13",
+// "**Depends on:** [FFE-86](mention://issue/...)". The Minerva slug form
+// (`depends_on: [m-01-foo]`) is descStoryDeps' job; only uppercase
+// `<PREFIX>-<n>` tokens are taken here, so a lowercase slug never reads as an
+// identifier. Every matching line counts, not only the first. Returns
+// upper-cased identifiers, de-duplicated, in declaration order.
+const IDENTIFIER_DEP_LINE = /^[ \t>*_-]*(?:depends[ \t_-]+on|blocked[ \t_-]+by)[ \t*_]*:[ \t*_]*(.*)$/gim;
+const ISSUE_IDENTIFIER = /\b[A-Z][A-Z0-9]*-\d+\b/g;
+
+export function descIdentifierDeps(issue = {}) {
+  const desc = issue.description || '';
+  const out = [];
+  for (const m of desc.matchAll(IDENTIFIER_DEP_LINE)) {
+    for (const id of m[1].match(ISSUE_IDENTIFIER) || []) {
+      if (!out.includes(id)) out.push(id);
+    }
+  }
+  return out;
+}
+
+// PANT-1117: an agent that parks a ticket because a dependency isn't merged yet
+// sets metadata.blocked_reason = "dependency:<ids>" (ids = issue identifiers
+// such as FFE-86, or issue UUIDs, comma or space separated). Returns those ids,
+// or null when the reason is not a dependency park.
+export const DEPENDENCY_PARK_PREFIX = 'dependency:';
+
+export function dependencyParkIds(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string') return null;
+  const t = r.trim();
+  if (!t.toLowerCase().startsWith(DEPENDENCY_PARK_PREFIX)) return null;
+  return t.slice(DEPENDENCY_PARK_PREFIX.length).split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 }

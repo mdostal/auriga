@@ -67,6 +67,13 @@
  *   other methods read/write (see pantheon-v2-l2's cfg.baseUrl/cfg.project —
  *   a second adapter instance pointed at a parent board's config is how
  *   cross-board hand-up works, not a new adapter type).
+ *
+ * @property {(id: string, metadataObj: Record<string, unknown>) => void} setIssueMetadata
+ *   Merge key-value pairs into an existing issue's metadata (PAN-8245 —
+ *   idempotent re-routing fingerprint). The implementation MUST merge rather
+ *   than replace — existing metadata keys not present in `metadataObj` must
+ *   be preserved. Best-effort: implementations should degrade gracefully
+ *   (return null on failure) so a metadata write never aborts a dispatch.
  */
 
 export {};

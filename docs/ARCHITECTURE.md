@@ -61,7 +61,8 @@ flowchart TB
    (`reviewSquadPlan`, see [docs/review-squad.md](review-squad.md)) instead of being treated as
    done on run-status alone.
 5. **Filter + route** — remaining unassigned todos are filtered (smoke/scratch, `human-todo`,
-   project scope), classified (`isHiveStory`), capacity-gated (`RUNTIME_CAP`, per-agent
+   project scope; smoke/scratch needs an explicit marker — a `smoke`/`scratch` label or a
+   `[smoke]`/`[scratch]`/`SMOKE:`/`SCRATCH:` title prefix — and each drop logs `candidate_skip`), classified (`isHiveStory`), capacity-gated (`RUNTIME_CAP`, per-agent
    `maxInflight`, per-cycle batch caps), and assigned to a lane.
 6. **Assign + verify** — the router assigns/re-runs and verifies a run actually started, then
    logs and sleeps.

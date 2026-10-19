@@ -1,0 +1,117 @@
+// Review-dispatch eligibility predicates — a leaf module (no imports) so both
+// core.mjs (selectReviewDispatch) and capacity.mjs (computeReviewInflight) can
+// share ONE definition of "tickets the review loop skips" without a circular
+// import. Keeping these in lockstep is the whole point: any in_review ticket
+// selectReviewDispatch skips but computeReviewInflight counts is a phantom
+// review slot, and with a RUNTIME_CAP of 1 a single phantom freezes every
+// review in the tenant (PANT-737 seeds, PANT-843 parked tickets).
+
+// PANT-1008 (GH #251): smoke/scratch tickets are recognised by an EXPLICIT
+// marker only — a `smoke`/`scratch` label, or a `[smoke]` / `[scratch]` /
+// `SMOKE:` / `SCRATCH:` title prefix — plus generated `verification-swarm`
+// sub-issues. Matching the bare words anywhere in a title dropped real stories
+// ("ABI smoke harness", PANT-995) from dispatch with no log line.
+export const SMOKE_SCRATCH_LABELS = Object.freeze(['smoke', 'scratch']);
+const SMOKE_SCRATCH_TITLE_PREFIX = /^\s*(?:\[(?:smoke|scratch)\]|(?:smoke|scratch):)/i;
+
+// Returns why an issue (or bare title) is a smoke/scratch ticket, or null.
+export function smokeScratchReason(issueOrTitle = '') {
+  const issue = typeof issueOrTitle === 'string' ? { title: issueOrTitle } : issueOrTitle || {};
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.some((l) => SMOKE_SCRATCH_LABELS.includes(l))) return 'smoke-scratch-label';
+  const title = issue.title || '';
+  if (SMOKE_SCRATCH_TITLE_PREFIX.test(title)) return 'smoke-scratch-title-prefix';
+  if (/verification-swarm/i.test(title)) return 'verification-swarm';
+  return null;
+}
+
+// Accepts an issue (labels + title) or a bare title string.
+export function isSmokeScratch(issueOrTitle = '') {
+  return smokeScratchReason(issueOrTitle) !== null;
+}
+
+export const HUMAN_TODO_LABEL = 'human-todo';
+
+// Priority-1 filter: true when an issue must never enter the agent dispatch
+// pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
+// — because only a human can complete it. Excluded issues belong in the
+// separate human queue instead (see scripts/export-human-queue.mjs).
+export function isHumanTodo(issue, cfg) {
+  const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
+  if (labels.includes(HUMAN_TODO_LABEL)) return true;
+  const waitingOn = issue.metadata && issue.metadata.waiting_on;
+  if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
+  const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
+  const w = waitingOn.trim().toLowerCase();
+  return humanNames.some((name) => w === name.toLowerCase() || w.includes(name.toLowerCase()));
+}
+
+// blocked_reason values the ROUTER itself writes when it gives up and sets the
+// issue `blocked` (zombie give-up, review give-up). They describe that blocked
+// state only.
+export const ROUTER_GIVE_UP_REASONS = Object.freeze(['zombie-give-up-max-attempts', 'review-give-up-max-attempts']);
+
+// PANT-930 (GH #244): true when a router give-up reason outlived the `blocked`
+// status it was written with. Once a human or agent moves the issue out of
+// `blocked` (reworked -> in_review, reset -> todo) the give-up is over, but
+// nothing deletes the key. Treating it as a live park skipped those issues
+// forever (live: PANT-809/812/815/816 in_review, never reviewed).
+export function isStaleRouterPark(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string' || !ROUTER_GIVE_UP_REASONS.includes(r.trim())) return false;
+  return String(issue.status || '').toLowerCase() !== 'blocked';
+}
+
+// PANT-1172 (GH #244): true when ANY blocked_reason sits on an `in_review` issue.
+// A park is `blocked` + blocked_reason (the platform's park contract); `in_review`
+// means the work was delivered and awaits acceptance, so a reason still on it was
+// written while the issue really was blocked and outlived that status. Nothing
+// deletes the key, so treating it as a live park hid the ticket from review
+// dispatch forever (live 2026-10-18: FFE-102/FFE-104 moved blocked -> in_review
+// with their prose reason; clearing it by hand got FFE-104 reviewed in 90s).
+export function isStaleReviewPark(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string' || r.trim() === '') return false;
+  return String(issue.status || '').toLowerCase() === 'in_review';
+}
+
+// A blocked_reason that no longer describes the issue's status: a router give-up
+// reason off `blocked` (isStaleRouterPark), or any reason on `in_review`
+// (isStaleReviewPark). Never a park; the router's hygiene pass clears the key.
+export function isStalePark(issue = {}) {
+  return isStaleRouterPark(issue) || isStaleReviewPark(issue);
+}
+
+// True when an agent explicitly parked an issue for a human (metadata.blocked_reason set).
+// These must never be auto-unblocked or cascade-redispatched — they're idempotent-dispatch guards.
+// A stale reason (isStalePark) never parks: a router give-up reason only holds while
+// the issue is `blocked`, and no reason holds on `in_review`. Any other
+// (agent/human-written) reason parks in blocked, todo and in_progress.
+// PANT-1117: a `dependency:<ids>` reason is NOT a park for a human: the agent is
+// waiting on other tickets, and detectUnblocks re-queues it once they're terminal
+// (see dependencyParkIds in story-identity.mjs, which owns the same prefix).
+export function isAgentParked(issue = {}) {
+  const r = issue && issue.metadata && issue.metadata.blocked_reason;
+  if (typeof r !== 'string' || r.trim() === '') return false;
+  if (r.trim().toLowerCase().startsWith('dependency:')) return false;
+  return !isStalePark(issue);
+}
+
+// isSeed limited to the explicit-label legs only — used in detect* functions where
+// the childless+top-level heuristic is too broad (an in_progress story has no children
+// in that set, so the heuristic would fire on every top-level ticket).
+export function isSeedByLabel(issue) {
+  const labelNames = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l && l.name));
+  if (labelNames.includes('not-a-seed')) return false;
+  return labelNames.includes('idea') || labelNames.includes('needs-plan') || labelNames.includes('consus-idea');
+}
+
+// True when selectReviewDispatch never acts on this in_review ticket — and so
+// computeReviewInflight must never count it against review capacity.
+export function isReviewDispatchSkipped(issue, cfg) {
+  if (isSmokeScratch(issue)) return true;
+  if (isAgentParked(issue)) return true;
+  if (isHumanTodo(issue, cfg)) return true; // human controls this review
+  if (isSeedByLabel(issue)) return true; // PANT-625/PANT-737: seeds are planning-lane
+  return false;
+}

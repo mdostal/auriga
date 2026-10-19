@@ -4,8 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  computeInflight, computeAssignedQueued, computeRuntimeInflight, agentHasCapacity,
-  computeReviewInflight, chooseReviewAgent,
+  computeInflight, computeAssignedQueued, computeQueuedHeld, addCounts, computeRuntimeInflight, agentHasCapacity,
+  agentCapacityReason, computeReviewInflight, chooseReviewAgent,
 } from '../lib/capacity.mjs';
 
 const AGENTS = {
@@ -24,10 +24,112 @@ test('computeInflight: only counts actively-running assignments, not assigned-to
   assert.equal(counts['build-b'], 1);
 });
 
+// PANT-846 (GH #240): live on hive three in_progress issues with no running task
+// (two zombies, one parent waiting on staged sub-issues) filled claude-planning's
+// RUNTIME_CAP=3 and the planning lane dispatched nothing for hours.
+test('computeInflight: with runs known, counts an in_progress issue only while it has an active, fresh run (PANT-846)', () => {
+  const now = Date.parse('2026-09-28T03:30:00Z');
+  const hoursAgo = (h) => new Date(now - h * 3600e3).toISOString();
+  const issues = [
+    { identifier: 'LIVE', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'CANCELLED', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'NO-RUNS', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'HUNG', assignee_id: 'B', status: 'running' },
+  ];
+  const runsByIssue = {
+    LIVE: [{ status: 'running', started_at: hoursAgo(0.1) }],
+    CANCELLED: [{ status: 'cancelled', created_at: hoursAgo(24), completed_at: hoursAgo(24) }],
+    'NO-RUNS': [],
+    HUNG: [{ status: 'running', started_at: hoursAgo(5) }],
+  };
+  const counts = computeInflight(issues, AGENTS, { runsByIssue, now, staleMs: 3600e3 });
+  assert.equal(counts['build-a'], 1, 'only the live run holds a slot');
+  assert.equal(counts['build-b'], 0, 'a run past the zombie stale window is a hang, not work');
+});
+
+test('computeInflight: a parent waiting on non-terminal children holds no slot (PANT-846)', () => {
+  const issues = [
+    { id: 'P', identifier: 'PARENT', assignee_id: 'A', status: 'in_progress' },
+    { id: 'C1', parent_issue_id: 'P', status: 'done' },
+    { id: 'C2', parent_issue_id: 'P', status: 'todo', assignee_id: 'human' },
+    { id: 'Q', identifier: 'DONE-KIDS', assignee_id: 'A', status: 'in_progress' },
+    { id: 'C3', parent_issue_id: 'Q', status: 'cancelled' },
+  ];
+  // No runs known: status fallback, minus the waiting parent.
+  assert.equal(computeInflight(issues, AGENTS)['build-a'], 1);
+  // Runs known: a parent that does have its own live run still counts.
+  const runsByIssue = { PARENT: [{ status: 'running', started_at: new Date().toISOString() }] };
+  assert.equal(computeInflight(issues, AGENTS, { runsByIssue })['build-a'], 2);
+});
+
 test('computeAssignedQueued: counts assigned-but-still-todo issues (observability only)', () => {
   const issues = [{ assignee_id: 'A', status: 'todo' }, { assignee_id: 'A', status: 'in_progress' }];
   const counts = computeAssignedQueued(issues, AGENTS);
   assert.equal(counts['build-a'], 1);
+});
+
+// PANT-1158 (auriga#266): live on hive 13 assigned todos sat queued in the runtime
+// against RUNTIME_CAP 2, capped by nothing, and one provider session limit failed
+// 21 queued tasks in 15 seconds.
+test('computeQueuedHeld: an assigned todo holds a slot only while it has a live run (PANT-1158)', () => {
+  const now = Date.parse('2026-10-17T07:39:29Z');
+  const hoursAgo = (h) => new Date(now - h * 3600e3).toISOString();
+  const issues = [
+    { identifier: 'QUEUED', assignee_id: 'A', status: 'todo' },
+    { identifier: 'QUEUED-OLD', assignee_id: 'A', status: 'todo' },
+    { identifier: 'STARTED', assignee_id: 'B', status: 'todo' },
+    { identifier: 'DEAD-ZONE', assignee_id: 'A', status: 'todo' },
+    { identifier: 'FAILED', assignee_id: 'A', status: 'todo' },
+    { identifier: 'HUNG', assignee_id: 'B', status: 'todo' },
+    { identifier: 'NOT-FETCHED', assignee_id: 'B', status: 'todo' },
+    { identifier: 'RUNNING', assignee_id: 'A', status: 'in_progress' },
+    { identifier: 'UNASSIGNED', assignee_id: null, status: 'todo' },
+  ];
+  const runsByIssue = {
+    QUEUED: [{ status: 'queued', created_at: hoursAgo(0.1) }],
+    // Queued three hours, like the live tasks: still the runtime's, still holding.
+    'QUEUED-OLD': [{ status: 'queued', created_at: hoursAgo(3) }],
+    STARTED: [{ status: 'running', started_at: hoursAgo(0.1) }],
+    'DEAD-ZONE': [],
+    FAILED: [{ status: 'failed', error: "You've hit your session limit", created_at: hoursAgo(0.5) }],
+    HUNG: [{ status: 'running', started_at: hoursAgo(5) }],
+    RUNNING: [{ status: 'running', started_at: hoursAgo(0.1) }],
+    UNASSIGNED: [{ status: 'queued', created_at: hoursAgo(0.1) }],
+  };
+  const counts = computeQueuedHeld(issues, AGENTS, { runsByIssue, now, staleMs: 3600e3 });
+  assert.deepEqual(counts, { 'build-a': 2, 'build-b': 1 });
+});
+
+test('computeQueuedHeld: queuedStaleMs frees a queued run that waited past it (PANT-1158)', () => {
+  const now = Date.parse('2026-10-17T07:39:29Z');
+  const issues = [{ identifier: 'Q', assignee_id: 'A', status: 'todo' }];
+  const runsByIssue = { Q: [{ status: 'queued', created_at: new Date(now - 3 * 3600e3).toISOString() }] };
+  assert.equal(computeQueuedHeld(issues, AGENTS, { runsByIssue, now, staleMs: 600e3 })['build-a'], 1);
+  assert.equal(computeQueuedHeld(issues, AGENTS, { runsByIssue, now, staleMs: 600e3, queuedStaleMs: 2 * 3600e3 })['build-a'], 0);
+});
+
+test('computeQueuedHeld + addCounts: queued slots count against maxInflight and RUNTIME_CAP (PANT-1158)', () => {
+  const issues = [
+    { identifier: 'Q1', assignee_id: 'A', status: 'todo' },
+    { identifier: 'Q2', assignee_id: 'A', status: 'todo' },
+  ];
+  const at = new Date().toISOString();
+  const runsByIssue = { Q1: [{ status: 'queued', created_at: at }], Q2: [{ status: 'pending', created_at: at }] };
+  const running = computeInflight(issues, AGENTS, { runsByIssue });
+  assert.equal(running['build-a'], 0, 'todo issues are never running');
+  const held = addCounts(running, computeQueuedHeld(issues, AGENTS, { runsByIssue }));
+  assert.deepEqual(held, { 'build-a': 2, 'build-b': 0 });
+  const projected = { perAgent: {}, perRuntime: {} };
+  const rt = computeRuntimeInflight(held, AGENTS);
+  assert.equal(agentCapacityReason('build-a', AGENTS, {}, held, rt, projected), 'agent_at_capacity');
+  const roomy = { ...AGENTS, 'build-a': { ...AGENTS['build-a'], maxInflight: 10 } };
+  assert.equal(agentCapacityReason('build-a', roomy, { claude: 2 }, held, rt, projected), 'runtime_at_capacity');
+  assert.equal(agentCapacityReason('build-a', roomy, { claude: 3 }, held, rt, projected), null);
+});
+
+test('addCounts: per-name sum, keeping names only one side has', () => {
+  assert.deepEqual(addCounts({ a: 1, b: 2 }, { b: 3, c: 4 }), { a: 1, b: 5, c: 4 });
+  assert.deepEqual(addCounts(), {});
 });
 
 test('computeRuntimeInflight: sums per-agent inflight into per-runtime totals', () => {
@@ -48,6 +150,27 @@ const REVIEW_CFG = { REVIEW_LANE: ['auriga-review'], AGENTS: { 'auriga-review': 
 test('computeReviewInflight: counts in_review issues currently assigned to a review-lane agent', () => {
   const counts = computeReviewInflight([{ assignee_id: 'RV' }, { assignee_id: 'other' }], REVIEW_CFG);
   assert.equal(counts['auriga-review'], 1);
+});
+
+// ---- PANT-737: seed-labeled tickets must not hold inflight slots -----------
+
+test('computeReviewInflight: seed-labeled (idea) issue assigned to review agent does not count — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'idea' }] };
+  const normal = { assignee_id: 'RV', labels: [] };
+  const counts = computeReviewInflight([seed, normal], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1, 'only the non-seed issue counts');
+});
+
+test('computeReviewInflight: not-a-seed label overrides idea — issue counts normally', () => {
+  const notSeed = { assignee_id: 'RV', labels: [{ name: 'idea' }, { name: 'not-a-seed' }] };
+  const counts = computeReviewInflight([notSeed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 1);
+});
+
+test('computeReviewInflight: needs-plan label also excludes from inflight — PANT-737', () => {
+  const seed = { assignee_id: 'RV', labels: [{ name: 'needs-plan' }] };
+  const counts = computeReviewInflight([seed], REVIEW_CFG);
+  assert.equal(counts['auriga-review'], 0);
 });
 
 test('chooseReviewAgent: null when the whole lane is at capacity', () => {

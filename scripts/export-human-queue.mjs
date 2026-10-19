@@ -47,7 +47,7 @@ export function buildHumanQueue(issues, cfg_) {
   return issues
     .filter((i) => (i.status || '').toLowerCase() === 'todo')
     .filter((i) => !i.assignee_id)
-    .filter((i) => !core.isSmokeScratch(i.title))
+    .filter((i) => !core.isSmokeScratch(i))
     .filter((i) => cfg_.PROJECT_IDS.includes(i.project_id))
     .filter((i) => core.isHumanTodo(i, cfg_))
     .map((i) => ({

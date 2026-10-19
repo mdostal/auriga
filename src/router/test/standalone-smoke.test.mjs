@@ -38,7 +38,7 @@ test('standalone smoke: cycle() runs end-to-end on stub adapters only, zero exec
   const execFileSyncMock = t.mock.fn(() => {
     throw new Error('execFileSync must never be called when cycle() is driven only by stub adapters');
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: execFileSyncMock } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: execFileSyncMock } });
 
   // Dynamic import AFTER the module mock above is registered, so
   // auriga-router.mjs's own transitive import of node:child_process (via
