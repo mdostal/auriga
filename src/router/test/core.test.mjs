@@ -324,6 +324,22 @@ test('detectZombies: in_progress with no runs -> assign (no assignee) / rerun (a
   assert.equal(z.find((a) => a.identifier === 'z2').assigneeId, 'A');
 });
 
+test('detectZombies: in_progress held by a member is never a zombie, even with zero runs (auriga#274)', () => {
+  const now = Date.now();
+  const inProgress = [
+    { id: 'm1', identifier: 'm1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-1', assignee_type: 'member', title: 'human work', parent_issue_id: 'parent-x', metadata: {} },
+    { id: 'm2', identifier: 'm2', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'human-1', assignee_type: 'member', title: 'human work, old failed run', parent_issue_id: 'parent-x', metadata: {} },
+    { id: 'a1', identifier: 'a1', project_id: 'AURIGA', status: 'in_progress', assignee_id: 'A', assignee_type: 'agent', title: 'stalled agent', parent_issue_id: 'parent-x', metadata: {} },
+  ];
+  const runs = {
+    m1: [],
+    m2: [{ status: 'failed', error: 'x', created_at: new Date(now).toISOString() }],
+    a1: [],
+  };
+  const z = core.detectZombies(inProgress, runs, CFG, now);
+  assert.deepEqual(z.map((a) => [a.identifier, a.action]), [['a1', 'rerun']]);
+});
+
 test('detectRunCompletions: done+non-failed run -> advance-in-review; active/failed/none do not', () => {
   const now = Date.now();
   const inProgress = [
