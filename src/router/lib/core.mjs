@@ -663,6 +663,11 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     if (isAgentParked(i)) continue;
     if (isHumanTodo(i, cfg)) continue;
     if (isSeedByLabel(i)) continue; // PANT-519: Minerva owns seeds; zombie recovery re-triggers PANT-79 loop
+    // auriga#274 / PANT-1203: a member (human) holding an in_progress ticket is
+    // doing their own work, not a stalled agent run. A rerun on it has no agent
+    // to land on and changes nothing, and with zero runs the zombieMaxAttempts
+    // give-up is unreachable, so it re-fired every cycle forever.
+    if (i.assignee_type === 'member') continue;
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
