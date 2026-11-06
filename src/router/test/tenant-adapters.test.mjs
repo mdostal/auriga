@@ -66,7 +66,7 @@ test('getTenantAdapters: decision_id stored in cycle N is reported in cycle N+1'
   const cache = new Map();
 
   // cycle N: dispatch
-  getTenantAdapters(cache, 't1', TENANT_CFG).spawn.selectRoute('PAN-1', 'build');
+  getTenantAdapters(cache, 't1', TENANT_CFG).spawn.selectRoute('PAN-1', 'build', 'build');
   // cycle N+1: verified done -> outcome report
   getTenantAdapters(cache, 't1', TENANT_CFG).spawn.reportRouteOutcome('PAN-1', 'success');
 
@@ -80,7 +80,7 @@ test('getTenantAdapters: a tenant config change rebuilds the adapters but keeps 
   const cache = new Map();
 
   const before = getTenantAdapters(cache, 't1', TENANT_CFG);
-  before.spawn.selectRoute('PAN-1', 'build');
+  before.spawn.selectRoute('PAN-1', 'build', 'build');
 
   const changedCfg = { ...TENANT_CFG, DEFAULT_LANE: ['new-lane'] };
   const after = getTenantAdapters(cache, 't1', changedCfg);
@@ -96,7 +96,7 @@ test('getTenantAdapters: decision stores are per tenant', () => {
   handler = routeHandler;
   const cache = new Map();
 
-  getTenantAdapters(cache, 't1', TENANT_CFG).spawn.selectRoute('PAN-1', 'build');
+  getTenantAdapters(cache, 't1', TENANT_CFG).spawn.selectRoute('PAN-1', 'build', 'build');
   assert.equal(getTenantAdapters(cache, 't2', TENANT_CFG).spawn.reportRouteOutcome('PAN-1', 'success'), null);
   assert.equal(outcomeCalls().length, 0);
 });

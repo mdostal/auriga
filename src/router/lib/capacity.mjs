@@ -142,7 +142,7 @@ export function agentHasCapacity(name, agents, runtimeCap, inflight, runtimeInfl
 export function agentCapacityReason(name, agents, runtimeCap, inflight, runtimeInflight, projected) {
   const a = agents[name];
   if (!a) return 'unknown_agent';
-  if (a.available === false) return 'agent_offline'; // PAN-8645: offline runtime block
+  if (a.available === false) return a.availabilityReason || 'agent_offline'; // PAN-8645: offline runtime block
   const agentNow = (inflight[name] || 0) + (projected.perAgent[name] || 0);
   if (agentNow >= (a.maxInflight ?? Infinity)) return 'agent_at_capacity';
   const rtNow = (runtimeInflight[a.runtime] || 0) + (projected.perRuntime[a.runtime] || 0);
@@ -188,7 +188,7 @@ export function chooseReviewAgent(cfg, reviewInflight, projected = {}, blockedRu
   const skipReason = (name) => {
     const a = cfg.AGENTS[name];
     if (!a) return 'unknown_agent';
-    if (a.available === false) return 'agent_offline'; // PAN-8645: offline runtime
+    if (a.available === false) return a.availabilityReason || 'agent_offline'; // PAN-8645: offline runtime
     if (blockedRuntimes.has(a.runtime)) return 'runtime_blocked'; // PANT-587: skip rate-limited runtimes
     if ((perAgentCycle[name] || 0) >= maxPerAgent) return 'per_cycle_per_agent_cap'; // PANT-814: perCyclePerAgent
     // PANT-814: the review bucket's RUNTIME_CAP (e.g. 'claude-review') was never read.

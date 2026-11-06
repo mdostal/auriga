@@ -428,6 +428,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   // PANT-1008: smoke/scratch drops are returned as data (candidateSkips) so the
   // router logs a candidate_skip with the reason instead of dropping silently.
   const candidateSkips = [];
+  const unavailable = [];
   const candidates = issues
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter(isPlainTodo) // PANT-931: a backlog/blocked column mapped onto todo is parked, not work
@@ -542,6 +543,10 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     const trace = {};
     const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent, trace);
     if (!agent) {
+      if (trace.candidates?.some((c) => cfg.AGENTS[c.agent]?.availabilityReason?.startsWith('heimdall:'))) {
+        unavailable.push({ identifier: issue.identifier, candidates: trace.candidates });
+        continue;
+      }
       // Hand-up fallback: ONLY when no normal local route exists (the
       // hand-up label means "if nothing else fits", never an unconditional
       // override of a working local dispatch) AND a real parent board is
@@ -580,6 +585,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
   chosen.handDownRejected = handDownRejected;
   chosen.seedNoPlanning = seedNoPlanning;
   chosen.candidateSkips = candidateSkips;
+  chosen.unavailable = unavailable;
   return chosen;
 }
 

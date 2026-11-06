@@ -25,7 +25,7 @@ export const DECISION_REASONS = Object.freeze([
   'max_assign', 'pass_cap', 'agent_parked', 'seed', 'runtime_blocked',
   'assignee_runtime_blocked', 'per_cycle_per_agent_cap',
   // skip: pass-local
-  'no_capacity', 'no_capable_lane', 'give_up_max_attempts', 'unknown_child', 'child_unreachable',
+  'no_capacity', 'no_capable_lane', 'no_available_lane', 'give_up_max_attempts', 'unknown_child', 'child_unreachable',
 ]);
 
 const REASON_SET = new Set(DECISION_REASONS);
