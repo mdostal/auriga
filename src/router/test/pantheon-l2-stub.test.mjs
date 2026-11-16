@@ -548,7 +548,7 @@ test('selectRoute() POSTs to /api/route/select with task_id and task_type', asyn
   const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
   const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
 
-  const res = spawn.selectRoute('PAN-1', 'build');
+  const res = spawn.selectRoute('PAN-1', 'build', 'build');
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'POST');
@@ -578,7 +578,7 @@ test('reportRouteOutcome() POSTs to /api/route/:decisionId/outcome after a succe
   const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
   const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
 
-  spawn.selectRoute('PAN-1', 'build');
+  spawn.selectRoute('PAN-1', 'build', 'build');
   spawn.reportRouteOutcome('PAN-1', 'success');
 
   const outcomeCalls = calls.filter((c) => c.url.includes('/api/route/dec-42/outcome'));
@@ -596,4 +596,15 @@ test('reportRouteOutcome() returns null without making a request when no prior s
 
   assert.equal(res, null);
   assert.equal(calls.length, 0);
+});
+
+test('outcomes never credit a suggested lane that did not execute, including unknown mappings', async (t) => {
+  const calls = makeCurlMock(t, () => ({ status: 200, body: { decision_id: 'wrong', chosen_lane: 'other-account' } }));
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+  for (const lane of ['actual-account', undefined]) {
+    spawn.selectRoute('PAN-1', 'build', lane);
+    assert.equal(spawn.reportRouteOutcome('PAN-1', 'success'), null);
+  }
+  assert.equal(calls.filter((c) => c.url.endsWith('/outcome')).length, 0);
 });

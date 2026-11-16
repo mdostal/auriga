@@ -27,6 +27,7 @@
 // this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
+import { readLaneState, withLaneState } from './lib/lane-state.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -211,7 +212,14 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
     if (action === 'assign') {
       if (typeof dc.spawn.selectRoute === 'function') {
         const kind = pass === 'review' ? 'review' : 'build';
-        try { dc.spawn.selectRoute(identifier, kind); } catch (e) { dc.log('route_select_error', { identifier, error: e.message }); }
+        try {
+          const executedLane = dc.cfg.AGENTS[agent]?.laneId;
+          const route = dc.spawn.selectRoute(identifier, kind, executedLane);
+          const suggestedLane = route?.chosen_lane || route?.lane_id;
+          if (suggestedLane && suggestedLane !== executedLane) {
+            dc.log('route_lane_mismatch', { identifier, suggested_lane: suggestedLane, executed_lane: executedLane ?? null, reason: 'configured-lane-executor; outcome withheld' });
+          }
+        } catch (e) { dc.log('route_select_error', { identifier, error: e.message }); }
       }
       dc.spawn.assignIssue(identifier, agent);
     } else {
@@ -259,12 +267,12 @@ function recordDecision(dc, { identifier, pass, action, agent = null, runtime = 
     laneName = issue ? (dc.cfg.PROJECT_NAMES?.[issue.project_id] || issue.project_id || null) : null;
   }
   const rt = runtime ?? (agent ? dc.cfg.AGENTS?.[agent]?.runtime ?? null : null);
-  dc.log('decision', buildDecision({
+  dc.log('decision', { ...buildDecision({
     now: Date.now(), tenantId: dc.tenantId, instanceId: dc.instanceId,
     identifier, pass, action, agent: agent ?? null, runtime: rt, lane: laneName, reason,
     candidates: candidates || (agent ? [{ agent, runtime: rt, selected: true }] : []),
     caps: caps || decisionCaps(dc, agent, rt), dryRun: dc.dryRun, error,
-  }));
+  }), lane_state_error: dc.cfg.laneState?.error ?? null, executed_lane: agent ? dc.cfg.AGENTS[agent]?.laneId ?? null : null });
 }
 
 // A guard (or no capacity) rejected this issue. Rate-limited to one `skip`
@@ -460,7 +468,9 @@ function writesHeldReason(...adapters) {
 async function runCycle(opts, state) {
   const backlog = opts.backlog || defaultBacklog;
   const spawn = opts.spawn || defaultSpawn;
-  const cfgImpl = opts.cfg || cfg;
+  const laneState = opts.readLaneState || Object.keys((opts.cfg || cfg).AGENT_LANES || {}).length
+    ? await (opts.readLaneState || readLaneState)() : { lanes: [], error: null };
+  const cfgImpl = withLaneState(opts.cfg || cfg, laneState);
   const coreImpl = opts.core || core;
   const logImpl = opts.log;
   const sleepImpl = opts.sleep || sleep;
@@ -1140,6 +1150,10 @@ async function runCycle(opts, state) {
   // PANT-1008: todos dropped from the candidate pool as smoke/scratch, with the marker that matched.
   for (const s of picks.candidateSkips || []) {
     logImpl('candidate_skip', { identifier: s.identifier, reason: s.reason });
+  }
+
+  for (const held of picks.unavailable || []) {
+    skipDecision(dc, { ...held, pass: 'build', reason: 'no-available-lane' });
   }
 
   for (const p of picks) {

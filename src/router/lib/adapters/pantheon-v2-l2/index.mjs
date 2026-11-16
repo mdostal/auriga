@@ -412,10 +412,13 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
   // can record the routing decision and inform future lane selection. Stores the
   // returned decision_id keyed by identifier for the matching reportRouteOutcome()
   // call. Never throws — a failure is logged to stderr and dispatch continues.
-  function selectRoute(identifier, taskType) {
+  function selectRoute(identifier, taskType, executedLane) {
+    _decisions.delete(identifier);
     try {
       const res = run('POST', '/api/route/select', { task_id: identifier, task_type: taskType });
-      if (res && res.decision_id) _decisions.set(identifier, res.decision_id);
+      if (res && res.decision_id && executedLane && (res.chosen_lane || res.lane_id) === executedLane) {
+        _decisions.set(identifier, res.decision_id);
+      }
       return res;
     } catch (e) {
       process.stderr.write(`pantheon-v2-l2: selectRoute(${identifier}) failed: ${e.message}\n`);

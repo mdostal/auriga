@@ -2392,3 +2392,35 @@ test('PANT-379: a cascade rerun failure keeps the story out of selectAssignments
   const assigns = calls.assign.filter((a) => a.identifier === child.identifier);
   assert.equal(assigns.length, 1, `story must be dispatched once per cycle — got ${assigns.length} assigns`);
 });
+
+test('Heimdall gates new work, leaves active runs untouched, and fails open with a decision reason', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 2);
+  assert.equal(lane.length, 2);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'one', [lane[1]]: 'two' } };
+  for (const mode of ['fallback', 'held', 'outage']) {
+    const ready = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent' });
+    const active = makeIssue({ project_id: project, status: 'in_progress', assignee_id: cfg.AGENTS[lane[0]].id });
+    const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([ready, active], fixtureCfg.AGENTS);
+    runsByIdentifier[active.identifier] = [activeRun()];
+    const log = createLogSink();
+    await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+      readLaneState: async () => mode === 'outage' ? { lanes: [], error: 'connection refused' } : {
+        lanes: [{ lane_id: 'one', status: 'out_of_credit' }, { lane_id: 'two', status: mode === 'held' ? 'down' : 'up' }], error: null,
+      },
+    });
+    assert.equal(calls.assign.some((c) => c.identifier === active.identifier), false);
+    assert.equal(calls.unassign.length, 0);
+    assert.equal(calls.rerun.some((c) => c.identifier === active.identifier), false);
+    const decision = log.byEvent('decision').find((d) => d.identifier === ready.identifier);
+    assert.ok(decision);
+    if (mode === 'held') {
+      assert.equal(calls.assign.length, 0);
+      assert.equal(decision.reason, 'no_available_lane');
+      assert.equal(ready.status, 'todo');
+    } else {
+      assert.equal(calls.assign[0].agentName, lane[1]);
+      if (mode === 'outage') assert.equal(decision.lane_state_error, 'connection refused');
+    }
+  }
+});

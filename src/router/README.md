@@ -312,3 +312,32 @@ node scripts/bulk-extract-human-todos.mjs --no-notify   # suppress operator noti
   - `auriga-supervisor.lock` next to the pidfile (`AURIGA_SUPERVISOR_LOCK`)
   - JSONL log: stdout, or `AURIGA_LOG`. Supervisor: stderr, or `SUP_LOG`; router stdout/stderr, or `ROUTER_LOG`.
   - The launchd template sets `AURIGA_LOG=/tmp/auriga-router.jsonl`, `ROUTER_LOG=/tmp/auriga-router.log`, `SUP_LOG=/tmp/auriga-supervisor.log` to keep the host layout.
+
+### Heimdall lane eligibility
+
+`AGENT_LANES` in the existing `AURIGA_CONFIG` JSON maps exact configured agent
+names to Heimdall lane IDs, for example:
+
+```json
+{ "AGENT_LANES": { "build-primary": "claude@primary", "build-secondary": "claude@secondary" } }
+```
+
+Tenant config responses may provide the same key. This is explicit operator
+configuration; no live config, caps, or lane lists are changed by this feature.
+Unmapped agents and unknown lane IDs retain their existing eligibility.
+Set `HEIMDALL_URL` to the sensing service (default `http://heimdall:4870`).
+When mappings exist, each cycle reads `GET /lanes` with a three-second timeout.
+A boolean `effective_enabled` takes precedence; older responses allow `status:
+"up"` only. Disabled or unavailable agents are excluded from new dispatch,
+including recovery reruns, without cancelling or modifying active runs. If all
+agents in the configured list are unavailable, the ticket waits; a
+`no_available_lane` decision includes candidate rejection reasons.
+
+Read failures fail open and appear as `lane_state_error` on decision records.
+The executed lane is recorded as `executed_lane`. Because the current outcome
+API credits its immutable selected lane, Auriga reports an outcome only when
+that selection matches the mapped executor. A mismatch emits
+`route_lane_mismatch` and withholds the outcome rather than crediting another
+account. Unmapped execution also withholds attribution. The configured agent
+list remains the boundary for routing; a Heimdall suggestion never permits
+assignment outside it.
