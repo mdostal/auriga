@@ -322,6 +322,32 @@ function parkForHuman(dc, identifier, { blockedReason, comment, errorEvent }) {
   catch (e) { dc.log(errorEvent, { identifier, op: 'comment', error: e.message }); }
 }
 
+// PANT-1383: keep an issue out of review without touching its status (it waits).
+// Comments once per hold tag; metadata.review_hold is the "already said so"
+// marker, so a hold that lasts many cycles posts one comment, not one per cycle.
+function holdOutOfReview({ backlog, log, dryRun }, issue, hold, stage) {
+  const tag = core.reviewHoldTag(hold);
+  const already = ((issue.metadata && issue.metadata[core.REVIEW_HOLD_KEY]) || '') === tag;
+  log('review_hold', {
+    identifier: issue.identifier, stage, reason: hold.reason,
+    children: hold.children ? hold.children.map((c) => c.identifier) : undefined,
+    headKey: hold.headKey, commented: !already && !dryRun, applied: !dryRun,
+  });
+  if (already || dryRun) return;
+  // Metadata first: if the comment write fails we stay silent rather than repeat.
+  if (typeof backlog.setIssueMetadata === 'function') {
+    try { backlog.setIssueMetadata(issue.identifier, { [core.REVIEW_HOLD_KEY]: tag }); }
+    catch (e) { log('review_hold_error', { identifier: issue.identifier, op: 'metadata', error: e.message }); return; }
+  }
+  try { backlog.commentOnIssue(issue.identifier, core.reviewHoldComment(hold, { stage })); }
+  catch (e) { log('review_hold_error', { identifier: issue.identifier, op: 'comment', error: e.message }); }
+}
+
+function fetchPrs(backlog, log, identifier) {
+  try { return backlog.getIssuePullRequests(identifier) || []; }
+  catch (e) { log('prs_fetch_error', { identifier, error: e.message }); return []; }
+}
+
 // PANT-1025: the comment states what the run records show. The startup-hang
 // hypothesis (PANT-262) is only offered when the runs look like a hang (no
 // error, no output); otherwise the real error is quoted.
@@ -663,11 +689,28 @@ async function runCycle(opts, state) {
   // candidate set fresh from board state every cycle makes both transitions
   // idempotent (a transitioned issue simply drops out of its source filter).
   // DISPATCH-scoped (writes setIssueStatus) — see the blocked->todo pass above.
+  // PANT-1383: a finished run only promotes an issue that is reviewable: no open
+  // children, a linked PR/branch, and a head that moved since the router last
+  // promoted it. Anything else stays in_progress with one comment (FFE-1598).
   const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
+  const holdCtx = { backlog, log: logImpl, dryRun };
   for (const c of completions) {
+    const issueObj = issues.find((i) => i.identifier === c.identifier) || { identifier: c.identifier, id: c.issueId, metadata: {} };
+    const prs = fetchPrs(backlog, logImpl, c.identifier);
+    const hold = coreImpl.reviewHoldReason(issueObj, issues, prs, cfgImpl, { metaKey: core.REVIEW_PROMOTED_HEAD_KEY });
+    if (hold) { holdOutOfReview(holdCtx, issueObj, hold, 'promotion'); continue; }
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
     if (!dryRun) {
-      try { backlog.setIssueStatus(c.identifier, ISSUE_STATUS.IN_REVIEW); } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
+      try {
+        backlog.setIssueStatus(c.identifier, ISSUE_STATUS.IN_REVIEW);
+        if (typeof backlog.setIssueMetadata === 'function') {
+          try {
+            backlog.setIssueMetadata(c.identifier, {
+              [core.REVIEW_PROMOTED_HEAD_KEY]: core.reviewHeadKey(issueObj, prs), [core.REVIEW_HOLD_KEY]: '',
+            });
+          } catch (e) { logImpl('advance_error', { identifier: c.identifier, op: 'metadata', error: e.message }); }
+        }
+      } catch (e) { logImpl('advance_error', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, error: e.message }); }
     }
   }
 
@@ -679,10 +722,10 @@ async function runCycle(opts, state) {
   // detectVerifiedDone requires a real merge (state=merged or merged_at set) — never
   // fires on an open/closed PR, never fires on smoke/scratch issues or human-owned stories.
   const verifiedThisCycle = new Set();
+  const prsByIssue = {}; // also feeds the PANT-1383 review gate below
   {
-    const prsByIssue = {};
     for (const i of inReview) {
-      try { prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier); }
+      try { prsByIssue[i.identifier] = backlog.getIssuePullRequests(i.identifier) || []; }
       catch (e) { prsByIssue[i.identifier] = []; logImpl('prs_fetch_error', { identifier: i.identifier, error: e.message }); }
     }
     const verifiedDone = coreImpl.detectVerifiedDone(inReview, prsByIssue, cfgImpl, issues);
@@ -701,8 +744,30 @@ async function runCycle(opts, state) {
   // Exclude just-advanced issues from the review-dispatch snapshot so a stale
   // run on a now-done ticket does not trigger a spurious rerun-review in this
   // same cycle (PANT-431; mirrors the `cascaded` exclusion in selectAssignments below).
-  const inReviewForDispatch = verifiedThisCycle.size
-    ? inReview.filter((i) => !verifiedThisCycle.has(i.identifier))
+  // PANT-1383: the review gate. An in_review issue with open children, with no
+  // linked PR/branch, or back in review on the head the router already sent to a
+  // review squad is never dispatched. It is dropped from BOTH the review-capacity
+  // count and the pick list (never a phantom slot, PANT-737) and waits in
+  // in_review with one comment. Only issues headed for a FRESH review (not held
+  // by a current/former reviewer) take the loop check: a review in flight on the
+  // same head is the normal case, not a loop.
+  const reviewPhaseAgentIds = new Set([
+    ...(cfgImpl.REVIEW_LANE || []).map((n) => cfgImpl.AGENTS[n]?.id),
+    ...(cfgImpl.FORMER_REVIEW_AGENT_IDS || []),
+  ].filter(Boolean));
+  const reviewHeld = new Set();
+  for (const i of inReview) {
+    if (verifiedThisCycle.has(i.identifier)) continue;
+    if (coreImpl.isReviewDispatchSkipped(i, cfgImpl)) continue; // never dispatched anyway
+    const fresh = !reviewPhaseAgentIds.has(i.assignee_id);
+    const hold = coreImpl.reviewHoldReason(i, issues, prsByIssue[i.identifier] || [], cfgImpl,
+      fresh ? { metaKey: core.REVIEW_DISPATCHED_HEAD_KEY } : {});
+    if (!hold) continue;
+    reviewHeld.add(i.identifier);
+    holdOutOfReview(holdCtx, i, hold, 'review');
+  }
+  const inReviewForDispatch = (verifiedThisCycle.size || reviewHeld.size)
+    ? inReview.filter((i) => !verifiedThisCycle.has(i.identifier) && !reviewHeld.has(i.identifier))
     : inReview;
 
   // ---- state-machine: changes_requested -> todo (review loop-back) ----
@@ -950,6 +1015,15 @@ async function runCycle(opts, state) {
         // NOT routed through spawn.dispatch() (different contract — see spawn-adapter.mjs).
         const res = commitDispatch(dc, { identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review', action: 'assign', issue: issueObj, decision });
         if (!res.ok) { logImpl('review_error', { identifier: r.identifier, agent: r.agent, error: res.error.message }); continue; }
+        // PANT-1383: remember which head this review squad got, so the same head
+        // coming back for another fresh review is stopped as a loop.
+        if (typeof backlog.setIssueMetadata === 'function') {
+          try {
+            backlog.setIssueMetadata(r.identifier, {
+              [core.REVIEW_DISPATCHED_HEAD_KEY]: core.reviewHeadKey(issueObj, prsByIssue[r.identifier] || []), [core.REVIEW_HOLD_KEY]: '',
+            });
+          } catch (e) { logImpl('review_error', { identifier: r.identifier, op: 'metadata', error: e.message }); }
+        }
         await verifyAssignStarted(dc, {
           identifier: r.identifier, agent: r.agent, runtime: reviewRt, pass: 'review',
           noRunEvent: 'review_verify_no_run', okEvent: 'review_assign_enqueued',
