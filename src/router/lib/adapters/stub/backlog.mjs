@@ -60,6 +60,11 @@ export function createStubBacklogAdapter(seedData = {}) {
       comments.push({ id, body });
     },
 
+    setIssueMetadata(id, metadataObj) {
+      const issue = issuesByIdentifier.get(id);
+      if (issue) issue.metadata = { ...issue.metadata, ...metadataObj };
+    },
+
     // Fabricates an identifier (stub-created-N) and pushes a new raw-shape
     // issue into the same in-memory map every other method reads/writes —
     // it is immediately visible to a subsequent listIssues()/getIssueRuns()

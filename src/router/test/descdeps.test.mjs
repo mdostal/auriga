@@ -16,6 +16,24 @@ test('descStoryDeps block-list with multiple deps, stops at the next key', () =>
   assert.deepEqual(core.descStoryDeps({ description: desc }), ['a-01-foo', 'b-02-bar']);
 });
 
+test('descStoryDeps block-list with blank line between items returns all deps (PANT-415)', () => {
+  assert.deepEqual(core.descStoryDeps({ description: 'depends_on:\n  - m-01-foo\n\n  - m-02-bar\n' }), ['m-01-foo', 'm-02-bar']);
+  assert.deepEqual(core.descStoryDeps({ description: 'depends_on:\r\n  - m-01-foo\r\n  \r\n\r\n  - m-02-bar\r\nsteps:\r\n  - id: research\r\n' }), ['m-01-foo', 'm-02-bar']);
+});
+
+test('descStoryDeps blank-separated block-list still stops at the next key', () => {
+  const desc = 'depends_on:\n  - a-01-foo\n\n  - b-02-bar\n\nfiles_to_modify:\n  - file: x\nsteps:\n  - id: test\n    depends_on: [implement]\n';
+  assert.deepEqual(core.descStoryDeps({ description: desc }), ['a-01-foo', 'b-02-bar']);
+});
+
+test('descDepsSatisfied stays blocked on a dep listed after a blank separator line', () => {
+  const a = { id: 'A', parent_issue_id: 'E', title: '[m-01-foo] x', status: 'done' };
+  const b = { id: 'B', parent_issue_id: 'E', title: '[m-02-bar] x', status: 'in_progress' };
+  const child = { id: 'C', parent_issue_id: 'E', status: 'blocked', title: '[m-03-baz] x', description: 'depends_on:\n  - m-01-foo\n\n  - m-02-bar\n' };
+  assert.equal(core.descDepsSatisfied(child, [a, b, child]), false);
+  assert.equal(core.descDepsSatisfied(child, [a, { ...b, status: 'done' }, child]), true);
+});
+
 test('descStoryDeps drops hive phase tokens in both forms', () => {
   assert.deepEqual(core.descStoryDeps({ description: 'depends_on: [research, implement]' }), []);
   assert.deepEqual(core.descStoryDeps({ description: 'depends_on:\n  - research\n  - test\n' }), []);

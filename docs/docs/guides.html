@@ -114,7 +114,7 @@ npm run dry
 npm run once
 
 <span class="c"># Supervised: keep exactly ONE detached router alive, restart on death</span>
-nohup ./supervisor.sh &gt;&gt; /tmp/auriga-supervisor.log 2&gt;&amp;1 &amp;</pre>
+./supervisor.sh    <span class="c"># POSIX sh; node from PATH; JSONL to stdout</span></pre>
 
       <div class="callout callout-tip">
         <p class="callout-title">One-command install with MCP</p>
@@ -195,11 +195,12 @@ scripts/launchd/uninstall.sh</pre>
       <table class="param-table">
         <thead><tr><th>File</th><th>Contents</th></tr></thead>
         <tbody>
-          <tr><td class="name">/tmp/auriga-router.log</td><td>Human-readable router log</td></tr>
-          <tr><td class="name">/tmp/auriga-router.jsonl</td><td>Structured JSONL log (one JSON object per line)</td></tr>
+          <tr><td class="name">/tmp/auriga-router.log</td><td>Router stdout/stderr (<code>ROUTER_LOG</code>, set by the launchd template)</td></tr>
+          <tr><td class="name">/tmp/auriga-router.jsonl</td><td>Structured JSONL log (<code>AURIGA_LOG</code>, set by the launchd template; stdout when unset)</td></tr>
           <tr><td class="name">/tmp/auriga-router.pid</td><td>Router pidfile (single-instance lock)</td></tr>
-          <tr><td class="name">/tmp/auriga-supervisor.log</td><td>Supervisor stdout/stderr</td></tr>
-          <tr><td class="name">/tmp/auriga-supervisor.pid</td><td>Supervisor pidfile</td></tr>
+          <tr><td class="name">/tmp/auriga-router.heartbeat</td><td>Last <code>cycle_summary</code>, read by <code>bin/healthcheck.mjs</code></td></tr>
+          <tr><td class="name">/tmp/auriga-supervisor.log</td><td>Supervisor messages (<code>SUP_LOG</code>, set by the launchd template)</td></tr>
+          <tr><td class="name">/tmp/auriga-supervisor.lock</td><td>Supervisor flock lock</td></tr>
           <tr><td class="name">/tmp/auriga-supervisor-launchd.log</td><td>launchd's own stdout/stderr capture for the supervisor</td></tr>
         </tbody>
       </table>

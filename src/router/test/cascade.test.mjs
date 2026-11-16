@@ -132,3 +132,16 @@ test('cascade: a story already in-flight (assigned+queued) is NOT re-cascade-enq
   const issues = [parent, queued];
   assert.equal(core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg).length, 0);
 });
+
+test('cascade: explicitly-labeled seeds are not cascade-dispatched to the build lane (isSeedByLabel guard)', () => {
+  const parent = { id: 'A', identifier: 'PAN-1', project_id: 'PROJ', status: 'done', title: 'parent' };
+  const ideaSeed = { id: 'B', identifier: 'PAN-2', project_id: 'PROJ', status: 'blocked', title: 'an idea', labels: ['idea'], metadata: { depends_on: 'A' } };
+  const planSeed = { id: 'C', identifier: 'PAN-3', project_id: 'PROJ', status: 'blocked', title: 'needs plan', labels: [{ name: 'needs-plan' }], metadata: { depends_on: 'A' } };
+  const realChild = { id: 'D', identifier: 'PAN-4', project_id: 'PROJ', status: 'blocked', title: 'real story', labels: [], metadata: { depends_on: 'A' } };
+  const issues = [parent, ideaSeed, planSeed, realChild];
+  const acts = core.detectCascadeDispatch(issues, new Set(['A']), statusMap(issues), cfg);
+  const ids = acts.map((a) => a.identifier);
+  assert.ok(!ids.includes('PAN-2'), 'idea-labeled seed must not be cascade-dispatched');
+  assert.ok(!ids.includes('PAN-3'), 'needs-plan-labeled seed must not be cascade-dispatched');
+  assert.ok(ids.includes('PAN-4'), 'real child story must still be cascade-dispatched');
+});

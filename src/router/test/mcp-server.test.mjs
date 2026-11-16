@@ -22,6 +22,7 @@ import {
   getStory,
   listBlockedAndInflight,
 } from '../lib/mcp/server.mjs';
+import { PANTHEON_BOARD_SENTINEL } from '../lib/adapters/pantheon-v2-l2/index.mjs';
 import {
   ALL_PROFILES,
   PROFILE_TODO,
@@ -54,13 +55,23 @@ test('selectBacklogAdapter(): AURIGA_BACKLOG_ADAPTER=stub selects the stub adapt
   assert.deepEqual(backlog.listIssues('any-project'), []);
 });
 
-test('selectBacklogAdapter(): default (no env var) selects the real Multica-backed adapter', () => {
+test('selectBacklogAdapter(): default (no env var) selects the pantheon-v2-l2 core-api adapter (PANT-818)', () => {
   const backlog = selectBacklogAdapter({});
-  // Distinguishing tell: only the real adapter carries the "ported extras"
-  // (listAllIssues/listCandidatePullRequests) documented in
-  // multica/backlog.mjs — the stub deliberately does not implement them.
+  // Distinguishing tells: the pantheon-v2-l2 adapter carries listAllIssues
+  // (the stub does not), reports the single board-wide sentinel project, and
+  // has NO listCandidatePullRequests (the direct-Multica adapter's GitHub scan).
   assert.equal(typeof backlog.listAllIssues, 'function');
-  assert.equal(typeof backlog.listCandidatePullRequests, 'function');
+  assert.deepEqual(backlog.listAllProjectIds(), [PANTHEON_BOARD_SENTINEL]);
+  assert.equal(typeof backlog.listCandidatePullRequests, 'undefined');
+});
+
+test('selectBacklogAdapter(): AURIGA_BACKLOG_ADAPTER=pantheon-v2-l2 is the same default adapter', () => {
+  const backlog = selectBacklogAdapter({ AURIGA_BACKLOG_ADAPTER: 'pantheon-v2-l2' });
+  assert.deepEqual(backlog.listAllProjectIds(), [PANTHEON_BOARD_SENTINEL]);
+});
+
+test('selectBacklogAdapter(): any other value (e.g. "multica") is rejected, never a silent direct path', () => {
+  assert.throws(() => selectBacklogAdapter({ AURIGA_BACKLOG_ADAPTER: 'multica' }), /not supported/);
 });
 
 // ---- listBoard --------------------------------------------------------
@@ -134,71 +145,23 @@ test('getStory(): runs surfaced for an in_progress issue with a done run', () =>
   assert.equal(result.runs[0].status, 'done');
 });
 
-// ---- getStory() PR caching (fix for the ~75s live-scan latency measured --
-// ---- during this story's own verification; see server.mjs's file header) --
+// ---- getStory() PR source (PANT-818) -------------------------------------
 
-// A minimal fake adapter carrying listCandidatePullRequests (the stub does
-// NOT implement it — see the "ported extras" test above — so these tests use
-// a purpose-built fake rather than the stub, to exercise the cached-scan
-// code path a real Multica adapter takes).
-function fakeAdapterWithCandidateScan({ issues, candidatePrs, runsByIdentifier = {} }) {
-  let candidateScanCalls = 0;
-  return {
-    listAllProjectIds: () => [...new Set(issues.map((i) => i.project_id))],
-    listAllIssues: () => issues,
-    listIssues: (projectId) => issues.filter((i) => i.project_id === projectId),
-    getIssueRuns: (identifier) => runsByIdentifier[identifier] || [],
-    getIssuePullRequests: () => {
-      throw new Error('getIssuePullRequests should never be called when listCandidatePullRequests is present');
-    },
-    listCandidatePullRequests: () => {
-      candidateScanCalls += 1;
-      return candidatePrs;
-    },
-    get candidateScanCalls() { return candidateScanCalls; },
-  };
-}
-
-test('getStory(): with a candidate-scan-capable adapter, pull_requests come from a filtered board-wide scan, not getIssuePullRequests', () => {
+test('getStory(): pull_requests come from the board-linked getIssuePullRequests, never a candidate PR scan', () => {
   const issue = { identifier: 'PAN-42', id: 'id-42', project_id: 'p', status: 'in_review', parent_issue_id: null, title: 'Some story' };
-  const matchingPr = { url: 'https://github.com/mdostal/auriga/pull/1', title: 'fix', headRefName: 'feat/pan-42-thing', state: 'open' };
-  const unrelatedPr = { url: 'https://github.com/mdostal/auriga/pull/2', title: 'other', headRefName: 'feat/unrelated', state: 'open' };
-  const backlog = fakeAdapterWithCandidateScan({ issues: [issue], candidatePrs: [matchingPr, unrelatedPr] });
+  const linkedPr = { url: 'https://github.com/mdostal/auriga/pull/1', state: 'open' };
+  const prCalls = [];
+  const backlog = {
+    listAllProjectIds: () => ['p'],
+    listAllIssues: () => [issue],
+    listIssues: () => [issue],
+    getIssueRuns: () => [],
+    getIssuePullRequests: (identifier) => { prCalls.push(identifier); return [linkedPr]; },
+    listCandidatePullRequests: () => { throw new Error('listCandidatePullRequests must never be called'); },
+  };
   const result = getStory(backlog, { identifier: 'PAN-42' });
-  assert.equal(result.found, true);
-  assert.equal(result.pull_requests.length, 1);
-  assert.equal(result.pull_requests[0].url, matchingPr.url);
-  assert.equal(backlog.candidateScanCalls, 1);
-});
-
-test('getStory(): a shared cache reuses the board-wide scan across calls within the TTL — the actual latency fix', () => {
-  const issueA = { identifier: 'PAN-1', id: 'id-1', project_id: 'p', status: 'todo', parent_issue_id: null, title: 'A' };
-  const issueB = { identifier: 'PAN-2', id: 'id-2', project_id: 'p', status: 'todo', parent_issue_id: null, title: 'B' };
-  const backlog = fakeAdapterWithCandidateScan({ issues: [issueA, issueB], candidatePrs: [] });
-  const cache = { prs: null, fetchedAt: 0 };
-  getStory(backlog, { identifier: 'PAN-1' }, cache);
-  getStory(backlog, { identifier: 'PAN-2' }, cache);
-  getStory(backlog, { identifier: 'PAN-1' }, cache);
-  // Three calls, one shared cache -> exactly ONE underlying scan. This is
-  // the whole point of the fix: a burst of auriga_get_story calls in one
-  // operator session pays the expensive scan once, not once per call.
-  assert.equal(backlog.candidateScanCalls, 1);
-});
-
-test('getStory(): without an explicit cache, each call gets its own fresh scan (no accidental cross-call state)', () => {
-  const issue = { identifier: 'PAN-1', id: 'id-1', project_id: 'p', status: 'todo', parent_issue_id: null, title: 'A' };
-  const backlog = fakeAdapterWithCandidateScan({ issues: [issue], candidatePrs: [] });
-  getStory(backlog, { identifier: 'PAN-1' });
-  getStory(backlog, { identifier: 'PAN-1' });
-  assert.equal(backlog.candidateScanCalls, 2);
-});
-
-test('getStory(): a stale cache (past the TTL) triggers a fresh scan', () => {
-  const issue = { identifier: 'PAN-1', id: 'id-1', project_id: 'p', status: 'todo', parent_issue_id: null, title: 'A' };
-  const backlog = fakeAdapterWithCandidateScan({ issues: [issue], candidatePrs: [] });
-  const staleCache = { prs: [], fetchedAt: Date.now() - 10 * 60 * 1000 }; // 10 min old, TTL is 5 min
-  getStory(backlog, { identifier: 'PAN-1' }, staleCache);
-  assert.equal(backlog.candidateScanCalls, 1);
+  assert.deepEqual(result.pull_requests, [linkedPr]);
+  assert.deepEqual(prCalls, ['PAN-42']);
 });
 
 // ---- listBlockedAndInflight -----------------------------------------------

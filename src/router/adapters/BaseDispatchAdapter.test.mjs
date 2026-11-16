@@ -87,7 +87,6 @@ test('handles network timeout correctly', async () => {
   adapter.timeoutDelay = 500;
   
   // It should attempt 2 times, each failing after ~100ms
-  const start = Date.now();
   await assert.rejects(
     () => adapter.dispatch({ model: 'test-model', messages: [] }),
     /Network timeout after 100ms/

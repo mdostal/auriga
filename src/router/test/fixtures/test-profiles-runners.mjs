@@ -117,7 +117,18 @@ export const RUNS_BY_IDENTIFIER = {
   ],
 };
 
+// PANT-1383: a finished run only promotes an issue that has a linked PR.
 export const PULL_REQUESTS_BY_IDENTIFIER = {
+  [PROFILE_IN_PROGRESS_DONE_RUN.identifier]: [
+    {
+      number: 2,
+      title: PROFILE_IN_PROGRESS_DONE_RUN.title,
+      headRefName: `feat/${PROFILE_IN_PROGRESS_DONE_RUN.identifier.toLowerCase()}`,
+      headRefOid: 'stub101sha',
+      state: 'OPEN',
+      url: `https://github.com/mdostal/auriga/pull/2`,
+    },
+  ],
   [PROFILE_IN_REVIEW_MERGED_PR.identifier]: [
     {
       number: 1,
