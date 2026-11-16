@@ -1,3 +1,24 @@
+import fs from 'node:fs';
+
+const DEFAULT_AGENT_LANES_FILE = new URL('../config/agent-lanes.json', import.meta.url);
+
+// Shipped agent->lane map (src/router/config/agent-lanes.json, `lanes: { laneId:
+// { agentId: label } }`), flattened to { agentId: laneId }. A missing or malformed
+// file yields {} with a warning: no mapping means no gating, never a stopped router.
+export function loadAgentLanesFile(file = process.env.AURIGA_AGENT_LANES_FILE || DEFAULT_AGENT_LANES_FILE) {
+  try {
+    const { lanes } = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const map = {};
+    for (const [laneId, agents] of Object.entries(lanes || {})) {
+      for (const agentId of Object.keys(agents || {})) map[agentId] = laneId;
+    }
+    return map;
+  } catch (e) {
+    process.stderr.write(`[auriga] agent lane map ${file} unreadable, lane gating off for unmapped agents: ${e.message}\n`);
+    return {};
+  }
+}
+
 // A fresh, bounded read each cycle; never cache a failed read as disabled lanes.
 export async function readLaneState({ baseUrl = process.env.HEIMDALL_URL || 'http://heimdall:4870', fetchImpl = fetch } = {}) {
   try {
@@ -13,12 +34,13 @@ export async function readLaneState({ baseUrl = process.env.HEIMDALL_URL || 'htt
   }
 }
 
-// Map keys are configured agent names, values are exact Heimdall lane IDs.
-// Unknown agents/lanes retain their existing eligibility, never guessed by name.
+// Map keys are configured agent names or Multica agent IDs (a name entry wins),
+// values are exact Heimdall lane IDs. Unknown agents/lanes retain their existing
+// eligibility, never guessed by name.
 export function withLaneState(cfg, snapshot) {
   const lanes = new Map(snapshot.lanes.map((lane) => [lane.lane_id, lane]));
   const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, agent]) => {
-    const laneId = cfg.AGENT_LANES?.[name];
+    const laneId = cfg.AGENT_LANES?.[name] ?? (agent?.id ? cfg.AGENT_LANES?.[agent.id] : undefined);
     const lane = lanes.get(laneId);
     const enabled = !lane || (typeof lane.effective_enabled === 'boolean'
       ? lane.effective_enabled : lane.status === 'up');

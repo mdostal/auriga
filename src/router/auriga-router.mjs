@@ -27,7 +27,7 @@
 // this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
-import { readLaneState, withLaneState } from './lib/lane-state.mjs';
+import { loadAgentLanesFile, readLaneState, withLaneState } from './lib/lane-state.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -1088,7 +1088,7 @@ async function runCycle(opts, state) {
     const idleUnassigns = idleActions.filter((a) => a.action === 'unassign');
     const idleStartActions = idleActions.filter((a) => a.action !== 'unassign');
     for (const a of idleUnassigns) {
-      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, applied: !dryRun });
+      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, ...(a.availabilityReason ? { availability_reason: a.availabilityReason } : {}), applied: !dryRun });
       if (!dryRun) {
         try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
       }
@@ -1288,6 +1288,13 @@ function handOffToBoard(identifier, { board, event, metadataKey, comment }, { is
 }
 
 // ---- main loop (single-tenant, standalone -- unchanged) --------------------
+// PANT-1278: the live daemon adds the shipped agent->lane map
+// (src/router/config/agent-lanes.json) under AURIGA_CONFIG's AGENT_LANES, which
+// wins. Loaded here, not at config import, so imported tests never read Heimdall.
+function withShippedAgentLanes(base) {
+  return { ...base, AGENT_LANES: { ...loadAgentLanesFile(), ...(base.AGENT_LANES || {}) } };
+}
+
 async function main() {
   acquireLock();
   process.on('exit', releaseLock);
@@ -1296,13 +1303,14 @@ async function main() {
 
   log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS });
 
+  const liveCfg = withShippedAgentLanes(cfg);
   let totalAssigned = 0;
   // PANT-816: skip decisions are rate-limited across cycles, so the limiter outlives each cycle.
   const skipLimiter = createSkipLimiter();
   do {
     try {
       const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
-      const result = await cycle({ maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter });
+      const result = await cycle({ cfg: liveCfg, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter });
       totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -1330,6 +1338,7 @@ async function mainMultiTenant() {
 
   log('start_multi_tenant', { pid: process.pid, once: ONCE, dry: DRY, pantheonApiUrl: PANTHEON_API_URL });
 
+  const liveCfg = withShippedAgentLanes(cfg);
   let rotation = 0;
   let iterations = 0;
   let totalAssigned = 0;
@@ -1340,7 +1349,7 @@ async function mainMultiTenant() {
   do {
     let tenants = [];
     try {
-      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: cfg, allowlist: MULTI_TENANT_ALLOWLIST });
+      tenants = await loadTenantConfigs({ pantheonApiBaseUrl: PANTHEON_API_URL, baseCfg: liveCfg, allowlist: MULTI_TENANT_ALLOWLIST });
     } catch (e) {
       log('tenant_configs_error', { error: e.message });
     }
