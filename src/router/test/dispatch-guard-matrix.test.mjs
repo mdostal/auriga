@@ -23,6 +23,7 @@ import { cycle } from '../auriga-router.mjs';
 import * as realCfg from '../lib/config.mjs';
 import { PLANNING_AGENT } from '../lib/core.mjs';
 import { createLogSink } from './support/mock-mca.mjs';
+import { linkedOpenPrs } from './support/linked-pr.mjs';
 
 const NOOP_SLEEP = async () => {};
 
@@ -181,7 +182,7 @@ function createAdapters(issues, runs, { failFor = new Set() } = {}) {
     listAllProjectIds: () => [],
     listAllIssues: (projectIds) => board.filter((i) => projectIds.includes(i.project_id)),
     getIssueRuns: (identifier) => runsBy[identifier] || [],
-    getIssuePullRequests: () => [],
+    getIssuePullRequests: linkedOpenPrs,
     setIssueStatus: (identifier, status) => { const i = find(identifier); if (i) i.status = status; },
     commentOnIssue: () => {},
     setIssueMetadata: (identifier, md) => { const i = find(identifier); if (i) i.metadata = { ...i.metadata, ...md }; },
