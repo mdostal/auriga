@@ -12,6 +12,7 @@ import {
   DECISION_ACTIONS, DECISION_PASSES, DECISION_SCHEMA_VERSION, buildDecision, createSkipLimiter, isDecisionReason, reasonCode,
 } from '../lib/decisions.mjs';
 import { createLogSink } from './support/mock-mca.mjs';
+import { linkedOpenPrs } from './support/linked-pr.mjs';
 
 const NOOP_SLEEP = async () => {};
 const P = 'dec-project';
@@ -139,7 +140,7 @@ function createAdapters(issues, runs) {
     listAllProjectIds: () => [],
     listAllIssues: (projectIds) => board.filter((i) => projectIds.includes(i.project_id)),
     getIssueRuns: (identifier) => runsBy[identifier] || [],
-    getIssuePullRequests: () => [],
+    getIssuePullRequests: linkedOpenPrs,
     setIssueStatus: (identifier, status) => { const i = find(identifier); if (i) i.status = status; },
     commentOnIssue: () => {},
     setIssueMetadata: (identifier, md) => { const i = find(identifier); if (i) i.metadata = { ...i.metadata, ...md }; },

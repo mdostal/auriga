@@ -21,6 +21,7 @@ import { cycle } from '../auriga-router.mjs';
 import * as cfg from '../lib/config.mjs';
 import { createLogSink } from './support/mock-mca.mjs';
 import { createStubBacklogAdapter } from '../lib/adapters/stub/backlog.mjs';
+import { linkedOpenPrs } from './support/linked-pr.mjs';
 
 const NOOP_SLEEP = async () => {};
 
@@ -100,7 +101,7 @@ function createMockAdapters(boardIssues, agents, opts = {}) {
     listAllProjectIds: () => [],
     listAllIssues: (projectIds) => boardIssues.filter((i) => projectIds.includes(i.project_id)),
     getIssueRuns: (identifier) => runsByIdentifier[identifier] || [],
-    getIssuePullRequests: () => [],
+    getIssuePullRequests: linkedOpenPrs,
     setIssueStatus: (identifier, status) => {
       calls.status.push({ identifier, status });
       const issue = findIssue(identifier);
