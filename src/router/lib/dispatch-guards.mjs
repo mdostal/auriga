@@ -49,6 +49,7 @@ export function dispatchEligible(issue, pass, ctx = {}) {
   if (assigned >= maxAssign) return { ok: false, reason: 'max-assign', stop: true };
   if (passCount >= passCap) return { ok: false, reason: 'pass-cap', stop: true };
   if (isAgentParked(issue)) return { ok: false, reason: 'agent-parked', stop: false };
+  if (agent && cfg?.AGENTS?.[agent]?.available === false) return { ok: false, reason: cfg.AGENTS[agent].availabilityReason || 'agent-unavailable', stop: false };
   if (agent && agent !== PLANNING_AGENT && ROUTING_PASSES.has(pass) && issue && !isHiveStory(issue)) {
     const seed = pass === 'build' ? isSeedForTenant(issue, allIssues, cfg) : isSeedByLabel(issue);
     if (seed) return { ok: false, reason: 'seed', stop: false };

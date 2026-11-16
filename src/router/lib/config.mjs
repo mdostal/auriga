@@ -26,6 +26,7 @@ import {
 } from './config-substrate.mjs';
 import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
+export const AGENT_LANES = _ext.AGENT_LANES ?? {};
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
   RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
