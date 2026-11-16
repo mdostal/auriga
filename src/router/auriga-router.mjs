@@ -1292,7 +1292,7 @@ function handOffToBoard(identifier, { board, event, metadataKey, comment }, { is
 // (src/router/config/agent-lanes.json) under AURIGA_CONFIG's AGENT_LANES, which
 // wins. Loaded here, not at config import, so imported tests never read Heimdall.
 function withShippedAgentLanes(base) {
-  return { ...base, AGENT_LANES: { ...loadAgentLanesFile(), ...(base.AGENT_LANES || {}) } };
+  return { ...base, AGENT_LANES: { ...loadAgentLanesFile(), ...base.AGENT_LANES } };
 }
 
 async function main() {

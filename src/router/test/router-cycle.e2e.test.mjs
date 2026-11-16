@@ -2424,3 +2424,26 @@ test('Heimdall gates new work, leaves active runs untouched, and fails open with
     }
   }
 });
+
+test('PANT-1278: a changes-requested hand-back assigned straight to a builder on a degraded lane is unassigned and re-routed within its list', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 2);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'codex', [lane[1]]: 'claude' } };
+  // core-api's review-closer re-assigns the original builder and sets todo, outside Auriga.
+  const handBack = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent', assignee_id: cfg.AGENTS[lane[0]].id });
+  const { backlog, spawn, calls } = createMockAdapters([handBack], fixtureCfg.AGENTS);
+  const log = createLogSink();
+  const readLaneState = async () => ({ lanes: [{ lane_id: 'codex', status: 'degraded', reason: 'reset 2026-11-19T21:03Z' }, { lane_id: 'claude', status: 'up' }], error: null });
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState });
+  assert.equal(calls.unassign.filter((c) => c.identifier === handBack.identifier).length, 1);
+  assert.equal(calls.rerun.some((c) => c.identifier === handBack.identifier), false, 'never reruns the degraded builder');
+  assert.equal(calls.assign.some((c) => c.identifier === handBack.identifier && c.agentName === lane[0]), false);
+  const unassigned = log.byEvent('assigned_idle_unassign').find((e) => e.identifier === handBack.identifier);
+  assert.ok(unassigned, 'logs the unassign');
+  assert.match(unassigned.availability_reason, /^heimdall:codex:/);
+  // Next cycle routes it to the next agent in its list.
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState });
+  const assigned = calls.assign.filter((c) => c.identifier === handBack.identifier);
+  assert.ok(assigned.length >= 1);
+  assert.ok(assigned.every((c) => c.agentName === lane[1]));
+});
