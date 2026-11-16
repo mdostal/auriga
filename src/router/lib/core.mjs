@@ -23,6 +23,14 @@ import {
   isSmokeScratch, smokeScratchReason, HUMAN_TODO_LABEL, isHumanTodo, isAgentParked, isStaleRouterPark, isStaleReviewPark, isStalePark, isSeedByLabel, isReviewDispatchSkipped,
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
+import {
+  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY,
+  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment,
+} from './review-gate.mjs';
+export {
+  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY,
+  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment,
+};
 export { isPrMerged };
 export { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
 export { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds };
@@ -654,7 +662,7 @@ export function isHiveCapableAssignee(assigneeId, cfg) {
   return false;
 }
 
-export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), _allIssues = []) {
+export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now(), allIssues = []) {
   const actions = [];
   // PANT-636: compute once before the loop — mirrors selectReviewDispatch / PANT-531.
   const reviewAgentIds = new Set((cfg.REVIEW_LANE || []).map((n) => cfg.AGENTS[n]?.id).filter(Boolean));
@@ -668,9 +676,15 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // to land on and changes nothing, and with zero runs the zombieMaxAttempts
     // give-up is unreachable, so it re-fired every cycle forever.
     if (i.assignee_type === 'member') continue;
+    // PANT-1383: a parent with open children waits on them; rerunning its builder
+    // does nothing (FFE-1598 looped build -> review -> build on 2026-11-16).
+    if (openChildren(i, allIssues).length) continue;
     const runs = runsByIssue[i.identifier] || [];
     if (hasActiveRun(runs, now, cfg.CAPS.zombieStaleMs)) continue; // healthy & fresh
     const lr = latestRun(runs);
+    // PANT-1383: the router held this issue out of review after its run finished
+    // (and commented why). A finished run is not a stall; only a failed one is.
+    if (isReviewHeld(i) && lr && !classifyRun(lr, now).failed) continue;
     const stale = !lr || classifyRun(lr, now).failed || classifyRun(lr, now).ageMs > cfg.CAPS.zombieStaleMs;
     if (!stale) continue;
     const isHive = isHiveStory(i);
@@ -1142,6 +1156,36 @@ export function ownPrUrl(issue = {}) {
   if (typeof meta === 'string' && meta.trim()) return meta.trim();
   const m = (issue.description || '').match(/(^|\n)\s*pr_url:\s*(\S+)/i);
   return m ? m[2].trim() : null;
+}
+
+// PANT-1383: does anything link this issue to code — a PR row on the board, its
+// own recorded pr_url, or a recorded branch?
+export function hasLinkedPrOrBranch(issue = {}, prs = []) {
+  if ((prs || []).length) return true;
+  if (ownPrUrl(issue)) return true;
+  const m = (issue && issue.metadata) || {};
+  return ['branch', 'pr_branch', 'head_branch'].some((k) => typeof m[k] === 'string' && m[k].trim() !== '');
+}
+
+// PANT-1383: why this issue must not go to the review squad, or null.
+//   open-children  – it has non-terminal child issues (a parent closes by rollup);
+//   no-linked-pr   – nothing to review (cfg.CAPS.reviewRequiresLinkedPr=false turns this leg off);
+//   review-loop    – opts.metaKey names the head the router last sent to review
+//                    and the head has not moved since (no new commit).
+// Pure: prs are the issue's linked PR rows (backlog.getIssuePullRequests).
+export function reviewHoldReason(issue, allIssues = [], prs = [], cfg = {}, opts = {}) {
+  const children = openChildren(issue, allIssues);
+  if (children.length) return { reason: REVIEW_HOLD.OPEN_CHILDREN, children };
+  const requirePr = !(cfg.CAPS && cfg.CAPS.reviewRequiresLinkedPr === false);
+  if (requirePr && !hasLinkedPrOrBranch(issue, prs)) return { reason: REVIEW_HOLD.NO_LINKED_PR };
+  if (opts.metaKey) {
+    const headKey = reviewHeadKey(issue, prs);
+    const last = issue && issue.metadata && issue.metadata[opts.metaKey];
+    if (typeof last === 'string' && last !== '' && last === headKey) {
+      return { reason: REVIEW_HOLD.REVIEW_LOOP, headKey, metaKey: opts.metaKey };
+    }
+  }
+  return null;
 }
 
 // Compare two github PR urls ignoring protocol / trailing slash / .git.
