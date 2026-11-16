@@ -1,0 +1,31 @@
+{
+  "_comment": "PANT-1278: which Heimdall lane (GET /lanes lane_id) each Multica agent runs on, keyed by Multica agent ID (not name: names repeat across tenants, e.g. flayr-review is a codex agent in one workspace and a claude-review agent in firefly-events). Values are agent labels for humans only. Mirrors pantheon-v2's pantheon.lane-runners.yaml (the map core-api's LaneBreaker uses) plus the codex and gemini agents it lacks. Override or extend with AGENT_LANES in AURIGA_CONFIG (name- or ID-keyed, that wins) or point AURIGA_AGENT_LANES_FILE at another file. An agent with no entry here stays eligible whatever Heimdall says.",
+  "lanes": {
+    "codex": {
+      "b409b47d-1ebf-4975-9507-56658cd5f303": "Codex",
+      "7eeeaaf0-0353-439a-9b51-29c29d54ad93": "auriga-dev",
+      "5d349b30-8860-4306-a7a2-4219f015e446": "heimdall-dev-codex",
+      "e2943c26-cff8-42f6-9cb8-329e53edc1b4": "flayr-review (codex)",
+      "f48b5d3e-219e-4342-a79e-3a6f4c15b1d6": "auriga-build-codex",
+      "032cbfa8-e65c-4e5a-b4c9-e51120d382bc": "flayr-build-codex (firefly-events)"
+    },
+    "gemini": {
+      "4912c5e8-9275-493b-a465-c30ffd7ebac3": "auriga-review-gemini",
+      "f7550c94-65db-456b-bfc5-823a2427cb2f": "flayr-review-gemini (firefly-events)"
+    },
+    "claude@ffevents": {
+      "bd27120b-b2fa-4e83-98bb-477e46802eea": "Claude",
+      "e51a115c-6181-4f59-bb01-b4c77206c6fd": "minerva-dev",
+      "f77456c3-ec31-4490-8f38-099624ce9384": "consus-dev",
+      "84c1c48c-1425-49d9-8dc4-e841f2034654": "auriga-build",
+      "b5ab2148-de69-4c8a-af63-0b1495cfd57b": "mnemosyne-dev",
+      "8f4bb79f-6087-4fd7-82b0-c222cd1e70df": "votum-dev",
+      "7545f9ad-41da-4bd9-9674-f0dc223236b9": "auriga-review",
+      "fcf83a80-cb04-46c5-9c71-e6302a337053": "simman-runner",
+      "426151b2-b4b9-49e5-80a4-6610c480bca3": "vulcan-build",
+      "53ff5c01-b7ab-4f71-9f87-69e73cf7987e": "flayr-build",
+      "c94bca72-606e-4328-9f46-cba20bddcc22": "content-production",
+      "6af6bd24-f817-4ba1-aa99-3e27e727d6a0": "fama-build"
+    }
+  }
+}

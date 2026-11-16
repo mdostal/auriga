@@ -1420,6 +1420,32 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     // let a genuine dead-zone reset its stale timer forever. updated_at is only
     // a fallback for records that carry no created_at.
     const runs = runsByIssue[i.identifier] || [];
+
+    // PANT-1278: a send-back (review-closer's changes-requested / not-mergeable /
+    // gate-refused paths in core-api) reassigns the ORIGINAL builder directly,
+    // bypassing routing, so a ticket lands on a lane Heimdall reports unavailable
+    // (live: codex `degraded`, every FFE send-back back on flayr-build-codex) and
+    // stalls there: selectAssignments skips it as a non-router assignment and the
+    // rerun below is gated off. Once no run is active, unassign it at once (no
+    // stale wait) so the build pass re-routes it within its configured list, or
+    // holds it with `no_available_lane`. An active run is never touched.
+    const assignee = Object.values(cfg.AGENTS).find((a) => a && a.id === i.assignee_id);
+    if (assignee?.available === false && assignee.availabilityReason?.startsWith('heimdall:')) {
+      if (!hasActiveRun(runs, now, staleMs, queuedStaleMs)) {
+        actions.push({
+          identifier: i.identifier,
+          issueId: i.id,
+          assigneeId: i.assignee_id,
+          projectId: i.project_id,
+          lane: cfg.PROJECT_NAMES?.[i.project_id] || i.project_id,
+          action: 'unassign',
+          reason: 'assignee-lane-unavailable',
+          availabilityReason: assignee.availabilityReason,
+        });
+      }
+      continue;
+    }
+
     const baseTime = Math.max(
       toMs(i.created_at || i.updated_at),
       ...runs.map((r) => toMs(r.created_at || r.dispatched_at || r.started_at)),

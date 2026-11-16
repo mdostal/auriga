@@ -322,8 +322,13 @@ names to Heimdall lane IDs, for example:
 { "AGENT_LANES": { "build-primary": "claude@primary", "build-secondary": "claude@secondary" } }
 ```
 
-Tenant config responses may provide the same key. This is explicit operator
-configuration; no live config, caps, or lane lists are changed by this feature.
+Keys may be agent names or Multica agent IDs; a name entry wins. The live
+daemon also loads the shipped map `src/router/config/agent-lanes.json`
+(ID-keyed, since agent names repeat across tenants), or the file named by
+`AURIGA_AGENT_LANES_FILE`. `AGENT_LANES` in `AURIGA_CONFIG` overrides it per
+key, and a tenant config's `AGENT_LANES` merges over both. Tests and library
+callers get no shipped map: only the daemon entry points load it.
+This is explicit operator configuration; caps and lane lists are unchanged.
 Unmapped agents and unknown lane IDs retain their existing eligibility.
 Set `HEIMDALL_URL` to the sensing service (default `http://heimdall:4870`).
 When mappings exist, each cycle reads `GET /lanes` with a three-second timeout.
@@ -332,6 +337,14 @@ A boolean `effective_enabled` takes precedence; older responses allow `status:
 including recovery reruns, without cancelling or modifying active runs. If all
 agents in the configured list are unavailable, the ticket waits; a
 `no_available_lane` decision includes candidate rejection reasons.
+
+Send-backs that bypass routing (core-api's review closer re-assigns the
+original builder and sets `todo`) are caught by assigned-idle detection: a
+plain `todo` assigned to an agent whose Heimdall lane is unavailable, with no
+active run, is unassigned straight away (`assigned_idle_unassign`, reason
+`assignee-lane-unavailable`, plus `availability_reason`). There is no stale
+wait. The next build pass routes it within its list or holds it with
+`no_available_lane`. A Heimdall outage never triggers this.
 
 Read failures fail open and appear as `lane_state_error` on decision records.
 The executed lane is recorded as `executed_lane`. Because the current outcome
