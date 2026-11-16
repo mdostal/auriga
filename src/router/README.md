@@ -344,9 +344,24 @@ plain `todo` assigned to an agent whose Heimdall lane is unavailable, with no
 active run, is unassigned straight away (`assigned_idle_unassign`, reason
 `assignee-lane-unavailable`, plus `availability_reason`). There is no stale
 wait. The next build pass routes it within its list or holds it with
-`no_available_lane`. A Heimdall outage never triggers this.
+`no_available_lane`. A Heimdall outage with no last known state never triggers
+this.
 
-Read failures fail open and appear as `lane_state_error` on decision records.
+Read failures are stale-while-error (PANT-1385). Every successful `GET /lanes`
+is kept in `AURIGA_LANE_STATE_FILE` (default: `heimdall-lanes.json` next to
+`AURIGA_HEARTBEAT_FILE`, so it survives the `--once` loop's per-cycle
+processes). When Heimdall can't be reached, that last known state is used: a
+lane it reported as limited stays unavailable, and the availability reason says
+`(last known state, Ns old; heimdall unreachable)`. A cached limited lane whose
+`manual_reset_at`/`reset_at` has passed is let back in; one with no reset time
+stays as last read. Only a router that has never read Heimdall successfully
+fails open. Decision and `scan` records carry `lane_state_error`,
+`lane_state_source` (`live`, `cache`, `none`, or null when no map is
+configured), `lane_state_age_s` and `lane_state_fetched_at`. The `start` /
+`start_multi_tenant` line and every `scan` log `agentLanes` (the size of the
+agent->lane map; 0 means nothing is gated) and `build` (a hash of
+`auriga-router.mjs` + `lib/lane-state.mjs`), so the running code can be checked
+against a commit.
 The executed lane is recorded as `executed_lane`. Because the current outcome
 API credits its immutable selected lane, Auriga reports an outcome only when
 that selection matches the mapped executor. A mismatch emits

@@ -2399,15 +2399,20 @@ test('Heimdall gates new work, leaves active runs untouched, and fails open with
   assert.equal(lane.length, 2);
   const project = projectId('Pantheon Core');
   const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'one', [lane[1]]: 'two' } };
-  for (const mode of ['fallback', 'held', 'outage']) {
+  // PANT-1385 `stale`: Heimdall unreachable, the last successful read (lane one out of
+  // credit) is used. `ready` is an unassigned todo, so this is also the first-assignment gate.
+  for (const mode of ['fallback', 'held', 'outage', 'stale']) {
     const ready = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent' });
     const active = makeIssue({ project_id: project, status: 'in_progress', assignee_id: cfg.AGENTS[lane[0]].id });
     const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([ready, active], fixtureCfg.AGENTS);
     runsByIdentifier[active.identifier] = [activeRun()];
     const log = createLogSink();
     await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
-      readLaneState: async () => mode === 'outage' ? { lanes: [], error: 'connection refused' } : {
-        lanes: [{ lane_id: 'one', status: 'out_of_credit' }, { lane_id: 'two', status: mode === 'held' ? 'down' : 'up' }], error: null,
+      readLaneState: async () => mode === 'outage' ? { lanes: [], error: 'connection refused', source: 'none', fetchedAt: null, ageMs: null } : {
+        lanes: [{ lane_id: 'one', status: 'out_of_credit' }, { lane_id: 'two', status: mode === 'held' ? 'down' : 'up' }],
+        ...(mode === 'stale'
+          ? { error: 'connection refused', source: 'cache', fetchedAt: '2026-11-16T18:00:00.000Z', ageMs: 120_000 }
+          : { error: null, source: 'live', fetchedAt: '2026-11-16T18:00:00.000Z', ageMs: 0 }),
       },
     });
     assert.equal(calls.assign.some((c) => c.identifier === active.identifier), false);
@@ -2421,7 +2426,20 @@ test('Heimdall gates new work, leaves active runs untouched, and fails open with
       assert.equal(ready.status, 'todo');
     } else {
       assert.equal(calls.assign[0].agentName, lane[1]);
-      if (mode === 'outage') assert.equal(decision.lane_state_error, 'connection refused');
+      if (mode === 'outage') {
+        assert.equal(decision.lane_state_error, 'connection refused');
+        assert.equal(decision.lane_state_source, 'none');
+        assert.equal(decision.lane_state_age_s, null);
+      }
+      if (mode === 'stale') {
+        assert.equal(decision.lane_state_source, 'cache');
+        assert.equal(decision.lane_state_age_s, 120);
+        assert.equal(decision.lane_state_fetched_at, '2026-11-16T18:00:00.000Z');
+      }
+      if (mode === 'fallback') assert.equal(decision.lane_state_source, 'live');
+      const scan = log.byEvent('scan').at(-1);
+      assert.equal(scan.agentLanes, 2);
+      assert.equal(scan.lane_state_source, mode === 'outage' ? 'none' : mode === 'stale' ? 'cache' : 'live');
     }
   }
 });
