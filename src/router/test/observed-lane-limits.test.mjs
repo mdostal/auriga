@@ -10,7 +10,7 @@ import {
   observedLaneLimits, withObservedLaneLimits, createObservedLimitStore, createDecisionStore,
 } from '../lib/lane-state.mjs';
 import { quotaResetAtMs } from '../lib/run-classification.mjs';
-import { laneUnavailable, chooseAgentForProject } from '../lib/core.mjs';
+import { laneUnavailable } from '../lib/core.mjs';
 
 const MIN = 60_000;
 const NOW = Date.parse('2026-11-22T12:00:00Z');
