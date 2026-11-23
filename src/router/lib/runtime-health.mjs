@@ -68,7 +68,7 @@ export function recordRuns(prior, runLists, now = Date.now(), opts = RUNTIME_HEA
   for (const [rid, r] of Object.entries(prior?.runtimes || {})) {
     runtimes[rid] = { runs: Array.isArray(r?.runs) ? r.runs.filter((x) => x && now - x.ms < opts.forgetMs) : [] };
   }
-  const agentRuntimes = { ...(prior?.agentRuntimes || {}) };
+  const agentRuntimes = { ...prior?.agentRuntimes };
   for (const [identifier, runs] of runLists) {
     for (const run of runs || []) {
       const rid = run?.runtime_id;
