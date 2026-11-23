@@ -136,9 +136,12 @@ export function withLaneState(cfg, snapshot, now = Date.now()) {
 // does not cap the account and is left to the per-ticket quota hold.
 const MODEL_SCOPED_LIMIT_RE = /\b(opus|sonnet|haiku|fable)\b[^.\n]{0,40}\blimit\b/i;
 
-// runLists: iterable of [identifier, runs[]]. Returns Map laneId ->
-// { laneId, untilMs, identifier, agentId, error }.
-export function observedLaneLimits(runLists, cfg, now = Date.now(), cooldownMs = 15 * 60 * 1000) {
+// runLists: iterable of [identifier, runs[]]. prior: limits kept from earlier
+// cycles (the ticket whose run hit the limit is usually re-routed, after which
+// its runs are no longer fetched); one stays until its reset passes or a run that
+// started later on the same lane shows the lane serving again.
+// Returns Map laneId -> { laneId, untilMs, failedMs, identifier, agentId, error }.
+export function observedLaneLimits(runLists, cfg, now = Date.now(), cooldownMs = 15 * 60 * 1000, prior = []) {
   const laneByAgentId = new Map();
   for (const agent of Object.values(cfg.AGENTS || {})) {
     if (agent?.id && agent.laneId) laneByAgentId.set(agent.id, agent.laneId);
@@ -155,15 +158,48 @@ export function observedLaneLimits(runLists, cfg, now = Date.now(), cooldownMs =
     }
   }
   const limits = new Map();
+  for (const p of prior || []) {
+    if (!p || typeof p.laneId !== 'string' || !(p.untilMs > now)) continue;
+    const seen = latest.get(p.laneId);
+    if (seen && seen.ms > p.failedMs) continue; // superseded; re-judged below
+    limits.set(p.laneId, p);
+  }
   for (const [laneId, { run, ms, identifier }] of latest) {
     if (!isQuotaFailure(run, now)) continue;
     const error = runErrorText(run) || String(run.failure_reason || '');
     if (MODEL_SCOPED_LIMIT_RE.test(error)) continue;
     const untilMs = quotaResetAtMs(run) ?? ms + cooldownMs;
     if (untilMs <= now) continue;
-    limits.set(laneId, { laneId, untilMs, identifier, agentId: run.agent_id, error: error.slice(0, 200) });
+    const cur = limits.get(laneId);
+    if (cur && cur.failedMs >= ms) continue;
+    limits.set(laneId, { laneId, untilMs, failedMs: ms, identifier, agentId: run.agent_id, error: error.slice(0, 200) });
   }
   return limits;
+}
+
+// Where observed limits outlive the --once process: next to the lane-state cache.
+// Lanes are provider accounts, so tenants share the file. Best-effort both ways.
+export function defaultObservedLimitsFile(env = process.env) {
+  if (env.AURIGA_OBSERVED_LIMITS_FILE) return env.AURIGA_OBSERVED_LIMITS_FILE;
+  return path.join(path.dirname(defaultLaneStateFile(env)), 'observed-lane-limits.json');
+}
+
+export function createObservedLimitStore(file = defaultObservedLimitsFile()) {
+  return {
+    read() {
+      try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(v) ? v : []; }
+      catch { return []; }
+    },
+    write(limits) {
+      try {
+        const tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(limits));
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        process.stderr.write(`[auriga] could not keep observed lane limits at ${file}: ${e.message}\n`);
+      }
+    },
+  };
 }
 
 // Marks every agent on an observed-limited lane unavailable. The reason starts

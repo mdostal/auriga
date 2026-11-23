@@ -28,7 +28,7 @@
 
 import fs from 'node:fs';
 import {
-  createDecisionStore, defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, observedLaneLimits, readLaneState,
+  createDecisionStore, createObservedLimitStore, defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, observedLaneLimits, readLaneState,
   withLaneState, withObservedLaneLimits,
 } from './lib/lane-state.mjs';
 import * as cfg from './lib/config.mjs';
@@ -630,13 +630,25 @@ async function runCycle(opts, state) {
   // Heimdall marks the lane itself (best-effort; only for a decision whose lane is
   // the one that ran, see selectRoute in the spawn adapter).
   {
+    // opts.observedLimitStore ({ read, write }) keeps limits across cycles; main()
+    // passes the file-backed one. Without it (tests, embedders) nothing persists.
+    const limitStore = opts.observedLimitStore;
+    let prior = [];
+    try { prior = limitStore ? limitStore.read() : []; } catch (e) { logImpl('lane_limit_store_error', { error: e.message }); }
     const limits = observedLaneLimits(
       [...Object.entries(runsByIssue), ...Object.entries(todoRunsByIssue)],
-      cfgImpl, now, cfgImpl.CAPS.redispatchCooldownMs,
+      cfgImpl, now, cfgImpl.CAPS.redispatchCooldownMs, prior,
     );
+    if (limitStore && !dryRun) {
+      try { limitStore.write([...limits.values()]); } catch (e) { logImpl('lane_limit_store_error', { error: e.message }); }
+    }
+    const priorKey = new Set(prior.map((p) => `${p.laneId}@${p.failedMs}`));
     if (limits.size) {
       Object.assign(cfgImpl, withObservedLaneLimits(cfgImpl, limits));
       for (const l of limits.values()) {
+        // Logged and reported once, when first seen; later cycles carry it silently
+        // (decision records still name it through the agents' availabilityReason).
+        if (priorKey.has(`${l.laneId}@${l.failedMs}`)) continue;
         logImpl('lane_limit_observed', {
           lane: l.laneId, identifier: l.identifier, agent_id: l.agentId,
           until: new Date(l.untilMs).toISOString(), error: l.error,
@@ -1455,10 +1467,12 @@ async function main() {
   let totalAssigned = 0;
   // PANT-816: skip decisions are rate-limited across cycles, so the limiter outlives each cycle.
   const skipLimiter = createSkipLimiter();
+  // PANT-1445: provider limits seen on runs outlive each --once process.
+  const observedLimitStore = createObservedLimitStore();
   do {
     try {
       const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
-      const result = await cycle({ cfg: liveCfg, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter });
+      const result = await cycle({ cfg: liveCfg, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter, observedLimitStore });
       totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -1493,6 +1507,8 @@ async function mainMultiTenant() {
   const tenantAdapters = new Map();
   // PANT-816: one skip-decision limiter per tenant, kept across cycles.
   const skipLimiters = new Map();
+  // PANT-1445: lanes are provider accounts, so tenants share observed limits.
+  const observedLimitStore = createObservedLimitStore();
   do {
     let tenants = [];
     try {
@@ -1515,7 +1531,7 @@ async function mainMultiTenant() {
           if (!skipLimiters.has(tenantId)) skipLimiters.set(tenantId, createSkipLimiter());
           const result = await cycle({
             backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), tenantId, dryRun: DRY, maxAssign: remaining,
-            heartbeatFile: HEARTBEAT_FILE, skipLimiter: skipLimiters.get(tenantId),
+            heartbeatFile: HEARTBEAT_FILE, skipLimiter: skipLimiters.get(tenantId), observedLimitStore,
           });
           totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
