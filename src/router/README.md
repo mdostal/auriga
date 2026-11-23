@@ -403,6 +403,30 @@ check `bin/runtime-health-check.sh` reads to tell the nurse. To release a
 runtime by hand once it is fixed, delete that file (`/var/lib/auriga/runtime-health.json`
 in the pilot container).
 
+The same streak rule also runs per Heimdall lane (PANT-1445). On 2026-11-23
+Gemini failed every run ("opencode exited with error: exit status 1") while the
+opencode runtime's other lanes kept succeeding, so the runtime gate never fired.
+Heimdall still said `gemini` was up, and reviews kept going to
+flayr-review-gemini/auriga-review-gemini. Auriga now groups the same run history
+by each agent's `laneId`. When the newest `laneFailureStreak` (default: the
+runtime streak, 3) finished runs on a lane all failed, across at least
+`laneFailureMinIssues` tickets, every agent on that lane is unavailable with
+reason `auriga:<lane>:<n> runs failed in a row on the lane (<tickets>) until
+<time>`. The cooldown and doubling are the same as the runtime hold.
+`laneFailureStreak: 0` turns it off. Each new hold logs `lane_unhealthy` once;
+`scan` lists `lanesFailing`; the store keeps `laneHolds`.
+
+A lane failure never blocks a ticket. In review dispatch:
+- a ticket whose reviewer's lane is unavailable is re-dispatched to a reviewer
+  on a lane that is up (`assignee-lane-unavailable`), or waits if there is none;
+- runs by agents whose lane is currently out don't count toward
+  `reviewMaxAttempts` (or the zombie build-attempt count);
+- when all `reviewMaxAttempts` failures happened on one lane and another
+  `REVIEW_LANE` lane is up, the ticket goes to that lane
+  (`review-failed-on-one-lane`), or waits for budget or capacity, instead of
+  giving up. Only failures that span lanes, or a single review lane, give up and
+  park the ticket for a human (PANT-262).
+
 Heimdall decision ids live in `AURIGA_DECISIONS_FILE` (default
 `heimdall-decisions.json`, same directory, entries expire after 14 days), so the
 outcome of a ticket assigned in one `--once` process can be reported by a later one.
