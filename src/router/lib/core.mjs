@@ -746,7 +746,9 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // PANT-1025: a provider quota failure is transient — wait out the reset
     // instead of re-firing every cycle, and never count it as an attempt.
     if (quotaHoldUntilMs(runs, now, cfg.CAPS.redispatchCooldownMs)) continue;
-    const buildRuns = countedRuns(runs, now).filter((r) => !reviewAgentIds.has(r.agent_id));
+    // PANT-1445: runs on a lane that is out right now are not attempts at the ticket.
+    const buildRuns = countedRuns(runs, now).filter((r) => !reviewAgentIds.has(r.agent_id) &&
+      !laneUnavailable(Object.values(cfg.AGENTS).find((a) => a && a.id === r.agent_id)));
     if (buildRuns.length >= cfg.CAPS.zombieMaxAttempts) {
       actions.push({
         identifier: i.identifier,
@@ -877,6 +879,21 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
     agent, action: 'give-up-review', reason: 'review-max-attempts-exhausted',
     diagnosis: diagnoseFailedRuns(reviewPhaseRuns(runs)),
   });
+  // PANT-1445 (pantheon-v2#527): a lane failure must never block the ticket
+  // (PANT-706 was parked blocked after 5 straight Gemini failures while its PR
+  // was fine). Runs on a lane that is out right now (Heimdall, a provider limit,
+  // a lane or runtime failure streak) are not attempts at the ticket, and
+  // failures confined to one lane first move the ticket to a reviewer on
+  // another lane. Only failures across lanes give up.
+  const agentById = new Map(Object.values(cfg.AGENTS || {}).filter((a) => a?.id).map((a) => [a.id, a]));
+  const laneKeyOf = (agentId) => agentById.get(agentId)?.laneId || `agent:${agentId}`;
+  const attemptRunsOf = (runs) => reviewPhaseRuns(runs).filter((r) => !laneUnavailable(agentById.get(r.agent_id)));
+  // A reviewer off every lane in `lanes`, or null.
+  const chooseOffLanes = (lanes, projectedNow, trace) => {
+    const agents = Object.fromEntries(Object.entries(cfg.AGENTS || {}).map(([n, a]) => [n,
+      a && lanes.has(a.laneId || `agent:${a.id}`) ? { ...a, available: false, availabilityReason: 'review-failed-on-this-lane' } : a]));
+    return chooseReviewAgent({ ...cfg, AGENTS: agents }, reviewInflight, projectedNow, blockedRuntimes, { perAgentCycle, maxPerAgent }, trace);
+  };
 
   // FAIRNESS / ANTI-STARVATION (GH #102): with perCycleReview capped at 1, a
   // single in_review ticket that can never actually RESOLVE out of in_review
@@ -941,12 +958,54 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
       // PANT-1025: the last run hit a provider limit — wait out the reset rather
       // than re-dispatching into an exhausted account every cycle.
       if (quotaHoldUntilMs(runs, now, quotaCooldownMs)) continue;
+      // PANT-1445: the reviewer's lane is out — move the ticket to a reviewer on
+      // a lane that is up (chooseReviewAgent skips unavailable agents), or wait.
+      // Never a rerun into the dead lane, never a give-up.
+      const assigneeAgent = cfg.AGENTS[idToName[i.assignee_id]];
+      if (laneUnavailable(assigneeAgent)) {
+        if (actions.length >= maxTotal) continue;
+        const trace = {};
+        const agent = chooseReviewAgent(cfg, reviewInflight, projected, blockedRuntimes, { perAgentCycle, maxPerAgent }, trace);
+        if (!agent) continue;
+        projected[agent] = (projected[agent] || 0) + 1;
+        perAgentCycle[agent] = (perAgentCycle[agent] || 0) + 1;
+        actions.push({
+          identifier: i.identifier, issueId: i.id, projectId: i.project_id, agent, action: 'dispatch-review',
+          reason: 'assignee-lane-unavailable', availabilityReason: assigneeAgent.availabilityReason, candidates: trace.candidates,
+        });
+        continue;
+      }
       // PANT-262: give-up after reviewMaxAttempts review-phase runs, parallel to detectZombies'
       // own give-up path (zombieMaxAttempts). PANT-531: count only review-phase runs
       // (agent_id in reviewAgentIds) — a story with 5+ build iterations must not trigger
       // give-up-review on its very first review dispatch. The give-up action sets the issue
       // blocked + posts a diagnostic comment so a human can investigate (PANT-262 / GitHub #94).
-      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
+      // PANT-1445: runs on a lane that is out don't count, and failures all on one
+      // lane try a reviewer on another lane before giving up.
+      const attempts = attemptRunsOf(runs);
+      if (attempts.length >= reviewMaxAttempts) {
+        const failedLanes = new Set(attempts.map((r) => laneKeyOf(r.agent_id)));
+        if (failedLanes.size === 1) {
+          // No reviewer on any other lane that is up: give up now, as before
+          // (PANT-675). One exists but is busy, or this cycle's budget is spent:
+          // try again next cycle.
+          const otherLaneUp = lane.some((n) => {
+            const a = cfg.AGENTS[n];
+            return a && a.available !== false && !failedLanes.has(a.laneId || `agent:${a.id}`);
+          });
+          const trace = {};
+          const agent = otherLaneUp && actions.length < maxTotal ? chooseOffLanes(failedLanes, projected, trace) : null;
+          if (otherLaneUp && !agent) continue;
+          if (agent) {
+            projected[agent] = (projected[agent] || 0) + 1;
+            perAgentCycle[agent] = (perAgentCycle[agent] || 0) + 1;
+            actions.push({
+              identifier: i.identifier, issueId: i.id, projectId: i.project_id, agent, action: 'dispatch-review',
+              reason: 'review-failed-on-one-lane', failedLane: [...failedLanes][0], candidates: trace.candidates,
+            });
+            continue;
+          }
+        }
         giveUps.push(giveUpReview(i, idToName[i.assignee_id], runs));
         continue;
       }
@@ -964,7 +1023,7 @@ export function selectReviewDispatch(inReviewIssues, runsByIssue, cfg, reviewInf
 
     if (formerReviewIds.has(i.assignee_id)) {
       if (hasActiveRun(runs, now, staleMs)) continue; // let the former reviewer's live run finish
-      if (reviewRunsOf(runs) >= reviewMaxAttempts) {
+      if (attemptRunsOf(runs).length >= reviewMaxAttempts) {
         giveUps.push(giveUpReview(i, `former-review:${i.assignee_id}`, runs));
         continue;
       }
