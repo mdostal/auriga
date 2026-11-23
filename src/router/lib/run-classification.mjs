@@ -68,7 +68,7 @@ export function latestRun(runs = []) {
 // failures are TRANSIENT — they never count toward reviewMaxAttempts or
 // zombieMaxAttempts, and the issue waits out the reset instead of re-firing
 // every cycle (live: PANT-1019 burned 5 review runs in 7 minutes, then gave up).
-const QUOTA_ERROR_RE = /session limit|usage limit|rate[ _-]?limit|quota|out[ _-]of[ _-]credits?|credit balance|too many requests|\b429\b/i;
+const QUOTA_ERROR_RE = /(?:session|usage|weekly|daily|monthly) limit|rate[ _-]?limit|quota|out[ _-]of[ _-]credits?|credit balance|too many requests|\b429\b/i;
 
 // The run's error text, or '' when it has none. Multica's JSON may carry a
 // literal null; an object error is reduced to its message.
