@@ -45,6 +45,9 @@ export function runtimeHealthOptions(caps = {}) {
     minIssues: num(caps.runtimeFailureMinIssues, d.minIssues),
     cooldownMs: num(caps.runtimeFailureCooldownMs, d.cooldownMs),
     maxCooldownMs: num(caps.runtimeFailureMaxCooldownMs, d.maxCooldownMs),
+    // PANT-1445: the same gate per Heimdall lane; laneFailureStreak 0 turns it off.
+    laneStreak: num(caps.laneFailureStreak, d.streak),
+    laneMinIssues: num(caps.laneFailureMinIssues, num(caps.runtimeFailureMinIssues, d.minIssues)),
   };
 }
 
@@ -95,30 +98,94 @@ export function recordRuns(prior, runLists, now = Date.now(), opts = RUNTIME_HEA
   return { runtimes, agentRuntimes };
 }
 
+// The failure streak at the head of newest-first `runs`, or null when it doesn't
+// make a hold now: { streakRuns, identifiers, failedMs, sinceMs, untilMs }.
+function streakHold(runs, now, { streak, minIssues, cooldownMs, maxCooldownMs }) {
+  if (!streak) return null;
+  const streakRuns = [];
+  for (const x of runs) { if (x.ok) break; streakRuns.push(x); }
+  if (streakRuns.length < streak) return null;
+  const identifiers = [...new Set(streakRuns.map((x) => x.identifier))];
+  if (identifiers.length < minIssues) return null;
+  const failedMs = streakRuns[0].ms;
+  const untilMs = failedMs + Math.min(cooldownMs * 2 ** (streakRuns.length - streak), maxCooldownMs);
+  if (untilMs <= now) return null; // cooldown over: let the next run probe it
+  return { streakRuns, identifiers, failedMs, sinceMs: streakRuns[streakRuns.length - 1].ms, untilMs };
+}
+
 // Map runtimeId -> hold for every runtime currently out of dispatch:
 // { runtimeId, streak, sinceMs, failedMs, untilMs, identifiers, agentIds, error }.
 // `sinceMs` is the oldest failure in the streak: it stays put while the streak
 // grows, so a caller can tell a new hold from one it already reported.
 export function runtimeHolds(state, now = Date.now(), opts = RUNTIME_HEALTH_DEFAULTS) {
   const holds = new Map();
-  if (!opts.streak) return holds;
   for (const [runtimeId, r] of Object.entries(state?.runtimes || {})) {
-    const streakRuns = [];
-    for (const x of r.runs || []) { if (x.ok) break; streakRuns.push(x); }
-    if (streakRuns.length < opts.streak) continue;
-    const identifiers = [...new Set(streakRuns.map((x) => x.identifier))];
-    if (identifiers.length < opts.minIssues) continue;
-    const failedMs = streakRuns[0].ms;
-    const cooldown = Math.min(opts.cooldownMs * 2 ** (streakRuns.length - opts.streak), opts.maxCooldownMs);
-    const untilMs = failedMs + cooldown;
-    if (untilMs <= now) continue; // cooldown over: let the next run probe it
+    const h = streakHold(r.runs || [], now, opts);
+    if (!h) continue;
     const agentIds = Object.entries(state.agentRuntimes || {}).filter(([, v]) => v?.runtimeId === runtimeId).map(([a]) => a);
     holds.set(runtimeId, {
-      runtimeId, streak: streakRuns.length, sinceMs: streakRuns[streakRuns.length - 1].ms, failedMs, untilMs,
-      identifiers, agentIds, error: streakRuns[0].error || '',
+      runtimeId, streak: h.streakRuns.length, sinceMs: h.sinceMs, failedMs: h.failedMs, untilMs: h.untilMs,
+      identifiers: h.identifiers, agentIds, error: h.streakRuns[0].error || '',
     });
   }
   return holds;
+}
+
+// ---- lane failure streak (PANT-1445, pantheon-v2#527, 2026-11-23) -----------
+// A runtime hold misses a provider that fails while the runtime is fine: on
+// 2026-11-23 Gemini failed every run from ~10:15 UTC ("opencode exited with
+// error: exit status 1") while the same opencode runtime's other lanes kept
+// succeeding, so the runtime never had a streak, Heimdall still said `gemini`
+// was up, and every finished build went straight to flayr-review-gemini or
+// auriga-review-gemini (3 to 5 failed runs per ticket; PANT-706 was parked
+// blocked). The same streak rule, applied to the runs of all agents on one
+// Heimdall lane (cfg AGENTS[*].laneId), takes the lane out for a cooldown. Built
+// from the run history recordRuns already keeps, so it persists the same way.
+// Returns Map laneId -> { laneId, streak, sinceMs, failedMs, untilMs, identifiers, agentIds, error }.
+export function laneFailureHolds(state, cfg, now = Date.now(), opts = RUNTIME_HEALTH_DEFAULTS) {
+  const holds = new Map();
+  const streak = opts.laneStreak ?? opts.streak;
+  if (!streak) return holds;
+  const laneByAgentId = new Map();
+  for (const agent of Object.values(cfg?.AGENTS || {})) {
+    if (agent?.id && agent.laneId) laneByAgentId.set(agent.id, agent.laneId);
+  }
+  const byLane = new Map();
+  const seen = new Set();
+  for (const r of Object.values(state?.runtimes || {})) {
+    for (const x of r.runs || []) {
+      const laneId = x && laneByAgentId.get(x.agentId);
+      if (!laneId || seen.has(x.id)) continue;
+      seen.add(x.id);
+      if (!byLane.has(laneId)) byLane.set(laneId, []);
+      byLane.get(laneId).push(x);
+    }
+  }
+  const laneOpts = { ...opts, streak, minIssues: opts.laneMinIssues ?? opts.minIssues };
+  for (const [laneId, runs] of byLane) {
+    runs.sort((a, b) => b.ms - a.ms);
+    const h = streakHold(runs, now, laneOpts);
+    if (!h) continue;
+    const agentIds = [...laneByAgentId].filter(([, l]) => l === laneId).map(([a]) => a);
+    holds.set(laneId, {
+      laneId, streak: h.streakRuns.length, sinceMs: h.sinceMs, failedMs: h.failedMs, untilMs: h.untilMs,
+      identifiers: h.identifiers, agentIds, error: h.streakRuns[0].error || '',
+    });
+  }
+  return holds;
+}
+
+// Marks every agent on a held lane unavailable (`auriga:<lane>:` so
+// laneUnavailable() re-routes their tickets). An agent already out keeps its reason.
+export function withLaneFailureHolds(cfg, holds) {
+  if (!holds || !holds.size) return { ...cfg, laneFailureHolds: [] };
+  const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, agent]) => {
+    const h = agent?.laneId ? holds.get(agent.laneId) : null;
+    if (!h || agent.available === false) return [name, agent];
+    const why = `auriga:${h.laneId}:${h.streak} runs failed in a row on the lane (${h.identifiers.join(', ')}) until ${new Date(h.untilMs).toISOString()}`;
+    return [name, { ...agent, available: false, availabilityReason: why }];
+  }));
+  return { ...cfg, AGENTS: agents, laneFailureHolds: [...holds.values()] };
 }
 
 // Marks every agent on a held runtime unavailable. The `auriga:` prefix makes
@@ -143,7 +210,7 @@ export function defaultRuntimeHealthFile(env = process.env) {
   return path.join(path.dirname(defaultLaneStateFile(env)), 'runtime-health.json');
 }
 
-// File shape: { updated_at, runtimes, agentRuntimes, holds: [hold + until/since ISO] }.
+// File shape: { updated_at, runtimes, agentRuntimes, holds: [hold + until/since ISO], laneHolds: [same, per lane] }.
 // `holds` is for readers (the nurse check); the router recomputes them from runs.
 export function createRuntimeHealthStore(file = defaultRuntimeHealthFile()) {
   return {
@@ -153,13 +220,16 @@ export function createRuntimeHealthStore(file = defaultRuntimeHealthFile()) {
         return v && typeof v === 'object' ? v : {};
       } catch { return {}; }
     },
-    write(state, holds = [], now = Date.now()) {
+    write(state, holds = [], now = Date.now(), laneHolds = []) {
       try {
         const body = {
           updated_at: new Date(now).toISOString(),
           runtimes: state.runtimes || {},
           agentRuntimes: state.agentRuntimes || {},
           holds: [...holds].map((h) => ({
+            ...h, since: new Date(h.sinceMs).toISOString(), until: new Date(h.untilMs).toISOString(),
+          })),
+          laneHolds: [...laneHolds].map((h) => ({
             ...h, since: new Date(h.sinceMs).toISOString(), until: new Date(h.untilMs).toISOString(),
           })),
         };

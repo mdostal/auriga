@@ -2605,3 +2605,62 @@ test('PANT-1397: a runtime failure streak takes its agents out, logs runtime_unh
   assert.deepEqual(log2.byEvent('scan').at(-1).runtimesHeld, [RT]);
   assert.deepEqual(calls2.assign.map((c) => c.agentName), [lane[1]]);
 });
+
+// PANT-1445 (pantheon-v2#527, 2026-11-23): Gemini failed every run ("opencode exited
+// with error: exit status 1") while Heimdall still reported the lane up. The reviews
+// held by the Gemini reviewer must move to a reviewer on another lane, the lane is
+// logged out once, and nothing is parked blocked.
+test('PANT-1445: a lane failure streak moves its reviews to another lane and blocks nothing', async () => {
+  const name = 'pant1445-gemini-proj';
+  const GEM_ID = '4912c5e8-9275-493b-a465-c30ffd7ebac3';
+  const fixtureCfg = {
+    ...withFixtureLanes({ [name]: ['auriga-review'] }),
+    AGENTS: {
+      ...cfg.AGENTS,
+      'auriga-review': { ...cfg.AGENTS['auriga-review'], maxInflight: 3 },
+      'auriga-review-gemini': { id: GEM_ID, runtime: 'opencode', maxInflight: 3 },
+    },
+    AGENT_LANES: { 'auriga-review': 'claude@ffevents', 'auriga-review-gemini': 'gemini' },
+    RUNTIME_CAP: { ...cfg.RUNTIME_CAP, 'claude-review': 3 },
+    CAPS: { ...cfg.CAPS, reviewMaxAttempts: 5, perCycleReview: 2 },
+    REVIEW_LANE: ['auriga-review-gemini', 'auriga-review'],
+  };
+  const now = Date.now();
+  const failed = (id, minsAgo) => ({
+    id, agent_id: GEM_ID, runtime_id: 'rt-opencode', status: 'failed', error: 'opencode exited with error: exit status 1',
+    created_at: new Date(now - (minsAgo + 1) * 60_000).toISOString(), started_at: new Date(now - (minsAgo + 1) * 60_000).toISOString(),
+    completed_at: new Date(now - minsAgo * 60_000).toISOString(),
+  });
+  const a = makeIssue({ project_id: name, status: 'in_review', assignee_id: GEM_ID, labels: ['not-a-seed'] });
+  const b = makeIssue({ project_id: name, status: 'in_review', assignee_id: GEM_ID, labels: ['not-a-seed'] });
+  // Another lane on the same opencode runtime is still succeeding: the runtime is fine.
+  const BUILD_ID = cfg.AGENTS['auriga-build'].id;
+  const other = makeIssue({ project_id: name, status: 'in_progress', assignee_id: BUILD_ID, labels: ['not-a-seed'] });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([a, b, other], fixtureCfg.AGENTS);
+  spawn.reportRouteOutcome = async () => {};
+  runsByIdentifier[a.identifier] = [failed('g1', 6), failed('g2', 4)];
+  runsByIdentifier[b.identifier] = [failed('g3', 2)];
+  runsByIdentifier[other.identifier] = [{
+    id: 'x1', agent_id: BUILD_ID, runtime_id: 'rt-opencode', status: 'running',
+    created_at: new Date(now - 60_000).toISOString(), started_at: new Date(now - 60_000).toISOString(),
+  }, {
+    id: 'x0', agent_id: BUILD_ID, runtime_id: 'rt-opencode', status: 'completed',
+    created_at: new Date(now - 3 * 60_000).toISOString(), started_at: new Date(now - 3 * 60_000).toISOString(),
+    completed_at: new Date(now - 60_000).toISOString(),
+  }];
+  const readLaneState = async () => ({ lanes: [{ lane_id: 'gemini', status: 'up' }, { lane_id: 'claude@ffevents', status: 'up' }], error: null });
+  const log = createLogSink();
+
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState, now });
+
+  const seen = log.byEvent('lane_unhealthy');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].lane, 'gemini');
+  assert.deepEqual(log.byEvent('runtime_unhealthy'), [], 'the runtime still serves other lanes');
+  assert.deepEqual(calls.assign.filter((c) => c.identifier !== other.identifier).map((c) => [c.identifier, c.agentName]).sort(),
+    [[a.identifier, 'auriga-review'], [b.identifier, 'auriga-review']].sort());
+  assert.ok(log.byEvent('review').every((e) => e.reason === 'assignee-lane-unavailable'));
+  assert.equal(calls.rerun.filter((r) => r.agentName === 'auriga-review-gemini').length, 0, 'no rerun into the dead lane');
+  assert.equal(log.byEvent('review_give_up').length, 0);
+  assert.equal(calls.status.filter((s) => s.status === 'blocked').length, 0, 'a lane failure never blocks a ticket');
+});

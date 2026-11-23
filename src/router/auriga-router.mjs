@@ -31,7 +31,7 @@ import {
   createDecisionStore, createObservedLimitStore, defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, observedLaneLimits, readLaneState,
   withLaneState, withObservedLaneLimits,
 } from './lib/lane-state.mjs';
-import { createRuntimeHealthStore, recordRuns, runtimeHealthOptions, runtimeHolds, withRuntimeHolds } from './lib/runtime-health.mjs';
+import { createRuntimeHealthStore, laneFailureHolds, recordRuns, runtimeHealthOptions, runtimeHolds, withLaneFailureHolds, withRuntimeHolds } from './lib/runtime-health.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -674,17 +674,33 @@ async function runCycle(opts, state) {
   const healthStore = opts.runtimeHealthStore;
   let healthState = null;
   let healthReported = null;
+  // PANT-1445 (pantheon-v2#527): the same streak per Heimdall lane, for a provider
+  // failing on a runtime whose other lanes still succeed (Gemini, 2026-11-23).
   const applyRuntimeHealth = (runLists) => {
-    if (!healthOpts.streak) return;
+    if (!healthOpts.streak && !healthOpts.laneStreak) return;
     try {
       if (!healthState) {
         healthState = healthStore ? healthStore.read() : {};
-        healthReported = new Set((healthState.holds || []).map((h) => `${h.runtimeId}@${h.sinceMs}`));
+        healthReported = new Set([
+          ...(healthState.holds || []).map((h) => `${h.runtimeId}@${h.sinceMs}`),
+          ...(healthState.laneHolds || []).map((h) => `lane:${h.laneId}@${h.sinceMs}`),
+        ]);
       }
       healthState = recordRuns(healthState, runLists, now, healthOpts);
       const holds = runtimeHolds(healthState, now, healthOpts);
-      if (healthStore && !dryRun) healthStore.write(healthState, holds.values(), now);
+      const laneHolds = laneFailureHolds(healthState, cfgImpl, now, healthOpts);
+      if (healthStore && !dryRun) healthStore.write(healthState, holds.values(), now, laneHolds.values());
       Object.assign(cfgImpl, withRuntimeHolds(cfgImpl, holds));
+      Object.assign(cfgImpl, withLaneFailureHolds(cfgImpl, laneHolds));
+      for (const h of laneHolds.values()) {
+        const key = `lane:${h.laneId}@${h.sinceMs}`;
+        if (healthReported.has(key)) continue;
+        healthReported.add(key);
+        logImpl('lane_unhealthy', {
+          lane: h.laneId, streak: h.streak, identifiers: h.identifiers, agent_ids: h.agentIds,
+          since: new Date(h.sinceMs).toISOString(), until: new Date(h.untilMs).toISOString(), error: h.error,
+        });
+      }
       for (const h of holds.values()) {
         const key = `${h.runtimeId}@${h.sinceMs}`;
         if (healthReported.has(key)) continue;
@@ -726,6 +742,8 @@ async function runCycle(opts, state) {
     lanesLimitObserved: (cfgImpl.observedLaneLimits || []).map((l) => l.laneId),
     // PANT-1397: runtimes this cycle took out on a failure streak.
     runtimesHeld: (cfgImpl.runtimeHolds || []).map((h) => h.runtimeId),
+    // PANT-1445: lanes this cycle took out on a failure streak (not a provider limit).
+    lanesFailing: (cfgImpl.laneFailureHolds || []).map((h) => h.laneId),
   });
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
