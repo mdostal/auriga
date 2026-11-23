@@ -362,6 +362,26 @@ configured), `lane_state_age_s` and `lane_state_fetched_at`. The `start` /
 agent->lane map; 0 means nothing is gated) and `build` (a hash of
 `auriga-router.mjs` + `lib/lane-state.mjs`), so the running code can be checked
 against a commit.
+Auriga also takes a lane out on its own evidence (PANT-1445). When the latest
+started run on a lane failed on a provider limit (`session`/`usage`/`weekly`
+limit, quota, credit, 429; a per-model limit such as "Opus limit" does not
+count), every agent on that lane is unavailable until the reset in the error
+text (e.g. `resets Nov 24, 5am (UTC)`), or `redispatchCooldownMs` when it gives
+none. The reason reads `auriga:<lane>:provider limit observed on <ticket> until
+<time>`, and it gates exactly like a Heimdall one: new work goes to the next
+agent in the list, an assigned `todo` is unassigned (`assigned_idle_unassign`)
+and an `in_progress` ticket with no live run is reassigned (`zombie`, reason
+`assignee-lane-unavailable`). A run that starts later on the lane clears it.
+Each new limit logs `lane_limit_observed` once and is reported to Heimdall as a
+`failure` outcome carrying the error, so Heimdall marks the lane too; `scan`
+lists `lanesLimitObserved`. Limits are kept across `--once` processes in
+`AURIGA_OBSERVED_LIMITS_FILE` (default `observed-lane-limits.json` next to the
+lane-state file), since the limited ticket's runs stop being fetched once it is
+re-routed.
+
+Heimdall decision ids live in `AURIGA_DECISIONS_FILE` (default
+`heimdall-decisions.json`, same directory, entries expire after 14 days), so the
+outcome of a ticket assigned in one `--once` process can be reported by a later one.
 The executed lane is recorded as `executed_lane`. Because the current outcome
 API credits its immutable selected lane, Auriga reports an outcome only when
 that selection matches the mapped executor. A mismatch emits
