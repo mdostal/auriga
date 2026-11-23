@@ -110,3 +110,52 @@ test('detectZombies: quota failures do not count toward zombieMaxAttempts and ho
   assert.equal(after.length, 1);
   assert.equal(after[0].action, 'rerun');
 });
+
+// PANT-1238 (GH #277): the provider has three names for one limit, and the
+// regex enumerated period words, so "weekly" and "5-hour" fell through and the
+// assigned_idle pass re-dispatched into the wall once per cycle. These rows are
+// the real ones from agent_task_queue on hive (failure_reason agent_error.unknown
+// on every Claude row, so the text is the only evidence); they mirror
+// core/runners/provider-limit.fixtures.ts in pantheon-v2.
+const REAL_LIMIT_ROWS = {
+  CLAUDE_SESSION_LIMIT: "You've hit your session limit · resets 2:20am (UTC)",
+  CLAUDE_WEEKLY_LIMIT: "You've hit your weekly limit · resets Oct 23, 7pm (UTC)",
+  CLAUDE_FIVE_HOUR_LIMIT: "You've hit your 5-hour limit · resets 12am (UTC)",
+};
+
+test('PANT-1238: every real provider-limit wording is a quota failure', () => {
+  for (const [name, error] of Object.entries(REAL_LIMIT_ROWS)) {
+    assert.equal(isQuotaFailure(failedRun('RV', NOW, error), NOW), true, name);
+  }
+});
+
+test('PANT-1238: the sentence shape covers wordings not seen yet', () => {
+  for (const error of [
+    "You've hit your 7-hour limit · resets 3am (UTC)",
+    "You've hit your fortnightly limit",
+    "You've hit your organization limit · resets 9pm (UTC)",
+    "You've hit your 5 hour limit",
+    'Codex: you have hit your hourly limit',
+  ]) {
+    assert.equal(isQuotaFailure(failedRun('RV', NOW, error), NOW), true, error);
+  }
+});
+
+test('PANT-1238: ordinary work failures that merely say "limit" are not quota failures', () => {
+  for (const error of [
+    'TypeError: limit is not a function',
+    'test "respects the page limit" failed: expected 20, got 21',
+    'exceeded the maximum line-length limit (120) in src/a.ts',
+  ]) {
+    assert.equal(isQuotaFailure(failedRun('RV', NOW, error), NOW), false, error);
+  }
+});
+
+test('PANT-1238: the live 5-hour storm holds until the stated midnight reset, not a cooldown', () => {
+  // 23:59:11Z on 2026-10-30, the last failure of the storm; "resets 12am" rolls to the next day.
+  const at = Date.parse('2026-10-30T23:59:10Z');
+  const run = failedRun('AB', at, REAL_LIMIT_ROWS.CLAUDE_FIVE_HOUR_LIMIT);
+  assert.equal(quotaResetAtMs(run), Date.parse('2026-10-31T00:00:00Z'));
+  assert.equal(quotaHoldUntilMs([run], at + 2000), Date.parse('2026-10-31T00:00:00Z'));
+  assert.equal(countedRuns([run], at + 2000).length, 0);
+});

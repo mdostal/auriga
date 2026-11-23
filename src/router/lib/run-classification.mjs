@@ -68,7 +68,21 @@ export function latestRun(runs = []) {
 // failures are TRANSIENT — they never count toward reviewMaxAttempts or
 // zombieMaxAttempts, and the issue waits out the reset instead of re-firing
 // every cycle (live: PANT-1019 burned 5 review runs in 7 minutes, then gave up).
-const QUOTA_ERROR_RE = /(?:session|usage|weekly|daily|monthly) limit|rate[ _-]?limit|quota|out[ _-]of[ _-]credits?|credit balance|too many requests|\b429\b/i;
+//
+// PANT-1238 (GH #277): match the SENTENCE SHAPE, not the period word. Claude has
+// printed three names for one condition: "session limit", "weekly limit", and
+// on 2026-10-30 "You've hit your 5-hour limit · resets 12am (UTC)". "5-hour" is
+// a duration, not a period word, so the enumerated list missed it and the
+// assigned_idle pass re-dispatched into the wall once per cycle (77s beat
+// against cycleMs 75000). Every Claude and Codex limit message observed says
+// "You've hit your ... limit", so the first alternative covers a fourth name.
+// The word list stays for messages without that sentence (a bare "rate limit",
+// a 429). Kept identical to PROVIDER_LIMIT_RE in pantheon-v2's
+// core/runners/provider-limit.ts so the two sides agree on what a limit is.
+// A model-scoped limit ("You've hit your Opus limit") matches here on purpose:
+// the ticket still waits out the reset; lane-state.mjs keeps it from taking the
+// whole lane out.
+const QUOTA_ERROR_RE = /hit your[\w ,-]{0,40}limit|(?:session|usage|weekly|daily|monthly|hourly|rate|\d+[ _-]?hour)[ _-]?limit|quota|out[ _-]of[ _-]credits?|credit balance|too many requests|\b429\b/i;
 
 // The run's error text, or '' when it has none. Multica's JSON may carry a
 // literal null; an object error is reduced to its message.
