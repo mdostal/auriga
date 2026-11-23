@@ -2466,3 +2466,89 @@ test('PANT-1278: a changes-requested hand-back assigned straight to a builder on
   assert.ok(assigned.length >= 1);
   assert.ok(assigned.every((c) => c.agentName === lane[1]));
 });
+
+// PANT-1445 (GH pantheon-v2#527): a provider limit seen on a run takes the lane out of
+// routing even while Heimdall still reports it up, and ready work moves to the next
+// enabled agent in its list without operator action.
+test('PANT-1445: an observed provider limit re-routes the limited ticket and new work off the lane, reports the failure, and persists', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 2);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'one', [lane[1]]: 'two' } };
+  const now = Date.now();
+  const limited = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent', assignee_id: cfg.AGENTS[lane[0]].id });
+  const ready = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([limited, ready], fixtureCfg.AGENTS);
+  runsByIdentifier[limited.identifier] = [{
+    id: 'r-limit', agent_id: cfg.AGENTS[lane[0]].id, status: 'failed', failure_reason: 'agent_error.unknown',
+    error: "You've hit your usage limit. Upgrade or try again later.",
+    created_at: new Date(now - 3 * 60_000).toISOString(), completed_at: new Date(now - 2 * 60_000).toISOString(),
+  }];
+  const outcomes = [];
+  spawn.reportRouteOutcome = async (identifier, outcome, extra) => { outcomes.push({ identifier, outcome, extra }); };
+  let stored = [];
+  const observedLimitStore = { read: () => stored, write: (v) => { stored = v; } };
+  const readLaneState = async () => ({ lanes: [{ lane_id: 'one', status: 'up' }, { lane_id: 'two', status: 'up' }], error: null });
+  const log = createLogSink();
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState, observedLimitStore, now });
+
+  const observed = log.byEvent('lane_limit_observed');
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].lane, 'one');
+  assert.equal(observed[0].identifier, limited.identifier);
+  assert.deepEqual(log.byEvent('scan').at(-1).lanesLimitObserved, ['one']);
+  assert.deepEqual(outcomes.map((o) => [o.identifier, o.outcome, o.extra.executed_lane]), [[limited.identifier, 'failure', 'one']]);
+  assert.match(outcomes[0].extra.error.message, /usage limit/);
+  assert.deepEqual(stored.map((l) => l.laneId), ['one']);
+
+  // The limited ticket is taken off the lane, with the reason on the record.
+  const unassigned = log.byEvent('assigned_idle_unassign').find((e) => e.identifier === limited.identifier);
+  assert.ok(unassigned, 'unassigns the ticket stuck on the limited lane');
+  assert.match(unassigned.availability_reason, /^auriga:one:provider limit observed on /);
+  // New ready work goes to the next agent in the list.
+  const readyAssigns = calls.assign.filter((c) => c.identifier === ready.identifier);
+  assert.deepEqual(readyAssigns.map((c) => c.agentName), [lane[1]]);
+  const decision = log.byEvent('decision').find((d) => d.identifier === ready.identifier);
+  assert.ok(decision);
+
+  // Next cycle: the limited ticket is unassigned, so its runs are no longer fetched;
+  // the stored limit still keeps it off lane one. Nothing is re-reported.
+  const log2 = createLogSink();
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log: log2, sleep: NOOP_SLEEP, readLaneState, observedLimitStore, now: now + 75_000 });
+  const limitedAssigns = calls.assign.filter((c) => c.identifier === limited.identifier);
+  assert.ok(limitedAssigns.length >= 1, 'the limited ticket is re-routed');
+  assert.ok(limitedAssigns.every((c) => c.agentName === lane[1]), `never back to the limited lane: ${JSON.stringify(limitedAssigns)}`);
+  assert.equal(log2.byEvent('lane_limit_observed').length, 0);
+  assert.equal(outcomes.length, 1);
+  assert.deepEqual(log2.byEvent('scan').at(-1).lanesLimitObserved, ['one']);
+});
+
+test('PANT-1445: an in_progress ticket whose assignee lane hit a limit is reassigned to the next agent; a model-scoped limit leaves the lane in', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 2);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'one', [lane[1]]: 'two' } };
+  const readLaneState = async () => ({ lanes: [{ lane_id: 'one', status: 'up' }, { lane_id: 'two', status: 'up' }], error: null });
+  for (const error of ["You've hit your weekly limit · resets Nov 30, 5am (UTC)", "You've hit your Opus limit · resets 11pm (UTC)"]) {
+    const now = Date.now();
+    const stuck = makeIssue({ project_id: project, status: 'in_progress', parent_issue_id: 'decomposed-parent', assignee_id: cfg.AGENTS[lane[0]].id });
+    const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([stuck], fixtureCfg.AGENTS);
+    spawn.reportRouteOutcome = async () => {};
+    runsByIdentifier[stuck.identifier] = [{
+      id: 'r1', agent_id: cfg.AGENTS[lane[0]].id, status: 'failed', failure_reason: 'agent_error.unknown', error,
+      created_at: new Date(now - 3 * 60_000).toISOString(), completed_at: new Date(now - 2 * 60_000).toISOString(),
+    }];
+    const log = createLogSink();
+    await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState, now });
+    if (/Opus/.test(error)) {
+      assert.equal(log.byEvent('lane_limit_observed').length, 0, 'a per-model limit does not take the whole lane out');
+      assert.equal(calls.assign.some((c) => c.agentName === lane[1]), false);
+    } else {
+      const z = log.byEvent('zombie').find((e) => e.identifier === stuck.identifier);
+      assert.ok(z, `zombie pass handles it: ${JSON.stringify(log.byEvent('zombie_skip'))}`);
+      assert.equal(z.reason, 'assignee-lane-unavailable');
+      assert.deepEqual(calls.assign.filter((c) => c.identifier === stuck.identifier).map((c) => c.agentName), [lane[1]]);
+      // The zombie assign force-enqueues on the NEW assignee (assign, then rerun).
+      assert.equal(calls.rerun.filter((c) => c.identifier === stuck.identifier).length, 1);
+      assert.equal(stuck.assignee_id, cfg.AGENTS[lane[1]].id);
+    }
+  }
+});
