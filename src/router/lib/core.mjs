@@ -50,6 +50,14 @@ export { isSmokeScratch, smokeScratchReason, isHumanTodo, isAgentParked, isSeedB
 
 // Why an issue was routed to the human queue — 'label' or 'waiting_on'.
 // Callers should only call this once isHumanTodo(issue, cfg) is true.
+
+// PANT-1278/PANT-1445: is this agent out because its lane is? `heimdall:` reasons
+// come from GET /lanes (lane-state.mjs withLaneState), `auriga:` from a provider
+// limit the router saw on the lane's own runs (withObservedLaneLimits).
+export function laneUnavailable(agent) {
+  return agent?.available === false && /^(heimdall|auriga):/.test(agent.availabilityReason || '');
+}
+
 export function humanTodoReason(issue) {
   const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
   return labels.includes(HUMAN_TODO_LABEL) ? 'label' : 'waiting_on';
@@ -715,6 +723,26 @@ export function detectZombies(inProgressIssues, runsByIssue, cfg, now = Date.now
     // Auriga stops re-actuating and surfaces a clear 'give-up' signal (logged
     // + commented on the issue) instead of silently looping forever. Real
     // termination/actuation stays Hellsing's job once it exists and runs.
+    // PANT-1445: the assignee's lane is out (Heimdall-reported or a limit Auriga saw
+    // on its runs). Waiting out the reset on that account stalls the ticket for up to
+    // a week; re-route it within its lane list instead (no active run, checked above).
+    // The router's assign path picks only available agents, or skips with a reason.
+    const zAssignee = i.assignee_id ? Object.values(cfg.AGENTS).find((a) => a && a.id === i.assignee_id) : null;
+    if (laneUnavailable(zAssignee)) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES?.[i.project_id] || i.project_id,
+        hasAssignee: true,
+        assigneeId: i.assignee_id,
+        isHive,
+        action: 'assign',
+        reason: 'assignee-lane-unavailable',
+        availabilityReason: zAssignee.availabilityReason,
+      });
+      continue;
+    }
     // PANT-1025: a provider quota failure is transient — wait out the reset
     // instead of re-firing every cycle, and never count it as an attempt.
     if (quotaHoldUntilMs(runs, now, cfg.CAPS.redispatchCooldownMs)) continue;
@@ -1473,8 +1501,11 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
     // rerun below is gated off. Once no run is active, unassign it at once (no
     // stale wait) so the build pass re-routes it within its configured list, or
     // holds it with `no_available_lane`. An active run is never touched.
+    // PANT-1445: also when Auriga itself saw the lane hit its limit (`auriga:`), so a
+    // ticket whose run just failed on a limit moves to the next agent in its list
+    // instead of waiting out the reset on the limited account.
     const assignee = Object.values(cfg.AGENTS).find((a) => a && a.id === i.assignee_id);
-    if (assignee?.available === false && assignee.availabilityReason?.startsWith('heimdall:')) {
+    if (laneUnavailable(assignee)) {
       if (!hasActiveRun(runs, now, staleMs, queuedStaleMs)) {
         actions.push({
           identifier: i.identifier,

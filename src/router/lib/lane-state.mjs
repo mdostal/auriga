@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isQueuedNotStarted, isQuotaFailure, quotaResetAtMs, runErrorText, runTsMs } from './run-classification.mjs';
 
 const DEFAULT_AGENT_LANES_FILE = new URL('../config/agent-lanes.json', import.meta.url);
 
@@ -120,3 +121,62 @@ export function withLaneState(cfg, snapshot, now = Date.now()) {
   }));
   return { ...cfg, AGENTS: agents, laneState: snapshot };
 }
+
+// ---- observed lane limits (PANT-1445, pantheon-v2#527) ----------------------
+// Heimdall only knows a lane hit its limit once something tells it. Auriga
+// already fetches the runs of every ticket its agents hold, so a run that failed
+// on a provider limit ("You've hit your weekly limit") is first-hand evidence
+// that the whole lane (one provider account) is out, not just that agent. Until
+// the stated reset (or the cooldown) every agent on that lane is unavailable, so
+// ready work goes to the next agent in its lane list without operator action.
+//
+// Per lane, only the most recent run that actually started counts: a later run
+// that started (or finished) on the lane proves it is serving again. A queued
+// run that never started proves nothing. A limit on one model ("Opus limit")
+// does not cap the account and is left to the per-ticket quota hold.
+const MODEL_SCOPED_LIMIT_RE = /\b(opus|sonnet|haiku|fable)\b[^.\n]{0,40}\blimit\b/i;
+
+// runLists: iterable of [identifier, runs[]]. Returns Map laneId ->
+// { laneId, untilMs, identifier, agentId, error }.
+export function observedLaneLimits(runLists, cfg, now = Date.now(), cooldownMs = 15 * 60 * 1000) {
+  const laneByAgentId = new Map();
+  for (const agent of Object.values(cfg.AGENTS || {})) {
+    if (agent?.id && agent.laneId) laneByAgentId.set(agent.id, agent.laneId);
+  }
+  const latest = new Map();
+  for (const [identifier, runs] of runLists) {
+    for (const run of runs || []) {
+      const laneId = laneByAgentId.get(run?.agent_id);
+      if (!laneId || isQueuedNotStarted(run, now)) continue;
+      const ms = runTsMs(run);
+      if (ms == null) continue;
+      const cur = latest.get(laneId);
+      if (!cur || ms > cur.ms) latest.set(laneId, { run, ms, identifier });
+    }
+  }
+  const limits = new Map();
+  for (const [laneId, { run, ms, identifier }] of latest) {
+    if (!isQuotaFailure(run, now)) continue;
+    const error = runErrorText(run) || String(run.failure_reason || '');
+    if (MODEL_SCOPED_LIMIT_RE.test(error)) continue;
+    const untilMs = quotaResetAtMs(run) ?? ms + cooldownMs;
+    if (untilMs <= now) continue;
+    limits.set(laneId, { laneId, untilMs, identifier, agentId: run.agent_id, error: error.slice(0, 200) });
+  }
+  return limits;
+}
+
+// Marks every agent on an observed-limited lane unavailable. The reason starts
+// with `auriga:` (Heimdall's own are `heimdall:`) so decision records say which
+// source took the lane out, and why. An agent already unavailable keeps its reason.
+export function withObservedLaneLimits(cfg, limits) {
+  if (!limits || !limits.size) return { ...cfg, observedLaneLimits: [] };
+  const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, agent]) => {
+    const limit = agent?.laneId ? limits.get(agent.laneId) : null;
+    if (!limit || agent.available === false) return [name, agent];
+    const why = `auriga:${limit.laneId}:provider limit observed on ${limit.identifier} until ${new Date(limit.untilMs).toISOString()}`;
+    return [name, { ...agent, available: false, availabilityReason: why }];
+  }));
+  return { ...cfg, AGENTS: agents, observedLaneLimits: [...limits.values()] };
+}
+

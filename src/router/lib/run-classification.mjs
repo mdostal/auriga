@@ -91,7 +91,7 @@ export function countedRuns(runs = [], now = Date.now()) {
   return runs.filter((r) => !isQuotaFailure(r, now));
 }
 
-function runTsMs(run) {
+export function runTsMs(run) {
   const ts = run.completed_at || run.started_at || run.dispatched_at || run.created_at;
   const ms = ts ? new Date(ts).getTime() : NaN;
   return Number.isFinite(ms) ? ms : null;
@@ -100,10 +100,24 @@ function runTsMs(run) {
 // When the provider said the limit resets, as epoch ms, or null. Only the UTC
 // form Claude prints is parsed ("resets 9:20pm (UTC)"): the first such clock
 // time after the failure. Any other wording falls back to the cooldown.
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
 export function quotaResetAtMs(run) {
-  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i.exec(runErrorText(run));
   const failedAt = runTsMs(run);
-  if (!m || failedAt == null) return null;
+  if (failedAt == null) return null;
+  // PANT-1445: a weekly limit names the day too ("resets Nov 24, 5am (UTC)").
+  const d = /resets\s+([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i.exec(runErrorText(run));
+  const month = d ? MONTHS.indexOf(d[1].toLowerCase()) : -1;
+  if (month >= 0) {
+    const hour = (Number(d[3]) % 12) + (d[5].toLowerCase() === 'pm' ? 12 : 0);
+    const year = new Date(failedAt).getUTCFullYear();
+    let at = Date.UTC(year, month, Number(d[2]), hour, Number(d[4] || 0));
+    if (at <= failedAt) at = Date.UTC(year + 1, month, Number(d[2]), hour, Number(d[4] || 0));
+    // Limits reset within a week; anything further is a misread, not a hold.
+    return at - failedAt <= 8 * 24 * 3600 * 1000 ? at : null;
+  }
+  const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i.exec(runErrorText(run));
+  if (!m) return null;
   let hour = Number(m[1]) % 12;
   if (m[3].toLowerCase() === 'pm') hour += 12;
   const reset = new Date(failedAt);
