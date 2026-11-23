@@ -2552,3 +2552,56 @@ test('PANT-1445: an in_progress ticket whose assignee lane hit a limit is reassi
     }
   }
 });
+
+// PANT-1397: a runtime that failed its newest runs across tickets (dragon's opencode
+// runtime, 2026-11-17: tmpfs full, every run "exit status 1") is held out of dispatch
+// even while Heimdall reports its lanes up; ready work goes to the next agent.
+test('PANT-1397: a runtime failure streak takes its agents out, logs runtime_unhealthy once, and persists', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 2);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, AGENT_LANES: { [lane[0]]: 'one', [lane[1]]: 'two' } };
+  const now = Date.now();
+  const RT = 'rt-opencode-dragon';
+  const brokenId = cfg.AGENTS[lane[0]].id;
+  const a = makeIssue({ project_id: project, status: 'in_progress', parent_issue_id: 'decomposed-parent', assignee_id: brokenId });
+  const b = makeIssue({ project_id: project, status: 'in_progress', parent_issue_id: 'decomposed-parent', assignee_id: brokenId });
+  const ready = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent' });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([a, b, ready], fixtureCfg.AGENTS);
+  spawn.reportRouteOutcome = async () => {};
+  const failedRun = (id, minsAgo) => ({
+    id, agent_id: brokenId, runtime_id: RT, status: 'failed', error: 'opencode exited with error: exit status 1',
+    created_at: new Date(now - (minsAgo + 1) * 60_000).toISOString(), started_at: new Date(now - (minsAgo + 1) * 60_000).toISOString(),
+    completed_at: new Date(now - minsAgo * 60_000).toISOString(),
+  });
+  runsByIdentifier[a.identifier] = [failedRun('ra1', 6), failedRun('ra2', 4)];
+  runsByIdentifier[b.identifier] = [failedRun('rb1', 2)];
+  let stored = {};
+  const runtimeHealthStore = { read: () => stored, write: (state, holds) => { stored = { ...state, holds: [...holds] }; } };
+  const readLaneState = async () => ({ lanes: [{ lane_id: 'one', status: 'up' }, { lane_id: 'two', status: 'up' }], error: null });
+  const log = createLogSink();
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, readLaneState, runtimeHealthStore, now });
+
+  const seen = log.byEvent('runtime_unhealthy');
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].runtime_id, RT);
+  assert.equal(seen[0].streak, 3);
+  assert.deepEqual(seen[0].agent_ids, [brokenId]);
+  assert.deepEqual(log.byEvent('scan').at(-1).runtimesHeld, [RT]);
+  assert.deepEqual(stored.holds.map((h) => h.runtimeId), [RT]);
+  // The stuck tickets on the broken runtime are moved to the next agent (zombie pass).
+  assert.deepEqual(calls.assign.filter((c) => c.identifier !== ready.identifier).map((c) => [c.identifier, c.agentName]),
+    [[a.identifier, lane[1]], [b.identifier, lane[1]]]);
+  const z = log.byEvent('zombie').find((e) => e.identifier === a.identifier);
+  assert.equal(z?.reason, 'assignee-lane-unavailable');
+  assert.equal(calls.assign.some((c) => c.agentName === lane[0]), false, 'nothing goes to the broken runtime');
+
+  // Next cycle: a and b are off the board (blocked), the stored history still holds it; not re-logged.
+  a.status = 'blocked'; b.status = 'blocked';
+  const ready2 = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent' });
+  const { backlog: backlog2, spawn: spawn2, calls: calls2 } = createMockAdapters([ready2], fixtureCfg.AGENTS);
+  const log2 = createLogSink();
+  await cycle({ backlog: backlog2, spawn: spawn2, cfg: fixtureCfg, log: log2, sleep: NOOP_SLEEP, readLaneState, runtimeHealthStore, now: now + 75_000 });
+  assert.equal(log2.byEvent('runtime_unhealthy').length, 0);
+  assert.deepEqual(log2.byEvent('scan').at(-1).runtimesHeld, [RT]);
+  assert.deepEqual(calls2.assign.map((c) => c.agentName), [lane[1]]);
+});

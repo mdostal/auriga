@@ -379,6 +379,30 @@ lists `lanesLimitObserved`. Limits are kept across `--once` processes in
 lane-state file), since the limited ticket's runs stop being fetched once it is
 re-routed.
 
+Auriga also takes a whole Multica runtime out when it keeps failing (PANT-1397).
+A runtime is one daemon/CLI install, so when it breaks (dragon's opencode
+runtime, 2026-11-17/18: `/home/node` tmpfs full, every run "exit status 1")
+every agent on it fails whatever the ticket, while Heimdall still reports the
+providers up. Auriga watches the runs it already fetches (in_progress, assigned
+todo and in_review tickets) per physical `runtime_id`. When the newest
+`runtimeFailureStreak` (default 3) finished runs on a runtime all failed, across
+at least `runtimeFailureMinIssues` (default 2) tickets, every agent whose newest
+run was on that runtime is unavailable with reason `auriga:runtime-<id>:<n> runs
+failed in a row (<tickets>) until <time>`. It gates exactly like a lane outage
+(next agent, `assigned_idle_unassign`, `zombie`). Provider-limit failures and
+cancels with no error don't count; a successful run clears the streak. The hold
+lasts `runtimeFailureCooldownMs` (default 30 min) from the newest failure; then
+the runtime is let back in and its next run is the probe. Each further failure
+doubles the hold, up to `runtimeFailureMaxCooldownMs` (default 4 h). Caps are
+never touched, so a hold always ends on its own. `runtimeFailureStreak: 0` in
+CAPS turns the gate off. Each new hold logs `runtime_unhealthy` once (runtime,
+streak, tickets, agents, error); `scan` lists `runtimesHeld`. History and the
+current holds live in `AURIGA_RUNTIME_HEALTH_FILE` (default
+`runtime-health.json` next to the lane-state file), which pantheon-v2's nurse
+check `bin/runtime-health-check.sh` reads to tell the nurse. To release a
+runtime by hand once it is fixed, delete that file (`/var/lib/auriga/runtime-health.json`
+in the pilot container).
+
 Heimdall decision ids live in `AURIGA_DECISIONS_FILE` (default
 `heimdall-decisions.json`, same directory, entries expire after 14 days), so the
 outcome of a ticket assigned in one `--once` process can be reported by a later one.

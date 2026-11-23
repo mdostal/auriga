@@ -31,6 +31,7 @@ import {
   createDecisionStore, createObservedLimitStore, defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, observedLaneLimits, readLaneState,
   withLaneState, withObservedLaneLimits,
 } from './lib/lane-state.mjs';
+import { createRuntimeHealthStore, recordRuns, runtimeHealthOptions, runtimeHolds, withRuntimeHolds } from './lib/runtime-health.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -662,6 +663,40 @@ async function runCycle(opts, state) {
       }
     }
   }
+  // PANT-1397: a runtime whose newest runs all failed (not on a provider limit)
+  // across tickets is broken, whatever Heimdall says about its lanes (dragon's
+  // opencode runtime, 2026-11-17: tmpfs full, every run exit 1). Its agents are
+  // out until the cooldown passes; the next run after that is the probe. Run
+  // again below with the in_review runs, which is where the reviewers' runs are.
+  // opts.runtimeHealthStore ({ read, write }) keeps the run history across --once
+  // cycles and tells the nurse (bin/runtime-health-check.sh in pantheon-v2).
+  const healthOpts = runtimeHealthOptions(cfgImpl.CAPS);
+  const healthStore = opts.runtimeHealthStore;
+  let healthState = null;
+  let healthReported = null;
+  const applyRuntimeHealth = (runLists) => {
+    if (!healthOpts.streak) return;
+    try {
+      if (!healthState) {
+        healthState = healthStore ? healthStore.read() : {};
+        healthReported = new Set((healthState.holds || []).map((h) => `${h.runtimeId}@${h.sinceMs}`));
+      }
+      healthState = recordRuns(healthState, runLists, now, healthOpts);
+      const holds = runtimeHolds(healthState, now, healthOpts);
+      if (healthStore && !dryRun) healthStore.write(healthState, holds.values(), now);
+      Object.assign(cfgImpl, withRuntimeHolds(cfgImpl, holds));
+      for (const h of holds.values()) {
+        const key = `${h.runtimeId}@${h.sinceMs}`;
+        if (healthReported.has(key)) continue;
+        healthReported.add(key);
+        logImpl('runtime_unhealthy', {
+          runtime_id: h.runtimeId, streak: h.streak, identifiers: h.identifiers, agent_ids: h.agentIds,
+          since: new Date(h.sinceMs).toISOString(), until: new Date(h.untilMs).toISOString(), error: h.error,
+        });
+      }
+    } catch (e) { logImpl('runtime_health_error', { error: e.message }); }
+  };
+  applyRuntimeHealth([...Object.entries(runsByIssue), ...Object.entries(todoRunsByIssue)]);
   const inflight = coreImpl.addCounts(runningInflight, queuedHeld);
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the raw assigned-todo backlog. If this climbs
@@ -689,6 +724,8 @@ async function runCycle(opts, state) {
     ...laneStateFields(cfgImpl.laneState),
     // PANT-1445: lanes this cycle took out on a provider limit seen on their runs.
     lanesLimitObserved: (cfgImpl.observedLaneLimits || []).map((l) => l.laneId),
+    // PANT-1397: runtimes this cycle took out on a failure streak.
+    runtimesHeld: (cfgImpl.runtimeHolds || []).map((h) => h.runtimeId),
   });
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
@@ -1028,6 +1065,7 @@ async function runCycle(opts, state) {
   // selectReviewDispatch) so a story under review is not re-dispatched.
   const inReviewRuns = {};
   for (const i of inReview) inReviewRuns[i.identifier] = backlog.getIssueRuns(i.identifier);
+  applyRuntimeHealth(Object.entries(inReviewRuns)); // PANT-1397: reviewers' runs count too
 
   // inReview is already PROJECT_IDS-scoped at its own definition above (2026-09-13
   // fix — a firefly-events instance was confirmed live trying to dispatch review
@@ -1469,10 +1507,12 @@ async function main() {
   const skipLimiter = createSkipLimiter();
   // PANT-1445: provider limits seen on runs outlive each --once process.
   const observedLimitStore = createObservedLimitStore();
+  // PANT-1397: runtime failure streaks outlive each --once process too.
+  const runtimeHealthStore = createRuntimeHealthStore();
   do {
     try {
       const remaining = MAX_ASSIGN === Infinity ? Infinity : Math.max(0, MAX_ASSIGN - totalAssigned);
-      const result = await cycle({ cfg: liveCfg, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter, observedLimitStore });
+      const result = await cycle({ cfg: liveCfg, maxAssign: remaining, heartbeatFile: HEARTBEAT_FILE, skipLimiter, observedLimitStore, runtimeHealthStore });
       totalAssigned += result.assigned;
     } catch (e) {
       log('cycle_error', { error: e.message, stack: (e.stack || '').split('\n').slice(0, 3).join(' | ') });
@@ -1509,6 +1549,8 @@ async function mainMultiTenant() {
   const skipLimiters = new Map();
   // PANT-1445: lanes are provider accounts, so tenants share observed limits.
   const observedLimitStore = createObservedLimitStore();
+  // PANT-1397: runtimes are shared by every tenant's agents, so is their health.
+  const runtimeHealthStore = createRuntimeHealthStore();
   do {
     let tenants = [];
     try {
@@ -1531,7 +1573,7 @@ async function mainMultiTenant() {
           if (!skipLimiters.has(tenantId)) skipLimiters.set(tenantId, createSkipLimiter());
           const result = await cycle({
             backlog, spawn, cfg: tenantCfg, log: tenantLog(tenantId), tenantId, dryRun: DRY, maxAssign: remaining,
-            heartbeatFile: HEARTBEAT_FILE, skipLimiter: skipLimiters.get(tenantId), observedLimitStore,
+            heartbeatFile: HEARTBEAT_FILE, skipLimiter: skipLimiters.get(tenantId), observedLimitStore, runtimeHealthStore,
           });
           totalAssigned += result.assigned;
           log('tenant_cycle_done', { tenant_id: tenantId, todo: result.todo, picked: result.picked, assigned: result.assigned });
