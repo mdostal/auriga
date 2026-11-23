@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadAgentLanesFile, readLaneState, withLaneState } from '../lib/lane-state.mjs';
+import { defaultLaneStateFile, loadAgentLanesFile, readLaneState, withLaneState } from '../lib/lane-state.mjs';
 import { agentIdSet, chooseAgentForProject, detectAssignedIdle } from '../lib/core.mjs';
 import { loadTenantConfigs } from '../lib/tenant-configs.mjs';
 import { dispatchEligible } from '../lib/dispatch-guards.mjs';
@@ -38,14 +38,65 @@ test('effective_enabled takes precedence in either deployment order', () => {
   }
 });
 
-test('outage is bounded, fail open and does not retain previous lane state', async () => {
-  const state = await readLaneState({ fetchImpl: async (_url, options) => {
-    assert.ok(options.signal);
-    throw new Error('connection refused');
-  } });
+function tmpCache() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'lane-cache-')), 'heimdall-lanes.json');
+}
+const ok = (lanes) => async () => ({ ok: true, json: async () => lanes });
+const refused = async (_url, options) => { assert.ok(options.signal, 'the read is bounded'); throw new Error('connection refused'); };
+
+test('PANT-1385: never read successfully -> bounded, fails open, gates nothing', async () => {
+  const cacheFile = tmpCache();
+  const state = await readLaneState({ fetchImpl: refused, cacheFile });
   assert.match(state.error, /connection refused/);
+  assert.equal(state.source, 'none');
+  assert.equal(state.ageMs, null);
   assert.equal(choose(withLaneState(cfg, state)), 'a');
-  assert.equal((await readLaneState({ fetchImpl: async () => ({ ok: true, json: async () => ({}) }) })).lanes.length, 0);
+  const bad = await readLaneState({ fetchImpl: ok({}), cacheFile });
+  assert.equal(bad.lanes.length, 0);
+  assert.equal(fs.existsSync(cacheFile), false, 'an invalid response is never kept');
+});
+
+test('PANT-1385: stale-while-error keeps the last known lane state through an outage, with its age', async () => {
+  const cacheFile = tmpCache();
+  const t0 = Date.parse('2026-11-16T18:00:00Z');
+  const live = await readLaneState({ fetchImpl: ok([{ lane_id: 'account-one', status: 'degraded', reason: 'quota_exceeded' }]), cacheFile, now: t0 });
+  assert.equal(live.source, 'live');
+  assert.equal(choose(withLaneState(cfg, live, t0)), 'b');
+  const stale = await readLaneState({ fetchImpl: refused, cacheFile, now: t0 + 600_000 });
+  assert.equal(stale.source, 'cache');
+  assert.equal(stale.ageMs, 600_000);
+  assert.equal(stale.fetchedAt, '2026-11-16T18:00:00.000Z');
+  assert.match(stale.error, /connection refused/);
+  const c = withLaneState(cfg, stale, t0 + 600_000);
+  assert.equal(choose(c), 'b', 'the degraded lane stays out of dispatch while Heimdall is down');
+  assert.equal(c.AGENTS.a.availabilityReason, 'heimdall:account-one:quota_exceeded (last known state, 600s old; heimdall unreachable)');
+  // A later successful read replaces the cache.
+  await readLaneState({ fetchImpl: ok([{ lane_id: 'account-one', status: 'up' }]), cacheFile, now: t0 + 700_000 });
+  const after = await readLaneState({ fetchImpl: refused, cacheFile, now: t0 + 800_000 });
+  assert.equal(choose(withLaneState(cfg, after, t0 + 800_000)), 'a');
+});
+
+test('PANT-1385: a limited lane with a future reset_at stays unavailable until then, not after', () => {
+  const resetAt = '2026-11-19T21:03:00Z';
+  const snap = { lanes: [{ lane_id: 'account-one', status: 'degraded', reason: 'quota_exceeded', reset_at: resetAt }], error: 'connection refused', source: 'cache', ageMs: 3_600_000 };
+  const before = withLaneState(cfg, snap, Date.parse(resetAt) - 1);
+  assert.equal(before.AGENTS.a.available, false);
+  assert.equal(choose(before), 'b');
+  const after = withLaneState(cfg, snap, Date.parse(resetAt) + 1);
+  assert.equal(after.AGENTS.a.available, true, 'once reset_at has passed the cached limit no longer holds');
+  const oc = { ...snap, lanes: [{ lane_id: 'account-one', status: 'out_of_credit', manual_reset_at: resetAt }] };
+  assert.equal(withLaneState(cfg, oc, Date.parse(resetAt) - 1).AGENTS.a.available, false);
+  assert.equal(withLaneState(cfg, oc, Date.parse(resetAt) + 1).AGENTS.a.available, true);
+  const noReset = { ...snap, lanes: [{ lane_id: 'account-one', status: 'out_of_credit' }] };
+  assert.equal(withLaneState(cfg, noReset, Date.parse(resetAt) + 86_400_000).AGENTS.a.available, false, 'no reset time: stays as last read');
+  // A live read is authoritative: Heimdall still saying degraded past reset_at keeps it out.
+  assert.equal(withLaneState(cfg, { ...snap, error: null, source: 'live', ageMs: 0 }, Date.parse(resetAt) + 1).AGENTS.a.available, false);
+});
+
+test('PANT-1385: defaultLaneStateFile sits next to the heartbeat on the state volume', () => {
+  assert.equal(defaultLaneStateFile({ AURIGA_LANE_STATE_FILE: '/x/y.json' }), '/x/y.json');
+  assert.equal(defaultLaneStateFile({ AURIGA_HEARTBEAT_FILE: '/var/lib/auriga/auriga-router.heartbeat' }), '/var/lib/auriga/heimdall-lanes.json');
+  assert.equal(defaultLaneStateFile({}), path.join(os.tmpdir(), 'auriga-heimdall-lanes.json'));
 });
 
 test('archived agents never become eligible through lane health', () => {
@@ -103,8 +154,8 @@ test('PANT-1278: running work on an unavailable lane is left alone', () => {
   assert.deepEqual(detectAssignedIdle([handBack('T-1', 'C')], runs, c, agentIdSet(c.AGENTS), NOW), []);
 });
 
-test('PANT-1278: a Heimdall outage does not unassign anything', () => {
-  const c = withLaneState(IDLE_CFG, { lanes: [], error: 'connection refused' });
+test('PANT-1278: a Heimdall outage with no last known state does not unassign anything', () => {
+  const c = withLaneState(IDLE_CFG, { lanes: [], error: 'connection refused', source: 'none' });
   assert.deepEqual(detectAssignedIdle([handBack('T-1', 'C')], {}, c, agentIdSet(c.AGENTS), NOW), []);
 });
 

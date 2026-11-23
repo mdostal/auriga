@@ -27,7 +27,7 @@
 // this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
-import { loadAgentLanesFile, readLaneState, withLaneState } from './lib/lane-state.mjs';
+import { defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, readLaneState, withLaneState } from './lib/lane-state.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -39,6 +39,18 @@ import { loadRealTopology, resolveParentBoardConfig, resolveChildBoardConfigs } 
 import { loadExternalConfig } from './lib/config-loader.mjs';
 import { loadTenantConfigs, rotate } from './lib/tenant-configs.mjs';
 import { createCycleCounter, createLogger, defaultHeartbeatFile, DEFAULT_PIDFILE, writeHeartbeat } from './lib/observability.mjs';
+import { createHash } from 'node:crypto';
+
+// PANT-1385: a short hash of the router's own source (this file + the lane gate),
+// logged at start-up and on every `scan`, so the running code can be compared with
+// a commit (`sha256sum` of the two files) instead of trusting a deploy record.
+const BUILD_FINGERPRINT = (() => {
+  try {
+    const h = createHash('sha256');
+    for (const rel of ['./auriga-router.mjs', './lib/lane-state.mjs']) h.update(fs.readFileSync(new URL(rel, import.meta.url)));
+    return h.digest('hex').slice(0, 12);
+  } catch { return null; }
+})();
 
 // Live defaults — constructed once at module load (cheap: a factory closure,
 // no HTTP call happens until a method is actually invoked), exactly
@@ -272,7 +284,19 @@ function recordDecision(dc, { identifier, pass, action, agent = null, runtime = 
     identifier, pass, action, agent: agent ?? null, runtime: rt, lane: laneName, reason,
     candidates: candidates || (agent ? [{ agent, runtime: rt, selected: true }] : []),
     caps: caps || decisionCaps(dc, agent, rt), dryRun: dc.dryRun, error,
-  }), lane_state_error: dc.cfg.laneState?.error ?? null, executed_lane: agent ? dc.cfg.AGENTS[agent]?.laneId ?? null : null });
+  }), ...laneStateFields(dc.cfg.laneState), executed_lane: agent ? dc.cfg.AGENTS[agent]?.laneId ?? null : null });
+}
+
+// PANT-1385: which Heimdall read gated this decision. `live` = this cycle's read;
+// `cache` = Heimdall unreachable, the last successful read (`lane_state_age_s` old)
+// was used; `none` = never read successfully, nothing gated; null = no lane map.
+function laneStateFields(ls) {
+  return {
+    lane_state_error: ls?.error ?? null,
+    lane_state_source: ls?.source ?? null,
+    lane_state_age_s: laneStateAgeS(ls),
+    lane_state_fetched_at: ls?.fetchedAt ?? null,
+  };
 }
 
 // A guard (or no capacity) rejected this issue. Rate-limited to one `skip`
@@ -495,7 +519,7 @@ async function runCycle(opts, state) {
   const backlog = opts.backlog || defaultBacklog;
   const spawn = opts.spawn || defaultSpawn;
   const laneState = opts.readLaneState || Object.keys((opts.cfg || cfg).AGENT_LANES || {}).length
-    ? await (opts.readLaneState || readLaneState)() : { lanes: [], error: null };
+    ? await (opts.readLaneState || readLaneState)() : { lanes: [], error: null, source: null };
   const cfgImpl = withLaneState(opts.cfg || cfg, laneState);
   const coreImpl = opts.core || core;
   const logImpl = opts.log;
@@ -615,6 +639,10 @@ async function runCycle(opts, state) {
     queuedHeld,
     runtimeInflight,
     assignedQueued,
+    // PANT-1385: proves which code and lane map this cycle ran with.
+    build: BUILD_FINGERPRINT,
+    agentLanes: Object.keys(cfgImpl.AGENT_LANES || {}).length,
+    ...laneStateFields(cfgImpl.laneState),
   });
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
@@ -1369,15 +1397,27 @@ function withShippedAgentLanes(base) {
   return { ...base, AGENT_LANES: { ...loadAgentLanesFile(), ...base.AGENT_LANES } };
 }
 
+// PANT-1385: a start-up line that shows the lane gate is actually wired. Live, CD
+// reported three router deploys while the container kept running Oct 19 code, and
+// nothing in the logs could tell. `agentLanes` is the size of the agent->lane map
+// (0 = no gating at all), `build` a hash of the router source that ran.
+function startupLaneInfo(liveCfg) {
+  return {
+    build: BUILD_FINGERPRINT,
+    agentLanes: Object.keys(liveCfg.AGENT_LANES || {}).length,
+    heimdallUrl: process.env.HEIMDALL_URL || 'http://heimdall:4870',
+    laneStateFile: defaultLaneStateFile(),
+  };
+}
+
 async function main() {
   acquireLock();
   process.on('exit', releaseLock);
   process.on('SIGINT', () => { releaseLock(); process.exit(0); });
   process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 
-  log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS });
-
   const liveCfg = withShippedAgentLanes(cfg);
+  log('start', { pid: process.pid, once: ONCE, dry: DRY, maxAssign: MAX_ASSIGN === Infinity ? null : MAX_ASSIGN, caps: cfg.CAPS, ...startupLaneInfo(liveCfg) });
   let totalAssigned = 0;
   // PANT-816: skip decisions are rate-limited across cycles, so the limiter outlives each cycle.
   const skipLimiter = createSkipLimiter();
@@ -1410,9 +1450,8 @@ async function mainMultiTenant() {
   process.on('SIGINT', () => { releaseLock(); process.exit(0); });
   process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
 
-  log('start_multi_tenant', { pid: process.pid, once: ONCE, dry: DRY, pantheonApiUrl: PANTHEON_API_URL });
-
   const liveCfg = withShippedAgentLanes(cfg);
+  log('start_multi_tenant', { pid: process.pid, once: ONCE, dry: DRY, pantheonApiUrl: PANTHEON_API_URL, ...startupLaneInfo(liveCfg) });
   let rotation = 0;
   let iterations = 0;
   let totalAssigned = 0;
