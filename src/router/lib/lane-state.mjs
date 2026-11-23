@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isQueuedNotStarted, isQuotaFailure, quotaResetAtMs, runErrorText, runTsMs } from './run-classification.mjs';
 
 const DEFAULT_AGENT_LANES_FILE = new URL('../config/agent-lanes.json', import.meta.url);
 
@@ -119,4 +120,138 @@ export function withLaneState(cfg, snapshot, now = Date.now()) {
       availabilityReason: why ?? agent.availabilityReason }];
   }));
   return { ...cfg, AGENTS: agents, laneState: snapshot };
+}
+
+// ---- observed lane limits (PANT-1445, pantheon-v2#527) ----------------------
+// Heimdall only knows a lane hit its limit once something tells it. Auriga
+// already fetches the runs of every ticket its agents hold, so a run that failed
+// on a provider limit ("You've hit your weekly limit") is first-hand evidence
+// that the whole lane (one provider account) is out, not just that agent. Until
+// the stated reset (or the cooldown) every agent on that lane is unavailable, so
+// ready work goes to the next agent in its lane list without operator action.
+//
+// Per lane, only the most recent run that actually started counts: a later run
+// that started (or finished) on the lane proves it is serving again. A queued
+// run that never started proves nothing. A limit on one model ("Opus limit")
+// does not cap the account and is left to the per-ticket quota hold.
+const MODEL_SCOPED_LIMIT_RE = /\b(opus|sonnet|haiku|fable)\b[^.\n]{0,40}\blimit\b/i;
+
+// runLists: iterable of [identifier, runs[]]. prior: limits kept from earlier
+// cycles (the ticket whose run hit the limit is usually re-routed, after which
+// its runs are no longer fetched); one stays until its reset passes or a run that
+// started later on the same lane shows the lane serving again.
+// Returns Map laneId -> { laneId, untilMs, failedMs, identifier, agentId, error }.
+export function observedLaneLimits(runLists, cfg, now = Date.now(), cooldownMs = 15 * 60 * 1000, prior = []) {
+  const laneByAgentId = new Map();
+  for (const agent of Object.values(cfg.AGENTS || {})) {
+    if (agent?.id && agent.laneId) laneByAgentId.set(agent.id, agent.laneId);
+  }
+  const latest = new Map();
+  for (const [identifier, runs] of runLists) {
+    for (const run of runs || []) {
+      const laneId = laneByAgentId.get(run?.agent_id);
+      if (!laneId || isQueuedNotStarted(run, now)) continue;
+      const ms = runTsMs(run);
+      if (ms == null) continue;
+      const cur = latest.get(laneId);
+      if (!cur || ms > cur.ms) latest.set(laneId, { run, ms, identifier });
+    }
+  }
+  const limits = new Map();
+  for (const p of prior || []) {
+    if (!p || typeof p.laneId !== 'string' || !(p.untilMs > now)) continue;
+    const seen = latest.get(p.laneId);
+    if (seen && seen.ms > p.failedMs) continue; // superseded; re-judged below
+    limits.set(p.laneId, p);
+  }
+  for (const [laneId, { run, ms, identifier }] of latest) {
+    if (!isQuotaFailure(run, now)) continue;
+    const error = runErrorText(run) || String(run.failure_reason || '');
+    if (MODEL_SCOPED_LIMIT_RE.test(error)) continue;
+    const untilMs = quotaResetAtMs(run) ?? ms + cooldownMs;
+    if (untilMs <= now) continue;
+    const cur = limits.get(laneId);
+    if (cur && cur.failedMs >= ms) continue;
+    limits.set(laneId, { laneId, untilMs, failedMs: ms, identifier, agentId: run.agent_id, error: error.slice(0, 200) });
+  }
+  return limits;
+}
+
+// Where observed limits outlive the --once process: next to the lane-state cache.
+// Lanes are provider accounts, so tenants share the file. Best-effort both ways.
+export function defaultObservedLimitsFile(env = process.env) {
+  if (env.AURIGA_OBSERVED_LIMITS_FILE) return env.AURIGA_OBSERVED_LIMITS_FILE;
+  return path.join(path.dirname(defaultLaneStateFile(env)), 'observed-lane-limits.json');
+}
+
+export function createObservedLimitStore(file = defaultObservedLimitsFile()) {
+  return {
+    read() {
+      try { const v = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(v) ? v : []; }
+      catch { return []; }
+    },
+    write(limits) {
+      try {
+        const tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(limits));
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        process.stderr.write(`[auriga] could not keep observed lane limits at ${file}: ${e.message}\n`);
+      }
+    },
+  };
+}
+
+// Marks every agent on an observed-limited lane unavailable. The reason starts
+// with `auriga:` (Heimdall's own are `heimdall:`) so decision records say which
+// source took the lane out, and why. An agent already unavailable keeps its reason.
+export function withObservedLaneLimits(cfg, limits) {
+  if (!limits || !limits.size) return { ...cfg, observedLaneLimits: [] };
+  const agents = Object.fromEntries(Object.entries(cfg.AGENTS).map(([name, agent]) => {
+    const limit = agent?.laneId ? limits.get(agent.laneId) : null;
+    if (!limit || agent.available === false) return [name, agent];
+    const why = `auriga:${limit.laneId}:provider limit observed on ${limit.identifier} until ${new Date(limit.untilMs).toISOString()}`;
+    return [name, { ...agent, available: false, availabilityReason: why }];
+  }));
+  return { ...cfg, AGENTS: agents, observedLaneLimits: [...limits.values()] };
+}
+
+
+// ---- Heimdall decision ids across --once cycles (PANT-1445) ------------------
+// selectRoute() at dispatch (cycle N) stores Heimdall's decision_id; the outcome
+// is reported cycles later. The live router is a fresh `--once` process every
+// cycle, so an in-memory store lost every id and no outcome ever reached
+// Heimdall. This Map keeps them in a file next to the lane-state cache. Entries
+// older than maxAgeMs are dropped on load. A write failure is logged, never fatal.
+export function defaultDecisionsFile(env = process.env) {
+  if (env.AURIGA_DECISIONS_FILE) return env.AURIGA_DECISIONS_FILE;
+  return path.join(path.dirname(defaultLaneStateFile(env)), 'heimdall-decisions.json');
+}
+
+export function createDecisionStore(file = defaultDecisionsFile(), { now = () => Date.now(), maxAgeMs = 14 * 24 * 3600 * 1000 } = {}) {
+  const at = new Map();
+  class DecisionStore extends Map {
+    set(key, value) { super.set(key, value); at.set(key, now()); save(this); return this; }
+    delete(key) { const had = super.delete(key); at.delete(key); if (had) save(this); return had; }
+  }
+  const store = new DecisionStore();
+  const save = (m) => {
+    try {
+      const entries = Object.fromEntries([...Map.prototype.entries.call(m)].map(([k, v]) => [k, { decision_id: v, at: at.get(k) ?? now() }]));
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entries));
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      process.stderr.write(`[auriga] could not keep Heimdall decision ids at ${file}: ${e.message}\n`);
+    }
+  };
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (!v || typeof v.decision_id !== 'string' || !(now() - Number(v.at) < maxAgeMs)) continue;
+      Map.prototype.set.call(store, k, v.decision_id);
+      at.set(k, Number(v.at));
+    }
+  } catch { /* no file yet, or unreadable: start empty */ }
+  return store;
 }
