@@ -180,3 +180,42 @@ export function withObservedLaneLimits(cfg, limits) {
   return { ...cfg, AGENTS: agents, observedLaneLimits: [...limits.values()] };
 }
 
+
+// ---- Heimdall decision ids across --once cycles (PANT-1445) ------------------
+// selectRoute() at dispatch (cycle N) stores Heimdall's decision_id; the outcome
+// is reported cycles later. The live router is a fresh `--once` process every
+// cycle, so an in-memory store lost every id and no outcome ever reached
+// Heimdall. This Map keeps them in a file next to the lane-state cache. Entries
+// older than maxAgeMs are dropped on load. A write failure is logged, never fatal.
+export function defaultDecisionsFile(env = process.env) {
+  if (env.AURIGA_DECISIONS_FILE) return env.AURIGA_DECISIONS_FILE;
+  return path.join(path.dirname(defaultLaneStateFile(env)), 'heimdall-decisions.json');
+}
+
+export function createDecisionStore(file = defaultDecisionsFile(), { now = () => Date.now(), maxAgeMs = 14 * 24 * 3600 * 1000 } = {}) {
+  const at = new Map();
+  class DecisionStore extends Map {
+    set(key, value) { super.set(key, value); at.set(key, now()); save(this); return this; }
+    delete(key) { const had = super.delete(key); at.delete(key); if (had) save(this); return had; }
+  }
+  const store = new DecisionStore();
+  const save = (m) => {
+    try {
+      const entries = Object.fromEntries([...Map.prototype.entries.call(m)].map(([k, v]) => [k, { decision_id: v, at: at.get(k) ?? now() }]));
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entries));
+      fs.renameSync(tmp, file);
+    } catch (e) {
+      process.stderr.write(`[auriga] could not keep Heimdall decision ids at ${file}: ${e.message}\n`);
+    }
+  };
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (!v || typeof v.decision_id !== 'string' || !(now() - Number(v.at) < maxAgeMs)) continue;
+      Map.prototype.set.call(store, k, v.decision_id);
+      at.set(k, Number(v.at));
+    }
+  } catch { /* no file yet, or unreadable: start empty */ }
+  return store;
+}

@@ -559,7 +559,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     const trace = {};
     const agent = chooseAgentForIssue(issue, cfg, inflight, runtimeInflight, projected, blockedRuntimes, maxPerAgent, trace);
     if (!agent) {
-      if (trace.candidates?.some((c) => cfg.AGENTS[c.agent]?.availabilityReason?.startsWith('heimdall:'))) {
+      if (trace.candidates?.some((c) => laneUnavailable(cfg.AGENTS[c.agent]))) {
         unavailable.push({ identifier: issue.identifier, candidates: trace.candidates });
         continue;
       }

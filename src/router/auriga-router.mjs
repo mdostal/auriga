@@ -27,7 +27,10 @@
 // this file is executed directly, never when imported by a test.
 
 import fs from 'node:fs';
-import { defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, readLaneState, withLaneState } from './lib/lane-state.mjs';
+import {
+  createDecisionStore, defaultLaneStateFile, laneStateAgeS, loadAgentLanesFile, observedLaneLimits, readLaneState,
+  withLaneState, withObservedLaneLimits,
+} from './lib/lane-state.mjs';
 import * as cfg from './lib/config.mjs';
 import * as core from './lib/core.mjs';
 import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlainTodo } from './lib/issue-status.mjs';
@@ -71,6 +74,8 @@ const BUILD_FINGERPRINT = (() => {
 //
 const defaultBacklog = createPantheonV2L2BacklogAdapter();
 const defaultSpawn = createPantheonV2L2SpawnAdapter({
+  // PANT-1445: decision ids must outlive the --once process (lane-state.mjs).
+  decisions: createDecisionStore(),
   verifyDelayMs: cfg.CAPS.verifyDelayMs,
   projectLane: cfg.PROJECT_LANE,
   defaultLane: cfg.DEFAULT_LANE,
@@ -618,6 +623,33 @@ async function runCycle(opts, state) {
   // Slots held per agent: running + queued. Every capacity check below (cascade,
   // zombie, assigned-idle, fresh routing) reads this map, and commitDispatch adds to
   // it, so a queued dispatch counts against max_inflight and RUNTIME_CAP.
+  // PANT-1445 (pantheon-v2#527): a provider limit seen on this tenant's own runs
+  // takes the whole lane (account) out until its reset, on top of what Heimdall
+  // reports, so every pass below routes around it. Each limit is also reported
+  // to Heimdall as a failure outcome of the decision that sent the run there, so
+  // Heimdall marks the lane itself (best-effort; only for a decision whose lane is
+  // the one that ran, see selectRoute in the spawn adapter).
+  {
+    const limits = observedLaneLimits(
+      [...Object.entries(runsByIssue), ...Object.entries(todoRunsByIssue)],
+      cfgImpl, now, cfgImpl.CAPS.redispatchCooldownMs,
+    );
+    if (limits.size) {
+      Object.assign(cfgImpl, withObservedLaneLimits(cfgImpl, limits));
+      for (const l of limits.values()) {
+        logImpl('lane_limit_observed', {
+          lane: l.laneId, identifier: l.identifier, agent_id: l.agentId,
+          until: new Date(l.untilMs).toISOString(), error: l.error,
+        });
+        if (dryRun || typeof spawn.reportRouteOutcome !== 'function') continue;
+        try {
+          spawn.reportRouteOutcome(l.identifier, 'failure', {
+            error: { message: l.error }, executed_lane: l.laneId, source: 'auriga-observed-run-failure',
+          });
+        } catch (e) { logImpl('route_outcome_error', { identifier: l.identifier, error: e.message }); }
+      }
+    }
+  }
   const inflight = coreImpl.addCounts(runningInflight, queuedHeld);
   const runtimeInflight = coreImpl.computeRuntimeInflight(inflight, cfgImpl.AGENTS);
   // Observability only (NOT capacity): the raw assigned-todo backlog. If this climbs
@@ -643,6 +675,8 @@ async function runCycle(opts, state) {
     build: BUILD_FINGERPRINT,
     agentLanes: Object.keys(cfgImpl.AGENT_LANES || {}).length,
     ...laneStateFields(cfgImpl.laneState),
+    // PANT-1445: lanes this cycle took out on a provider limit seen on their runs.
+    lanesLimitObserved: (cfgImpl.observedLaneLimits || []).map((l) => l.laneId),
   });
 
   const blockedRuntimes = new Set(opts.initialBlockedRuntimes || []);
