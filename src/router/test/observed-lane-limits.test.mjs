@@ -118,3 +118,10 @@ test('file-backed stores round-trip and tolerate missing/corrupt files', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('PANT-1238 (GH #277): a 5-hour limit takes the lane out until its reset', () => {
+  const at = Date.parse('2026-10-30T23:59:11Z');
+  const limits = observedLaneLimits([['PANT-1238', [failed('A2', at, "You've hit your 5-hour limit · resets 12am (UTC)")]]], CFG, at + 1000);
+  assert.deepEqual([...limits.keys()], ['claude']);
+  assert.equal(limits.get('claude').untilMs, Date.parse('2026-10-31T00:00:00Z'));
+});
