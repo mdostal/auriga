@@ -361,24 +361,45 @@ function parkForHuman(dc, identifier, { blockedReason, comment, errorEvent }) {
 }
 
 // PANT-1383: keep an issue out of review without touching its status (it waits).
-// Comments once per hold tag; metadata.review_hold is the "already said so"
-// marker, so a hold that lasts many cycles posts one comment, not one per cycle.
+// PANT-1457: the hold is recorded in metadata (review_hold = tag, review_hold_note
+// = why) and in the log, never as a comment. Multica treats every comment as a
+// trigger, so each "Auriga is not dispatching the review squad" notice queued a
+// second run for the assignee (18 extra runs in 6 h on 2026-11-24). The metadata
+// is written once per hold tag, so a hold that lasts many cycles writes once.
 function holdOutOfReview({ backlog, log, dryRun }, issue, hold, stage) {
   const tag = core.reviewHoldTag(hold);
   const already = ((issue.metadata && issue.metadata[core.REVIEW_HOLD_KEY]) || '') === tag;
+  const note = core.reviewHoldComment(hold, { stage });
   log('review_hold', {
     identifier: issue.identifier, stage, reason: hold.reason,
     children: hold.children ? hold.children.map((c) => c.identifier) : undefined,
-    headKey: hold.headKey, commented: !already && !dryRun, applied: !dryRun,
+    headKey: hold.headKey, recorded: !already && !dryRun, applied: !dryRun, note,
   });
   if (already || dryRun) return;
-  // Metadata first: if the comment write fails we stay silent rather than repeat.
-  if (typeof backlog.setIssueMetadata === 'function') {
-    try { backlog.setIssueMetadata(issue.identifier, { [core.REVIEW_HOLD_KEY]: tag }); }
-    catch (e) { log('review_hold_error', { identifier: issue.identifier, op: 'metadata', error: e.message }); return; }
-  }
-  try { backlog.commentOnIssue(issue.identifier, core.reviewHoldComment(hold, { stage })); }
-  catch (e) { log('review_hold_error', { identifier: issue.identifier, op: 'comment', error: e.message }); }
+  if (typeof backlog.setIssueMetadata !== 'function') return;
+  try { backlog.setIssueMetadata(issue.identifier, { [core.REVIEW_HOLD_KEY]: tag, [core.REVIEW_HOLD_NOTE_KEY]: note }); }
+  catch (e) { log('review_hold_error', { identifier: issue.identifier, op: 'metadata', error: e.message }); }
+}
+
+// PANT-1457: the PR rows the review gate judges an issue by. The board's PR
+// linkage misses a PR whose branch/title lacks the ticket id even when the PR
+// url is posted on the ticket (FFE-1032, PR #4661 in a comment). When the
+// linkage is empty and nothing else links the issue, PR urls written in the
+// description or any comment count as linked PRs. Comments are only read in
+// that case, so an issue with a linked PR costs no extra call.
+function gatePrs(backlog, log, issue, prs = []) {
+  if ((prs || []).length) return prs;
+  const fromDescription = core.prUrlsInText(issue && issue.description);
+  if (fromDescription.length) return core.mentionedPrRows(fromDescription);
+  if (core.hasLinkedPrOrBranch(issue, [])) return prs; // own pr_url or a recorded branch
+  if (typeof backlog.listIssueComments !== 'function') return prs;
+  let bodies = [];
+  try { bodies = (backlog.listIssueComments(issue.identifier) || []).map((c) => (typeof c === 'string' ? c : c && (c.body ?? c.content))); }
+  catch (e) { log('comments_fetch_error', { identifier: issue.identifier, error: e.message }); return prs; }
+  const urls = core.prUrlsInText(bodies);
+  if (!urls.length) return prs;
+  log('review_pr_from_comment', { identifier: issue.identifier, prs: urls });
+  return core.mentionedPrRows(urls);
 }
 
 function fetchPrs(backlog, log, identifier) {
@@ -830,12 +851,12 @@ async function runCycle(opts, state) {
   // DISPATCH-scoped (writes setIssueStatus) — see the blocked->todo pass above.
   // PANT-1383: a finished run only promotes an issue that is reviewable: no open
   // children, a linked PR/branch, and a head that moved since the router last
-  // promoted it. Anything else stays in_progress with one comment (FFE-1598).
+  // promoted it. Anything else stays in_progress, the hold recorded in metadata (FFE-1598, PANT-1457).
   const completions = coreImpl.detectRunCompletions(inProgress, runsByIssue, now, cfgImpl, issues);
   const holdCtx = { backlog, log: logImpl, dryRun };
   for (const c of completions) {
     const issueObj = issues.find((i) => i.identifier === c.identifier) || { identifier: c.identifier, id: c.issueId, metadata: {} };
-    const prs = fetchPrs(backlog, logImpl, c.identifier);
+    const prs = gatePrs(backlog, logImpl, issueObj, fetchPrs(backlog, logImpl, c.identifier));
     const hold = coreImpl.reviewHoldReason(issueObj, issues, prs, cfgImpl, { metaKey: core.REVIEW_PROMOTED_HEAD_KEY });
     if (hold) { holdOutOfReview(holdCtx, issueObj, hold, 'promotion'); continue; }
     logImpl('advance', { identifier: c.identifier, to: ISSUE_STATUS.IN_REVIEW, applied: !dryRun });
@@ -887,7 +908,7 @@ async function runCycle(opts, state) {
   // linked PR/branch, or back in review on the head the router already sent to a
   // review squad is never dispatched. It is dropped from BOTH the review-capacity
   // count and the pick list (never a phantom slot, PANT-737) and waits in
-  // in_review with one comment. Only issues headed for a FRESH review (not held
+  // in_review, the hold recorded in metadata, never a comment (PANT-1457). Only issues headed for a FRESH review (not held
   // by a current/former reviewer) take the loop check: a review in flight on the
   // same head is the normal case, not a loop.
   const reviewPhaseAgentIds = new Set([
@@ -899,7 +920,10 @@ async function runCycle(opts, state) {
     if (verifiedThisCycle.has(i.identifier)) continue;
     if (coreImpl.isReviewDispatchSkipped(i, cfgImpl)) continue; // never dispatched anyway
     const fresh = !reviewPhaseAgentIds.has(i.assignee_id);
-    const hold = coreImpl.reviewHoldReason(i, issues, prsByIssue[i.identifier] || [], cfgImpl,
+    // PANT-1457: PR urls on the ticket count; stored back so the dispatch's
+    // head key below matches what the gate saw.
+    prsByIssue[i.identifier] = gatePrs(backlog, logImpl, i, prsByIssue[i.identifier] || []);
+    const hold = coreImpl.reviewHoldReason(i, issues, prsByIssue[i.identifier], cfgImpl,
       fresh ? { metaKey: core.REVIEW_DISPATCHED_HEAD_KEY } : {});
     if (!hold) continue;
     reviewHeld.add(i.identifier);

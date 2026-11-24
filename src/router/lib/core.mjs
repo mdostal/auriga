@@ -25,12 +25,12 @@ import {
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 import {
-  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY,
-  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment,
+  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY, REVIEW_HOLD_NOTE_KEY,
+  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment, prUrlsInText, mentionedPrRows,
 } from './review-gate.mjs';
 export {
-  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY,
-  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment,
+  REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY, REVIEW_HOLD_NOTE_KEY,
+  openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment, prUrlsInText, mentionedPrRows,
 };
 export { isPrMerged };
 export { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
@@ -1267,10 +1267,11 @@ export function ownPrUrl(issue = {}) {
 }
 
 // PANT-1383: does anything link this issue to code — a PR row on the board, its
-// own recorded pr_url, or a recorded branch?
+// own recorded pr_url, a PR url in its description (PANT-1457), or a recorded branch?
 export function hasLinkedPrOrBranch(issue = {}, prs = []) {
   if ((prs || []).length) return true;
   if (ownPrUrl(issue)) return true;
+  if (prUrlsInText(issue && issue.description).length) return true;
   const m = (issue && issue.metadata) || {};
   return ['branch', 'pr_branch', 'head_branch'].some((k) => typeof m[k] === 'string' && m[k].trim() !== '');
 }

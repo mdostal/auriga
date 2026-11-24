@@ -10,7 +10,9 @@
 //   - an issue with no linked PR/branch is never sent to review;
 //   - an issue that comes back to review with the same head commit it had last
 //     time is stopped, not reviewed again.
-// A held issue keeps its status (it waits), and the router comments once per hold.
+// A held issue keeps its status (it waits). PANT-1457: the router records the
+// hold in metadata and its log, never as a comment: Multica counts any comment
+// as a trigger and queued a second run for the assignee on every notice.
 // core.mjs owns reviewHoldReason (it needs ownPrUrl); this file has the parts
 // that core.mjs's own detectors need without an import cycle.
 
@@ -23,6 +25,8 @@ import { isTerminalIssueStatus } from './issue-status.mjs';
 export const REVIEW_HOLD_KEY = 'review_hold';
 export const REVIEW_PROMOTED_HEAD_KEY = 'review_promoted_head';
 export const REVIEW_DISPATCHED_HEAD_KEY = 'review_dispatched_head';
+//   review_hold_note       – PANT-1457: the human-readable reason for the hold.
+export const REVIEW_HOLD_NOTE_KEY = 'review_hold_note';
 
 export const REVIEW_HOLD = Object.freeze({
   OPEN_CHILDREN: 'open-children',
@@ -88,4 +92,29 @@ export function reviewHoldComment(hold, { stage = 'review' } = {}) {
   return `${what}: it came back to review with no new commit since the last time Auriga sent it there (head \`${hold.headKey}\`).\n\n`
     + 'Reviewing the same commit again changes nothing, so Auriga stopped here. Push a new commit to re-enter review, '
     + `or clear the \`${hold.metaKey || REVIEW_PROMOTED_HEAD_KEY}\` metadata key to force one more review.`;
+}
+
+// PANT-1457: GitHub pull-request URLs written anywhere in free text (an issue
+// description, a comment). FFE-1032 had PR #4661 posted in a comment while its
+// branch carried no ticket id, so the PR linkage came back empty and the gate
+// held it as "no linked PR". Returns normalized, de-duplicated urls
+// (https://github.com/<owner>/<repo>/pull/<n>) in first-seen order.
+const PR_URL_RE = /https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)/gi;
+export function prUrlsInText(...texts) {
+  const seen = new Set();
+  const out = [];
+  for (const t of texts.flat()) {
+    if (typeof t !== 'string' || !t) continue;
+    for (const m of t.matchAll(PR_URL_RE)) {
+      const url = `https://github.com/${m[1].toLowerCase()}/${m[2].toLowerCase().replace(/\.git$/, '')}/pull/${m[3]}`;
+      if (!seen.has(url)) { seen.add(url); out.push(url); }
+    }
+  }
+  return out;
+}
+
+// PR rows for urls found in text. No head sha is known for them, so reviewHeadKey
+// gives "<url>@", the same shape a bare metadata.pr_url already produces.
+export function mentionedPrRows(urls = []) {
+  return urls.map((url) => ({ url, _source: 'mention' }));
 }

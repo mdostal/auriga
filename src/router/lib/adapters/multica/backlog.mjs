@@ -299,6 +299,19 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
   }
 
+  // PANT-1457: the issue's comments, for the review gate's PR-url scan.
+  // Best-effort: [] on failure. `multica issue comment list` returns an array of
+  // comments ({ content, ... }) or { comments: [...] } depending on the version.
+  function listIssueComments(identifier) {
+    try {
+      const res = run(['issue', 'comment', 'list', identifier, '--output', 'json']);
+      return Array.isArray(res) ? res : ((res && res.comments) || []);
+    } catch (e) {
+      process.stderr.write(`listIssueComments(${identifier}) failed: ${e.message}\n`);
+      return [];
+    }
+  }
+
   // Set one or more metadata keys on an existing issue (BacklogAdapter contract,
   // see ../backlog-adapter.mjs). Best-effort: degrades gracefully (returns null
   // on any key failure) — a metadata write must never abort a dispatch. Mirrors
@@ -384,6 +397,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    listIssueComments,
     setIssueMetadata,
     createIssue,
 
