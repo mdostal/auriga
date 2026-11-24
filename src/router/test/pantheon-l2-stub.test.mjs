@@ -389,6 +389,28 @@ test('assignIssue() resolves the agent NAME to an id via /api/backlog/agents/:na
   assert.deepEqual(calls[1].body, { type: 'agent', id: 'agent-uuid-9' });
 });
 
+test('PANT-1327: assignIssue()/rerunIssue() send a per-task `model` only when one is given', async (t) => {
+  const calls = makeCurlMock(t, ({ url }) => {
+    if (url.includes('/api/backlog/agents/')) return { status: 200, body: { name: 'auriga-dev', id: 'agent-uuid-9' } };
+    return { status: 204 };
+  });
+  const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
+  const spawn = createPantheonV2L2SpawnAdapter({ baseUrl: BASE_URL });
+
+  spawn.assignIssue('PAN-1', 'auriga-dev', { model: 'claude-opus-5-5' });
+  spawn.rerunIssue('PAN-1', { model: 'claude-opus-5-5' });
+  spawn.assignIssue('PAN-2', 'auriga-dev', {});
+  spawn.rerunIssue('PAN-2');
+
+  const writes = calls.filter((c) => c.method === 'POST');
+  assert.deepEqual(writes.map((c) => [c.url.replace(BASE_URL, ''), c.body]), [
+    ['/api/backlog/issues/PAN-1/assign', { type: 'agent', id: 'agent-uuid-9', model: 'claude-opus-5-5' }],
+    ['/api/backlog/issues/PAN-1/rerun', { model: 'claude-opus-5-5' }],
+    ['/api/backlog/issues/PAN-2/assign', { type: 'agent', id: 'agent-uuid-9' }],
+    ['/api/backlog/issues/PAN-2/rerun', undefined],
+  ]);
+});
+
 test('assignIssue() throws when the agent name does not resolve, without ever calling assign', async (t) => {
   const calls = makeCurlMock(t, () => ({ status: 404, body: { error: 'no agent named "ghost"' } }));
   const { createPantheonV2L2SpawnAdapter } = await freshAdapterModule();
