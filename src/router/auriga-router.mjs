@@ -400,6 +400,29 @@ function parkForHuman(dc, identifier, { blockedReason, comment, errorEvent }) {
   catch (e) { dc.log(errorEvent, { identifier, op: 'comment', error: e.message }); }
 }
 
+// PANT-1459 (pantheon-v2#598): park a ticket its assignee declined (or made no
+// progress on) after assigned_idle unassigned it: `blocked`, a router-owned
+// blocked_reason (so isAgentParked keeps every pass off it, and a human moving it
+// off `blocked` ends the park, see ROUTER_GIVE_UP_REASONS), and the park time so
+// earlier runs are not counted again. No comment: Multica treats every comment as
+// a trigger (PANT-1457). Best-effort; failures are logged, never thrown.
+function parkDeclined({ backlog, log, now }, a) {
+  const note = a.reason === core.DECLINE_PARK_REASON
+    ? 'The assignee declined this ticket on its last run. Auriga unassigned it instead of re-running it. Reassign it (or move it back to todo) once it is ready for an agent.'
+    : `The assignee's last ${a.noProgressRuns} runs opened no PR, pushed nothing and left the ticket in todo. Auriga unassigned it instead of re-running it. Reassign it (or move it back to todo) once it is ready for an agent.`;
+  try { backlog.setIssueStatus(a.identifier, ISSUE_STATUS.BLOCKED); }
+  catch (e) { log('assigned_idle_error', { identifier: a.identifier, op: 'set-blocked', error: e.message }); }
+  if (typeof backlog.setIssueMetadata === 'function') {
+    try {
+      backlog.setIssueMetadata(a.identifier, {
+        blocked_reason: a.reason,
+        [core.DECLINE_PARKED_AT_KEY]: new Date(now).toISOString(),
+        assigned_idle_park_note: note,
+      });
+    } catch (e) { log('assigned_idle_error', { identifier: a.identifier, op: 'set-blocked-reason', error: e.message }); }
+  }
+}
+
 // PANT-1383: keep an issue out of review without touching its status (it waits).
 // PANT-1457: the hold is recorded in metadata (review_hold = tag, review_hold_note
 // = why) and in the log, never as a comment. Multica treats every comment as a
@@ -1360,9 +1383,10 @@ async function runCycle(opts, state) {
     const idleUnassigns = idleActions.filter((a) => a.action === 'unassign');
     const idleStartActions = idleActions.filter((a) => a.action !== 'unassign');
     for (const a of idleUnassigns) {
-      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, ...(a.availabilityReason ? { availability_reason: a.availabilityReason } : {}), applied: !dryRun });
+      logImpl('assigned_idle_unassign', { identifier: a.identifier, reason: a.reason, ...(a.availabilityReason ? { availability_reason: a.availabilityReason } : {}), ...(a.park ? { park: true } : {}), applied: !dryRun });
       if (!dryRun) {
-        try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); }
+        try { spawn.unassignIssue(a.identifier); } catch (e) { logImpl('assigned_idle_error', { identifier: a.identifier, error: e.message }); continue; }
+        if (a.park) parkDeclined({ backlog, log: logImpl, now }, a);
       }
     }
     // runtimeInflight is the cycle-start snapshot and does NOT include cascade/zombie

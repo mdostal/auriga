@@ -25,6 +25,10 @@ import {
 } from './review-eligibility.mjs';
 import { getEligibleAgentsByTreePath } from './tree-aware.mjs';
 import {
+  assignedIdleGiveUp, isDeclinedRun, isFounderClaimed, founderClaimMarkers, runOutputText,
+  DECLINE_PARKED_AT_KEY, DECLINE_PARK_REASON, NO_PROGRESS_PARK_REASON,
+} from './agent-decline.mjs';
+import {
   REVIEW_HOLD, REVIEW_HOLD_KEY, REVIEW_PROMOTED_HEAD_KEY, REVIEW_DISPATCHED_HEAD_KEY, REVIEW_HOLD_NOTE_KEY,
   openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment, prUrlsInText, mentionedPrRows,
 } from './review-gate.mjs';
@@ -33,6 +37,10 @@ export {
   openChildren, isReviewHeld, reviewHeadKey, reviewHoldTag, reviewHoldComment, prUrlsInText, mentionedPrRows,
 };
 export { isPrMerged };
+export {
+  assignedIdleGiveUp, isDeclinedRun, isFounderClaimed, founderClaimMarkers, runOutputText,
+  DECLINE_PARKED_AT_KEY, DECLINE_PARK_REASON, NO_PROGRESS_PARK_REASON,
+};
 export { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns };
 export { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds };
 export {
@@ -1633,6 +1641,27 @@ export function detectAssignedIdle(todoIssues, runsByIssue, cfg, knownAgentIds =
         idleAgeMs,
         action: 'unassign',
         reason: 'hive-on-noncapable-lane',
+      });
+      continue;
+    }
+
+    // PANT-1459 (pantheon-v2#598): the assignee already declined this ticket, or
+    // its last N runs delivered nothing. Re-running it only repeats the decline
+    // (live: FFE-880, 35 reruns in 24 h, each "Routed to me again. Nothing has
+    // changed"). Unassign it and park it for a human instead (see the router).
+    const giveUp = assignedIdleGiveUp(i, runs, cfg, now);
+    if (giveUp) {
+      actions.push({
+        identifier: i.identifier,
+        issueId: i.id,
+        assigneeId: i.assignee_id,
+        projectId: i.project_id,
+        lane: cfg.PROJECT_NAMES?.[i.project_id] || i.project_id,
+        idleAgeMs,
+        action: 'unassign',
+        reason: giveUp.reason,
+        park: true,
+        noProgressRuns: giveUp.runs,
       });
       continue;
     }

@@ -1,10 +1,13 @@
-// Review-dispatch eligibility predicates — a leaf module (no imports) so both
+// Review-dispatch eligibility predicates — a leaf module (its only import,
+// agent-decline.mjs, imports nothing from core/capacity) so both
 // core.mjs (selectReviewDispatch) and capacity.mjs (computeReviewInflight) can
 // share ONE definition of "tickets the review loop skips" without a circular
 // import. Keeping these in lockstep is the whole point: any in_review ticket
 // selectReviewDispatch skips but computeReviewInflight counts is a phantom
 // review slot, and with a RUNTIME_CAP of 1 a single phantom freezes every
 // review in the tenant (PANT-737 seeds, PANT-843 parked tickets).
+
+import { isFounderClaimed, DECLINE_PARK_REASON, NO_PROGRESS_PARK_REASON } from './agent-decline.mjs';
 
 // PANT-1008 (GH #251): smoke/scratch tickets are recognised by an EXPLICIT
 // marker only — a `smoke`/`scratch` label, or a `[smoke]` / `[scratch]` /
@@ -36,9 +39,11 @@ export const HUMAN_TODO_LABEL = 'human-todo';
 // pool — labeled `human-todo`, or `waiting_on` a known human (cfg.HUMAN_NAMES)
 // — because only a human can complete it. Excluded issues belong in the
 // separate human queue instead (see scripts/export-human-queue.mjs).
+// PANT-1459: a founder-claimed ticket (isFounderClaimed) is a human todo too.
 export function isHumanTodo(issue, cfg) {
   const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l?.name || '').toLowerCase());
   if (labels.includes(HUMAN_TODO_LABEL)) return true;
+  if (isFounderClaimed(issue, cfg || {})) return true;
   const waitingOn = issue.metadata && issue.metadata.waiting_on;
   if (typeof waitingOn !== 'string' || !waitingOn.trim()) return false;
   const humanNames = (cfg && cfg.HUMAN_NAMES) || [];
@@ -49,7 +54,11 @@ export function isHumanTodo(issue, cfg) {
 // blocked_reason values the ROUTER itself writes when it gives up and sets the
 // issue `blocked` (zombie give-up, review give-up). They describe that blocked
 // state only.
-export const ROUTER_GIVE_UP_REASONS = Object.freeze(['zombie-give-up-max-attempts', 'review-give-up-max-attempts']);
+// PANT-1459: the assigned_idle decline / no-progress parks are router-written too,
+// so a human moving the ticket off `blocked` ends them.
+export const ROUTER_GIVE_UP_REASONS = Object.freeze([
+  'zombie-give-up-max-attempts', 'review-give-up-max-attempts', DECLINE_PARK_REASON, NO_PROGRESS_PARK_REASON,
+]);
 
 // PANT-930 (GH #244): true when a router give-up reason outlived the `blocked`
 // status it was written with. Once a human or agent moves the issue out of
