@@ -2664,3 +2664,50 @@ test('PANT-1445: a lane failure streak moves its reviews to another lane and blo
   assert.equal(log.byEvent('review_give_up').length, 0);
   assert.equal(calls.status.filter((s) => s.status === 'blocked').length, 0, 'a lane failure never blocks a ticket');
 });
+
+// PANT-1459 (pantheon-v2#598): an assigned todo whose assignee declined it on its
+// last run is unassigned and parked for a human, never re-run (live: FFE-880 re-ran
+// 35 times in 24 h, each run "Routed to me again. Nothing has changed since ...").
+test('PANT-1459: assigned_idle unassigns and parks a ticket the assignee declined, without commenting or re-running', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 1);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane } };
+  const now = Date.now();
+  const declined = makeIssue({
+    project_id: project, parent_issue_id: 'decomposed-parent', assignee_id: cfg.AGENTS[lane[0]].id,
+    created_at: new Date(now - 48 * 3600_000).toISOString(),
+  });
+  const { backlog, spawn, calls, runsByIdentifier } = createMockAdapters([declined], fixtureCfg.AGENTS);
+  runsByIdentifier[declined.identifier] = [{
+    id: 'r-decline', agent_id: cfg.AGENTS[lane[0]].id, status: 'completed',
+    created_at: new Date(now - 3 * 3600_000).toISOString(), completed_at: new Date(now - 3 * 3600_000 + 25_000).toISOString(),
+    result: { output: 'Routed to me again. Nothing has changed since my comment at 08:48.' },
+  }];
+  const log = createLogSink();
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now });
+
+  assert.equal(calls.rerun.some((c) => c.identifier === declined.identifier), false, 'never re-runs a declined ticket');
+  assert.equal(calls.unassign.filter((c) => c.identifier === declined.identifier).length, 1);
+  assert.equal(calls.comment.some((c) => c.identifier === declined.identifier), false, 'a comment would trigger a run');
+  assert.equal(declined.status, 'blocked');
+  assert.equal(declined.metadata.blocked_reason, 'assigned-idle-agent-declined');
+  assert.equal(declined.metadata.assigned_idle_parked_at, new Date(now).toISOString());
+  const ev = log.byEvent('assigned_idle_unassign').find((e) => e.identifier === declined.identifier);
+  assert.equal(ev.reason, 'assigned-idle-agent-declined');
+  assert.equal(ev.park, true);
+
+  // Parked: the next cycle neither routes nor re-runs it.
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP, now: now + 3600_000 });
+  assert.equal(calls.assign.some((c) => c.identifier === declined.identifier), false);
+  assert.equal(calls.rerun.some((c) => c.identifier === declined.identifier), false);
+});
+
+test('PANT-1459: a founder-claimed todo is never routed to an agent', async () => {
+  const lane = cfg.DEFAULT_LANE.slice(0, 1);
+  const project = projectId('Pantheon Core');
+  const fixtureCfg = { ...cfg, PROJECT_LANE: { ...cfg.PROJECT_LANE, [project]: lane }, FOUNDER_CLAIM_MARKERS: ['claimed by the founder'] };
+  const claimed = makeIssue({ project_id: project, parent_issue_id: 'decomposed-parent', description: "Claimed by the founder -- don't pick this up." });
+  const { backlog, spawn, calls } = createMockAdapters([claimed], fixtureCfg.AGENTS);
+  await cycle({ backlog, spawn, cfg: fixtureCfg, log: createLogSink(), sleep: NOOP_SLEEP });
+  assert.equal(calls.assign.some((c) => c.identifier === claimed.identifier), false);
+});

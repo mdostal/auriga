@@ -379,6 +379,29 @@ lists `lanesLimitObserved`. Limits are kept across `--once` processes in
 lane-state file), since the limited ticket's runs stop being fetched once it is
 re-routed.
 
+Assigned-idle stops re-running a ticket the agent has already turned down
+(PANT-1459, pantheon-v2#598; live: FFE-880 re-ran 35 times in 24 h, each run
+"Routed to me again. Nothing has changed since ..."). Only the assignee's own
+completed runs count; provider-limit failures and runs from before the last
+park are ignored. When the latest one declined the ticket ("routed to me
+again", "nothing has changed since", "not picking this up", "declining this",
+"don't pick this up", ...), reason `assigned-idle-agent-declined`. When the last
+`assignedIdleNoProgressRuns` (CAPS, default 3, 0 = off) completed runs show no
+PR link, push or commit and the ticket is still `todo`, reason
+`assigned-idle-no-progress`. Either way the ticket is unassigned
+(`assigned_idle_unassign` with `park: true`) and parked: status `blocked`,
+`blocked_reason` set to the reason, `assigned_idle_parked_at` and an
+`assigned_idle_park_note` in metadata. No comment is posted, since Multica treats
+every comment as a trigger (PANT-1457). Both reasons are router give-up reasons,
+so a human moving the ticket off `blocked` ends the park, and only runs after
+`assigned_idle_parked_at` count from then on.
+
+Founder-claimed tickets are human todos (PANT-1459): never routed, re-run or
+review-dispatched. A ticket is founder-claimed when its description contains a
+`FOUNDER_CLAIM_MARKERS` phrase (also read as `founder_claim_markers`, the dragon
+autopilot's key; case-insensitive) or `claimed by <name>` for any `HUMAN_NAMES`
+entry.
+
 Auriga also takes a whole Multica runtime out when it keeps failing (PANT-1397).
 A runtime is one daemon/CLI install, so when it breaks (dragon's opencode
 runtime, 2026-11-17/18: `/home/node` tmpfs full, every run "exit status 1")
