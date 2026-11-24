@@ -7,6 +7,7 @@ import {
   assignmentFingerprint,
   assignmentFingerprintMatches,
   isRouterManagedAssignment,
+  recordedAssignmentAgent,
 } from './fingerprint.mjs';
 import { classifyRun, hasActiveRun, isQueuedNotStarted, latestRun, countedRuns, quotaHoldUntilMs, diagnoseFailedRuns } from './run-classification.mjs';
 import { storyKey, slugKey, descStoryDeps, descStoryId, descIdentifierDeps, dependencyParkIds } from './story-identity.mjs';
@@ -406,13 +407,27 @@ function agentNameForAssignee(assigneeId, agents) {
   return found ? found[0] : null;
 }
 
+// PANT-1456: router_assignment_* metadata only proves Auriga owns the CURRENT
+// assignment while router_assignment_agent still names the current assignee.
+// Once anyone else reassigns the issue (a human, a squad, another agent), the
+// metadata is stale: treating it as Auriga-owned overwrote the reassignment and
+// started a second builder (FFE-691). Legacy metadata with only a fingerprint
+// (no recorded agent) stays router-managed.
+export function isRouterOwnedAssignment(issue, cfg) {
+  if (!isRouterManagedAssignment(issue)) return false;
+  if (!issue.assignee_id) return true;
+  const recordedAgent = recordedAssignmentAgent(issue);
+  if (!recordedAgent) return true;
+  return agentNameForAssignee(issue.assignee_id, cfg.AGENTS || {}) === recordedAgent;
+}
+
 // Idempotent dispatch decision for a single issue + target agent (PAN-8245).
 // Returns { action: 'assign'|'noop', reason, currentAgent }.
 export function assignmentDecision(issue, targetAgent, cfg, opts = {}) {
   if (!issue.assignee_id) return { action: 'assign', reason: 'unassigned' };
   const currentAgent = agentNameForAssignee(issue.assignee_id, cfg.AGENTS);
   if (currentAgent === targetAgent) return { action: 'noop', reason: 'already-assigned-target', currentAgent };
-  if (!isRouterManagedAssignment(issue)) return { action: 'noop', reason: 'manual-assignment', currentAgent };
+  if (!isRouterOwnedAssignment(issue, cfg)) return { action: 'noop', reason: 'manual-assignment', currentAgent };
   if (currentAgent && assignmentFingerprintMatches(issue, currentAgent, cfg, opts)) {
     return { action: 'noop', reason: 'unchanged-router-assignment', currentAgent };
   }
@@ -449,7 +464,7 @@ export function selectAssignments(issues, cfg, inflight, opts = {}) {
     .filter((i) => (i.status || '').toLowerCase() === ISSUE_STATUS.TODO)
     .filter(isPlainTodo) // PANT-931: a backlog/blocked column mapped onto todo is parked, not work
     .filter((i) => !exclude.has(i.identifier))
-    .filter((i) => !i.assignee_id || isRouterManagedAssignment(i))
+    .filter((i) => !i.assignee_id || isRouterOwnedAssignment(i, cfg))
     .filter((i) => cfg.PROJECT_IDS.includes(i.project_id))
     .filter((i) => {
       const reason = smokeScratchReason(i);
