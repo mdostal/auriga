@@ -68,6 +68,13 @@ export const MODEL_OVERRIDE = _ext.MODEL_OVERRIDE ?? {
 
 export const HUMAN_NAMES = _ext.HUMAN_NAMES ?? ['mathew', 'dostal'];
 
+// PANT-1459 (pantheon-v2#598): description phrases that mark a ticket as claimed
+// by a founder/human. Such a ticket is a human todo (isHumanTodo): never routed,
+// never re-run by assigned_idle. Same list the dragon autopilot reads as
+// `founder_claim_markers` (either spelling is accepted). "claimed by <name>" for
+// every HUMAN_NAMES entry always matches as well (lib/agent-decline.mjs).
+export const FOUNDER_CLAIM_MARKERS = _ext.FOUNDER_CLAIM_MARKERS ?? _ext.founder_claim_markers ?? [];
+
 // Batch / cadence caps.
 export const CAPS = _ext.CAPS ?? {
   perCyclePerAgent: 2, // never mass-flip
@@ -84,6 +91,7 @@ export const CAPS = _ext.CAPS ?? {
   assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
   assignedIdleQueuedStaleMs: Infinity, // PANT-1154 / auriga#261: a queued, never-started run is never treated as idle (rerun would cancel it and lose its queue place)
   assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
+  assignedIdleNoProgressRuns: 3, // PANT-1459: stop re-running an assigned todo whose assignee's last N completed runs delivered no PR/push/commit; unassign + park instead (0 = off). A run that declines the ticket parks it at once.
   redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago (PAN-7771)
   decisionSkipWindowCycles: 10, // PANT-816: at most one `skip` decision record per issue per N cycles (see lib/decisions.mjs)
 };
