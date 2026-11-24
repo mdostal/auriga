@@ -5,6 +5,7 @@
 // dispatchEligible() before every dispatch, and commits the dispatch through
 // commitDispatch() in auriga-router.mjs.
 
+import { heimdallHoldUntilMs } from './model-override.mjs';
 import { PLANNING_AGENT, isAgentParked, isHiveStory, isSeedByLabel, isSeedForTenant } from './core.mjs';
 
 // Passes that route an issue to a newly chosen agent. The other passes rerun
@@ -28,7 +29,12 @@ export function isRateLimitError(e) {
 // or per-pass cap is spent, so the pass should end rather than skip.
 //
 // Guards run in this fixed order:
-//   max-assign, pass cap, agent-parked, seed, blocked runtime, perCyclePerAgent.
+//   max-assign, pass cap, agent-parked, heimdall-queue hold, agent-unavailable,
+//   seed, blocked runtime, perCyclePerAgent.
+//
+// The heimdall-queue hold (PANT-1327) applies to every pass, reruns included:
+// Heimdall said no model is available for this task until its reset, so any
+// dispatch before then would only fail. ctx.now defaults to the clock.
 // Leave ctx.agent/ctx.runtime unset to check only the caps and the issue itself
 // (a pass does this at the top of its loop, before it has picked an agent).
 //
@@ -44,11 +50,14 @@ export function dispatchEligible(issue, pass, ctx = {}) {
     passCount = 0, passCap = Infinity,
     blockedRuntimes = new Set(),
     agentCycleAssigns = {}, perCyclePerAgent = Infinity,
+    now = Date.now(),
   } = ctx;
 
   if (assigned >= maxAssign) return { ok: false, reason: 'max-assign', stop: true };
   if (passCount >= passCap) return { ok: false, reason: 'pass-cap', stop: true };
   if (isAgentParked(issue)) return { ok: false, reason: 'agent-parked', stop: false };
+  const holdUntil = heimdallHoldUntilMs(issue, now, cfg);
+  if (holdUntil !== null) return { ok: false, reason: `heimdall-queue-until ${new Date(holdUntil).toISOString()}`, stop: false };
   if (agent && cfg?.AGENTS?.[agent]?.available === false) return { ok: false, reason: cfg.AGENTS[agent].availabilityReason || 'agent-unavailable', stop: false };
   if (agent && agent !== PLANNING_AGENT && ROUTING_PASSES.has(pass) && issue && !isHiveStory(issue)) {
     const seed = pass === 'build' ? isSeedForTenant(issue, allIssues, cfg) : isSeedByLabel(issue);
