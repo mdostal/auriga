@@ -38,6 +38,7 @@ import { ISSUE_STATUS, ISSUE_STATUS_ALT_SPELLINGS, isTerminalIssueStatus, isPlai
 import { createPantheonV2L2BacklogAdapter, createPantheonV2L2SpawnAdapter } from './lib/adapters/pantheon-v2-l2/index.mjs';
 import { assignmentMetadata } from './lib/fingerprint.mjs';
 import { dispatchEligible, isRateLimitError } from './lib/dispatch-guards.mjs';
+import { holdMetadata, modelOverrideConfig, planDispatchFromRoute } from './lib/model-override.mjs';
 import { buildDecision, capsSnapshot, createSkipLimiter, laneReason } from './lib/decisions.mjs';
 import { loadRealTopology, resolveParentBoardConfig, resolveChildBoardConfigs } from './lib/orchestrator-topology.mjs';
 import { loadExternalConfig } from './lib/config-loader.mjs';
@@ -226,22 +227,40 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
   const emit = (error) => {
     if (decision) recordDecision(dc, { identifier, pass, action, agent, runtime, ...decision, caps, error });
   };
+  let override = null;
   try {
     if (action === 'assign') {
+      let plan = { kind: 'default' };
       if (typeof dc.spawn.selectRoute === 'function') {
         const kind = pass === 'review' ? 'review' : 'build';
         try {
           const executedLane = dc.cfg.AGENTS[agent]?.laneId;
           const route = dc.spawn.selectRoute(identifier, kind, executedLane);
           const suggestedLane = route?.chosen_lane || route?.lane_id;
-          if (suggestedLane && suggestedLane !== executedLane) {
+          if (suggestedLane && suggestedLane !== executedLane && route?.verdict !== 'queue') {
             dc.log('route_lane_mismatch', { identifier, suggested_lane: suggestedLane, executed_lane: executedLane ?? null, reason: 'configured-lane-executor; outcome withheld' });
+          }
+          if (modelOverrideConfig(dc.cfg).enabled) {
+            plan = planDispatchFromRoute(route, { executedLane, preferredModel: dc.cfg.AGENTS[agent]?.model, now: dc.now });
           }
         } catch (e) { dc.log('route_select_error', { identifier, error: e.message }); }
       }
-      dc.spawn.assignIssue(identifier, agent);
+      if (plan.kind === 'hold') return holdDispatch(dc, { identifier, agent, pass, plan, emit });
+      if (plan.kind === 'override') {
+        override = plan;
+        dc.modelOverrides.set(identifier, plan.model);
+        dc.log('model_override', { identifier, pass, agent, lane: plan.lane, preferred_model: plan.preferredModel ?? null, model: plan.model, reason: plan.reason });
+        dc.spawn.assignIssue(identifier, agent, { model: plan.model });
+      } else {
+        dc.modelOverrides.delete(identifier);
+        dc.spawn.assignIssue(identifier, agent);
+      }
     } else {
-      dc.spawn.rerunIssue(identifier);
+      // A rerun in the same cycle as an override (the forced rerun after an
+      // assign) keeps that task's model; any other rerun is unchanged.
+      const model = dc.modelOverrides.get(identifier);
+      if (model) dc.spawn.rerunIssue(identifier, { model });
+      else dc.spawn.rerunIssue(identifier);
     }
   } catch (error) {
     if (runtime && isRateLimitError(error)) dc.blockedRuntimes.add(runtime);
@@ -261,10 +280,31 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
 
   if (action === 'assign' && typeof dc.backlog.setIssueMetadata === 'function') {
     const issueObj = issue || dc.issues.find((i) => i.identifier === identifier) || { identifier };
-    try { dc.backlog.setIssueMetadata(identifier, assignmentMetadata(issueObj, agent, dc.cfg, { now: dc.now })); }
+    // An expired heimdall-queue hold is cleared on the dispatch that ends it.
+    const { holdUntilKey } = modelOverrideConfig(dc.cfg);
+    const clearHold = issueObj.metadata && issueObj.metadata[holdUntilKey] ? holdMetadata(null, dc.cfg) : {};
+    try { dc.backlog.setIssueMetadata(identifier, { ...assignmentMetadata(issueObj, agent, dc.cfg, { now: dc.now }), ...clearHold }); }
     catch (e) { dc.log('assign_metadata_error', { identifier, error: e.message }); }
   }
-  return { ok: true };
+  return { ok: true, ...(override ? { model: override.model } : {}) };
+}
+
+// Heimdall's verdict was `queue` with a future resets_at (PANT-1327): nothing
+// is dispatched. The hold goes into issue metadata, where dispatchEligible()
+// reads it, so later cycles (fresh processes included) skip the task until
+// then. Returns { ok: false, held: true, error } so each pass's existing error
+// path logs and moves on; the error text avoids the rate-limit words, so the
+// runtime is not blocked for the cycle (no run was attempted on it).
+function holdDispatch(dc, { identifier, agent, pass, plan, emit }) {
+  dc.modelOverrides.delete(identifier);
+  dc.log('dispatch_held', { identifier, pass, agent, until: plan.until, reason: plan.reason });
+  if (typeof dc.backlog.setIssueMetadata === 'function') {
+    try { dc.backlog.setIssueMetadata(identifier, holdMetadata(plan, dc.cfg)); }
+    catch (e) { dc.log('hold_metadata_error', { identifier, error: e.message }); }
+  }
+  const error = new Error(`held by heimdall queue until ${plan.until}`);
+  emit(error);
+  return { ok: false, held: true, until: plan.until, error };
 }
 
 // ---- decision records (PANT-816) --------------------------------------------
@@ -985,12 +1025,16 @@ async function runCycle(opts, state) {
     dryRun, maxAssign, skipLimiter, skipWindow: cfgImpl.CAPS.decisionSkipWindowCycles ?? 10,
     tenantId: opts.tenantId ?? process.env.AURIGA_TENANT_ID ?? null,
     instanceId: process.env.AURIGA_INSTANCE_ID ?? null,
+    // identifier -> model of this cycle's per-task overrides (PANT-1327), so a
+    // forced rerun after an override assign keeps the same model.
+    modelOverrides: new Map(),
   };
   // Guard inputs for dispatchEligible(), read fresh at each call.
   const guardCtx = (extra = {}) => ({
     cfg: cfgImpl, allIssues: issues,
     assigned: dc.assigned, maxAssign, blockedRuntimes,
     agentCycleAssigns: priorAgentCycleAssigns, perCyclePerAgent: cfgImpl.CAPS.perCyclePerAgent ?? Infinity,
+    now,
     ...extra,
   });
   const agentNameById = (id) => Object.entries(cfgImpl.AGENTS).find(([, a]) => a.id === id)?.[0];

@@ -352,17 +352,22 @@ export function createPantheonV2L2SpawnAdapter(cfg = {}) {
 
   // WRITE method: propagates any failure to the caller (no try/catch) —
   // matches the multica-direct adapter's own convention.
-  function assignIssue(identifier, agentName) {
+  // opts.model (PANT-1327): a per-task model override from Heimdall's route
+  // verdict, sent as `model` on this one assignment. The agent row's model is
+  // never touched; absent, the body is exactly what it was before.
+  function assignIssue(identifier, agentName, opts = {}) {
     const agentId = resolveAgentId(agentName);
-    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/assign`, {
-      type: 'agent',
-      id: agentId,
-    });
+    const body = { type: 'agent', id: agentId };
+    if (opts && typeof opts.model === 'string' && opts.model) body.model = opts.model;
+    return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/assign`, body);
   }
 
   // WRITE method: propagates any failure to the caller — matches the
   // multica-direct adapter's own convention.
-  function rerunIssue(identifier) {
+  function rerunIssue(identifier, opts = {}) {
+    if (opts && typeof opts.model === 'string' && opts.model) {
+      return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/rerun`, { model: opts.model });
+    }
     return run('POST', `/api/backlog/issues/${encodeURIComponent(identifier)}/rerun`);
   }
 
