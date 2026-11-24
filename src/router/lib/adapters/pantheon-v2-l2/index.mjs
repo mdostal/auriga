@@ -237,6 +237,19 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     }
   }
 
+  // PANT-1457: the issue's comments (GET /api/backlog/issues/:id/comments ->
+  // { comments: [{ body, author, ... }] }), read by the review gate to find a PR
+  // url posted on the ticket. Degrades gracefully ([] on failure).
+  function listIssueComments(identifier) {
+    try {
+      const res = run('GET', `/api/backlog/issues/${encodeURIComponent(identifier)}/comments`);
+      return (res && res.comments) || [];
+    } catch (e) {
+      process.stderr.write(`pantheon-v2-l2: listIssueComments(${identifier}) failed: ${e.message}\n`);
+      return [];
+    }
+  }
+
   // Best-effort: merges metadataObj into the issue's existing metadata via
   // PUT /api/backlog/issues/:id/metadata (Pantheon's own setMetadata, which
   // does { ...existing, ...kv } — confirmed in core/api/backlog.ts +
@@ -286,6 +299,7 @@ export function createPantheonV2L2BacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    listIssueComments,
     createIssue,
     setIssueMetadata,
     writesReady: makeWritesReady(adapterTokenSource(cfg)),

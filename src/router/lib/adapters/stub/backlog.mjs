@@ -60,6 +60,10 @@ export function createStubBacklogAdapter(seedData = {}) {
       comments.push({ id, body });
     },
 
+    listIssueComments(id) {
+      return comments.filter((c) => c.id === id).map((c) => ({ body: c.body }));
+    },
+
     setIssueMetadata(id, metadataObj) {
       const issue = issuesByIdentifier.get(id);
       if (issue) issue.metadata = { ...issue.metadata, ...metadataObj };
