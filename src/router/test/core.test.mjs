@@ -264,6 +264,40 @@ test('idempotent dispatch permits reassignment when router-managed story content
   assert.match(picks[0].assignmentFingerprint, /^[a-f0-9]{64}$/);
 });
 
+// PANT-1456 / FFE-691: stale router_assignment_* metadata must not override a
+// reassignment by another actor (it overwrote it and started a second builder).
+test('idempotent dispatch preserves a reassignment by another actor despite stale router metadata', () => {
+  const base = story('r3', 'JANUS', 1, 'EPIC1', 'HC');
+  // Auriga routed r3 to heimdall-dev-codex, then someone reassigned it to consus-dev ('C'),
+  // and the content changed (so the fingerprint no longer matches either).
+  const reassigned = {
+    ...base,
+    assignee_id: 'C',
+    metadata: assignmentMetadata(base, 'heimdall-dev-codex', CFG, { now: NOW, windowMs: 60_000 }),
+    description: 'scope changed after the reassignment',
+  };
+  const picks = core.selectAssignments([reassigned], CFG, {}, { now: NOW + 1_000, windowMs: 60_000 });
+  assert.equal(picks.length, 0, 'reassigned issue must not be re-routed');
+  assert.deepEqual(
+    core.assignmentDecision(reassigned, 'auriga-dev', CFG, { now: NOW + 1_000, windowMs: 60_000 }),
+    { action: 'noop', reason: 'manual-assignment', currentAgent: 'consus-dev' },
+  );
+  // Reassigned to a human member (assignee id not in AGENTS): also manual.
+  const toHuman = { ...reassigned, assignee_id: 'human-member-uuid' };
+  assert.equal(core.assignmentDecision(toHuman, 'auriga-dev', CFG, {}).reason, 'manual-assignment');
+  assert.equal(core.selectAssignments([toHuman], CFG, {}, {}).length, 0);
+});
+
+test('isRouterOwnedAssignment: router metadata owns the issue only while it names the current assignee', () => {
+  const meta = { router_assignment_agent: 'heimdall-dev-codex', router_assignment_fingerprint: 'x' };
+  assert.equal(core.isRouterOwnedAssignment({ assignee_id: 'HC', metadata: meta }, CFG), true);
+  assert.equal(core.isRouterOwnedAssignment({ assignee_id: 'C', metadata: meta }, CFG), false);
+  assert.equal(core.isRouterOwnedAssignment({ assignee_id: null, metadata: meta }, CFG), true);
+  assert.equal(core.isRouterOwnedAssignment({ assignee_id: 'HC', metadata: {} }, CFG), false);
+  // Legacy fingerprint-only metadata (no recorded agent) keeps the old behavior.
+  assert.equal(core.isRouterOwnedAssignment({ assignee_id: 'C', metadata: { router_assignment_fingerprint: 'x' } }, CFG), true);
+});
+
 test('isHumanTodo: matches the human-todo label regardless of case', () => {
   assert.ok(core.isHumanTodo({ labels: ['human-todo'], metadata: {} }, CFG));
   assert.ok(core.isHumanTodo({ labels: ['Human-Todo'], metadata: {} }, CFG));
