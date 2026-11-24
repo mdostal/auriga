@@ -38,7 +38,7 @@ const iso = (ms) => new Date(ms).toISOString();
 const doneRun = (at = Date.now() - 60_000) => ({ status: 'completed', created_at: iso(at - 60_000), dispatched_at: iso(at - 60_000), completed_at: iso(at), agent_id: BUILDER_ID });
 
 // prs: { [identifier]: pr[] }, mutable by the test between cycles.
-function board(issues, prs = {}) {
+function board(issues, prs = {}, comments = {}) {
   const calls = { assign: [], rerun: [], status: [], comment: [], metadata: [] };
   const runs = {};
   const find = (id) => issues.find((i) => i.identifier === id);
@@ -47,6 +47,7 @@ function board(issues, prs = {}) {
     listAllIssues: (ids) => issues.filter((i) => ids.includes(i.project_id)),
     getIssueRuns: (id) => runs[id] || [],
     getIssuePullRequests: (id) => prs[id] || [],
+    listIssueComments: (id) => (comments[id] || []).map((body) => ({ body })),
     setIssueStatus: (id, status) => { calls.status.push({ identifier: id, status }); const i = find(id); if (i) i.status = status; },
     commentOnIssue: (id, body) => { calls.comment.push({ identifier: id, body }); },
     setIssueMetadata: (id, md) => { calls.metadata.push({ identifier: id, md }); const i = find(id); if (i) i.metadata = { ...i.metadata, ...md }; },
@@ -58,16 +59,21 @@ function board(issues, prs = {}) {
     unassignIssue: (id) => { const i = find(id); if (i) i.assignee_id = null; },
     describeLanes: () => ({}),
   };
-  return { backlog, spawn, calls, runs, prs };
+  return { backlog, spawn, calls, runs, prs, comments };
 }
 
 const run = (b, c, extra = {}) => cycle({ backlog: b.backlog, spawn: b.spawn, cfg: c, log: extra.log || createLogSink(), sleep: NOOP_SLEEP, ...extra });
 const statusesFor = (b, id, status) => b.calls.status.filter((s) => s.identifier === id && s.status === status);
 const assignsFor = (b, id) => b.calls.assign.filter((a) => a.identifier === id);
-// Hold comments only (a review dispatch also posts its squad plan).
-const commentsFor = (b, id) => b.calls.comment.filter((x) => x.identifier === id && !x.body.startsWith('REVIEW SQUAD PLAN'));
+// Hold comments only (a review dispatch also posts its squad plan). PANT-1457:
+// there must never be any; every comment wakes the assignee on Multica.
+const holdCommentsFor = (b, id) => b.calls.comment.filter((x) => x.identifier === id && !x.body.startsWith('REVIEW SQUAD PLAN'));
+// PANT-1457: hold notes the router recorded in metadata.review_hold_note, as { body }.
+const commentsFor = (b, id) => b.calls.metadata
+  .filter((x) => x.identifier === id && typeof x.md.review_hold_note === 'string' && x.md.review_hold_note !== '')
+  .map((x) => ({ body: x.md.review_hold_note }));
 
-test('PANT-1383 (FFE-1598): an in_progress epic with open children and no PR is never promoted or reviewed; one comment over many cycles', async () => {
+test('PANT-1383 (FFE-1598): an in_progress epic with open children and no PR is never promoted or reviewed; one hold note over many cycles, no comment', async () => {
   const P = 'gate-epic-proj';
   const c = fixtureCfg(P);
   const epic = makeIssue({ project_id: P, status: 'in_progress', assignee_id: BUILDER_ID, title: 'Epic: Firefly Events workspace' });
@@ -85,7 +91,8 @@ test('PANT-1383 (FFE-1598): an in_progress epic with open children and no PR is 
   assert.equal(assignsFor(b, epic.identifier).length, 0, 'no review squad, no builder reassign');
   assert.equal(b.calls.rerun.filter((r) => r.identifier === epic.identifier).length, 0, 'no zombie rerun on a waiting parent');
   const comments = commentsFor(b, epic.identifier);
-  assert.equal(comments.length, 1, 'exactly one comment saying why');
+  assert.equal(holdCommentsFor(b, epic.identifier).length, 0, 'no comment: it would wake the assignee (PANT-1457)');
+  assert.equal(comments.length, 1, 'exactly one hold note saying why');
   assert.match(comments[0].body, /open child issue/);
   for (const k of kids) assert.ok(comments[0].body.includes(k.identifier), 'the comment names the open children');
   assert.equal(epic.metadata.review_hold, 'open-children');
@@ -118,6 +125,9 @@ test('PANT-1383: no linked PR or branch = no review; reviewRequiresLinkedPr=fals
   assert.equal(assignsFor(b, held.identifier).length, 0);
   assert.equal(commentsFor(b, held.identifier).length, 1);
   assert.match(commentsFor(b, held.identifier)[0].body, /no pull request or branch/);
+  assert.equal(held.metadata.review_hold_note, commentsFor(b, held.identifier)[0].body);
+  assert.equal(holdCommentsFor(b, held.identifier).length, 0, 'no comment (PANT-1457)');
+  assert.equal(b.calls.comment.length, 0, 'nothing commented at all');
 
   const P2 = 'gate-nopr-off-proj';
   const free = makeIssue({ project_id: P2, status: 'in_review', assignee_id: BUILDER_ID });
@@ -132,7 +142,7 @@ test('PANT-1383: no linked PR or branch = no review; reviewRequiresLinkedPr=fals
   assert.equal(assignsFor(b3, branched.identifier).length, 1, 'a recorded branch counts as linked');
 });
 
-test('PANT-1383: the same issue promoted to review twice with no new commit stops and comments once', async () => {
+test('PANT-1383: the same issue promoted to review twice with no new commit stops and records one hold note', async () => {
   const P = 'gate-loop-proj';
   const c = fixtureCfg(P);
   const story = makeIssue({ project_id: P, status: 'in_progress', assignee_id: BUILDER_ID });
@@ -236,4 +246,111 @@ test('PANT-1383: reviewHoldReason / reviewHeadKey / detectZombies units', () => 
   const epic = { ...parent, assignee_id: BUILDER_ID, project_id: 'x', labels: [] };
   assert.equal(core.detectZombies([epic], { 'P-1': staleRun }, cfg, Date.now(), [epic, open]).length, 0, 'parent with open children is not a zombie');
   assert.equal(core.detectZombies([epic], { 'P-1': staleRun }, cfg, Date.now(), [epic, closed]).length, 1, 'control: without open children it is');
+});
+
+// PANT-1457: live 2026-11-24, the "no pull request or branch is linked" notice
+// was posted as a comment; Multica treats every comment as a trigger and queued
+// a second run for the assignee each time (18 extra runs in 6 h).
+test('PANT-1457: a review hold never posts a comment, over many cycles and every hold reason', async () => {
+  const P = 'gate-1457-nocomment-proj';
+  const c = fixtureCfg(P);
+  const noPr = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const promoting = makeIssue({ project_id: P, status: 'in_progress', assignee_id: BUILDER_ID });
+  const epic = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const kid = makeIssue({ project_id: P, status: 'todo', parent_issue_id: epic.id, labels: ['human-todo'] });
+  const b = board([noPr, promoting, epic, kid], { [epic.identifier]: [linkedOpenPr(epic.identifier)] });
+  b.runs[promoting.identifier] = [doneRun()];
+  const log = createLogSink();
+  for (let k = 0; k < 3; k += 1) await run(b, c, { log });
+
+  assert.equal(b.calls.comment.length, 0, 'no comment on any held issue');
+  assert.equal(noPr.metadata.review_hold, 'no-linked-pr');
+  assert.equal(promoting.metadata.review_hold, 'no-linked-pr');
+  assert.equal(epic.metadata.review_hold, 'open-children');
+  assert.match(promoting.metadata.review_hold_note, /did not move this issue to `in_review`/);
+  // One metadata write per hold, not one per cycle.
+  for (const i of [noPr, promoting, epic]) {
+    assert.equal(commentsFor(b, i.identifier).length, 1, `${i.identifier}: one hold note`);
+  }
+  const holds = log.byEvent('review_hold');
+  assert.ok(holds.length >= 9, 'every cycle still logs every hold');
+  assert.ok(holds.every((h) => typeof h.note === 'string' && h.note.length > 0), 'the log carries the reason text');
+});
+
+// PANT-1457: FFE-1032 had PR #4661 posted in a comment; its branch carried no
+// ticket id, so the PR linkage was empty and the gate held it as "no linked PR".
+test('PANT-1457 (FFE-1032): a PR url posted in a comment counts as a linked PR', async () => {
+  const P = 'gate-1457-comment-pr-proj';
+  const c = fixtureCfg(P);
+  const story = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const b = board([story], {}, {
+    [story.identifier]: ['Starting work.', 'PR: https://github.com/firefly-events/flayr/pull/4661 is up for review.'],
+  });
+  const log = createLogSink();
+  await run(b, c, { log });
+
+  assert.equal(assignsFor(b, story.identifier).length, 1, 'the review squad is dispatched');
+  assert.equal(log.byEvent('review_hold').length, 0, 'no hold');
+  assert.deepEqual(log.byEvent('review_pr_from_comment')[0].prs, ['https://github.com/firefly-events/flayr/pull/4661']);
+  assert.equal(story.metadata.review_dispatched_head, 'https://github.com/firefly-events/flayr/pull/4661@',
+    'the dispatch head key is built from the PR the gate saw');
+});
+
+test('PANT-1457: a finished build run with its PR url only in a comment is promoted to in_review', async () => {
+  const P = 'gate-1457-promote-proj';
+  const c = fixtureCfg(P);
+  const story = makeIssue({ project_id: P, status: 'in_progress', assignee_id: BUILDER_ID });
+  const b = board([story], {}, { [story.identifier]: ['Opened https://github.com/mdostal/auriga/pull/294'] });
+  b.runs[story.identifier] = [doneRun()];
+  await run(b, c);
+  assert.equal(statusesFor(b, story.identifier, 'in_review').length, 1);
+  assert.equal(b.calls.comment.filter((x) => !x.body.startsWith('REVIEW SQUAD PLAN')).length, 0);
+});
+
+test('PANT-1457: a PR url in the description counts; comments are not read when the linkage already has a PR', async () => {
+  for (const kind of ['described', 'linked']) {
+    const P = `gate-1457-${kind}-proj`;
+    const story = kind === 'described'
+      ? makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID,
+        description: 'target_repo: mdostal/auriga\nSee https://github.com/mdostal/auriga/pull/12 for the change.' })
+      : makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+    const b = board([story], kind === 'linked' ? { [story.identifier]: [linkedOpenPr(story.identifier)] } : {});
+    let commentReads = 0;
+    const inner = b.backlog.listIssueComments;
+    b.backlog.listIssueComments = (id) => { commentReads += 1; return inner(id); };
+    await run(b, fixtureCfg(P));
+    assert.equal(assignsFor(b, story.identifier).length, 1, `${kind}: dispatched for review`);
+    assert.equal(commentReads, 0, `${kind}: no comment read when something already links the issue`);
+  }
+});
+
+test('PANT-1457: comments without a PR url still hold, and a failing comment read degrades to a hold', async () => {
+  const P = 'gate-1457-nourl-proj';
+  const c = fixtureCfg(P);
+  const story = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const b = board([story], {}, { [story.identifier]: ['see branch later', 'https://github.com/mdostal/auriga/issues/5'] });
+  await run(b, c);
+  assert.equal(assignsFor(b, story.identifier).length, 0, 'an issue url is not a PR url');
+  assert.equal(story.metadata.review_hold, 'no-linked-pr');
+
+  const P2 = 'gate-1457-throw-proj';
+  const s2 = makeIssue({ project_id: P2, status: 'in_review', assignee_id: BUILDER_ID });
+  const b2 = board([s2]);
+  b2.backlog.listIssueComments = () => { throw new Error('boom'); };
+  const log = createLogSink();
+  await run(b2, fixtureCfg(P2), { log });
+  assert.equal(assignsFor(b2, s2.identifier).length, 0);
+  assert.equal(log.byEvent('comments_fetch_error').length, 1);
+});
+
+test('PANT-1457: prUrlsInText units', () => {
+  assert.deepEqual(core.prUrlsInText(''), []);
+  assert.deepEqual(core.prUrlsInText(undefined, null), []);
+  assert.deepEqual(core.prUrlsInText('x https://github.com/Firefly-Events/Flayr/pull/4661/files y'),
+    ['https://github.com/firefly-events/flayr/pull/4661']);
+  assert.deepEqual(core.prUrlsInText(['http://www.github.com/a/b/pull/1', 'https://github.com/a/b/pull/1 again', 'https://github.com/a/b/pull/2']),
+    ['https://github.com/a/b/pull/1', 'https://github.com/a/b/pull/2']);
+  assert.deepEqual(core.prUrlsInText('https://github.com/a/b/issues/3 https://gitlab.com/a/b/pull/4'), []);
+  assert.equal(core.hasLinkedPrOrBranch({ description: 'PR https://github.com/a/b/pull/9' }, []), true);
+  assert.equal(core.hasLinkedPrOrBranch({ description: 'no pr yet' }, []), false);
 });
