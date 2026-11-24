@@ -437,3 +437,35 @@ that selection matches the mapped executor. A mismatch emits
 account. Unmapped execution also withholds attribution. The configured agent
 list remains the boundary for routing; a Heimdall suggestion never permits
 assignment outside it.
+
+#### Per-task model override and queue hold (PANT-1327, heimdall#142)
+
+At each `assign`, Auriga reads the same route verdict for what it says about
+the model (`src/router/lib/model-override.mjs`). Heimdall decides; Auriga only
+dispatches what the verdict names.
+
+- **Override.** When the verdict is `route` for the agent's own mapped lane and
+  Heimdall named a swap (`model_swap` set, or `model` differs from
+  `preferred_model`), that one assignment carries `model` in the assign body
+  (and in a forced rerun in the same cycle). The agent row's model is left
+  alone as the preference. Each override logs `model_override` with
+  `identifier`, `agent`, `lane`, `preferred_model`, `model` and `reason` (the
+  swap's cause). A bare `model` equal to the preference is not an override:
+  Pantheon fills `model` from the lane declaration on every answer.
+- **No override.** With no swap, a verdict for another lane, `no_route`, or no
+  answer, the dispatch is exactly what it was before.
+- **Queue hold.** A `queue` verdict with a future `resets_at` dispatches
+  nothing. It logs `dispatch_held` and writes `heimdall_queue_until` and
+  `heimdall_queue_reason` to the issue metadata. `dispatchEligible` skips the
+  issue in every pass until then, and the next dispatch clears both keys. A
+  `queue` with no `resets_at` has no time to hold until, so it dispatches as
+  before.
+- **Limits.** Auriga never picks a model Heimdall did not name, never downgrades
+  on its own, and spends no more than before. `MODEL_OVERRIDE` in the config
+  (`enabled`, `holdUntilKey`, `holdReasonKey`) turns this off or renames the
+  keys.
+
+The model only reaches the run if the layers below carry it. Pantheon's
+`/assign` and `/rerun` must forward `model`, and Multica must run a task on a
+model other than its agent row's. Until both do, the override is decided and
+logged here but the run still uses the agent's own model.
