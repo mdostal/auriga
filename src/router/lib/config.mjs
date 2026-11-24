@@ -56,6 +56,16 @@ export const MODEL_FALLBACK_CHAINS = {
 // (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
 // Add a name here when a new human-owned ticket needs to route to the human
 // queue (scripts/export-human-queue.mjs) instead of an agent lane.
+// PANT-1327: per-task model override and queue hold from Heimdall's route
+// verdict (heimdall#142). `enabled: false` turns both off (dispatch as before).
+// The hold is kept in issue metadata under these keys. See
+// lib/model-override.mjs for the rules.
+export const MODEL_OVERRIDE = _ext.MODEL_OVERRIDE ?? {
+  enabled: true,
+  holdUntilKey: 'heimdall_queue_until',
+  holdReasonKey: 'heimdall_queue_reason',
+};
+
 export const HUMAN_NAMES = _ext.HUMAN_NAMES ?? ['mathew', 'dostal'];
 
 // Batch / cadence caps.
