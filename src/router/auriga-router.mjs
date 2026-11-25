@@ -387,17 +387,21 @@ async function verifyAssignStarted(dc, { identifier, agent, runtime, pass, noRun
 }
 
 // Park an issue for a human once automatic retries give up: blocked status, a
-// blocked_reason, and a comment explaining why. Each step is best-effort and a
+// blocked_reason, and a note explaining why. Each step is best-effort and a
 // failure is logged, never thrown, so it can't crash the cycle.
+// PANT-1461 (pantheon-v2#596): the note goes into metadata (`blocked_note`) and
+// the log, never a comment. Multica treats every comment as a trigger, so the
+// "accumulated 5+ runs ... (status: blocked)" comment queued a second run for
+// the very agent the router had just given up on (FFE-605, 2026-11-25).
+const BLOCKED_NOTE_KEY = 'blocked_note';
 function parkForHuman(dc, identifier, { blockedReason, comment, errorEvent }) {
+  dc.log('park_for_human', { identifier, blocked_reason: blockedReason, note: comment });
   try { dc.backlog.setIssueStatus(identifier, ISSUE_STATUS.BLOCKED); }
   catch (e) { dc.log(errorEvent, { identifier, op: 'set-blocked', error: e.message }); }
   if (typeof dc.backlog.setIssueMetadata === 'function') {
-    try { dc.backlog.setIssueMetadata(identifier, { blocked_reason: blockedReason }); }
+    try { dc.backlog.setIssueMetadata(identifier, { blocked_reason: blockedReason, [BLOCKED_NOTE_KEY]: comment }); }
     catch (e) { dc.log(errorEvent, { identifier, op: 'set-blocked-reason', error: e.message }); }
   }
-  try { dc.backlog.commentOnIssue(identifier, comment); }
-  catch (e) { dc.log(errorEvent, { identifier, op: 'comment', error: e.message }); }
 }
 
 // PANT-1459 (pantheon-v2#598): park a ticket its assignee declined (or made no
@@ -502,17 +506,23 @@ function zombieGiveUpComment(cfgImpl) {
 
 // Publish the review squad plan onto the ticket, so what the squad will do is
 // visible on the board up front and is read by the squad agent. Best-effort: a
-// comment failure must never block the dispatch.
+// failure must never block the dispatch.
+// PANT-1461: written to metadata (`review_squad_plan`), not as a comment. A
+// comment posted here woke the issue's current assignee (the builder, or a
+// reviewer already running) and queued a second task beside the dispatch.
+const REVIEW_SQUAD_PLAN_KEY = 'review_squad_plan';
+function squadPlanText(dc, plan) {
+  return 'REVIEW SQUAD PLAN — ' + dc.core.squadPlanSummary(plan) +
+    '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
+    (plan.playwright ? ' + Playwright/E2E' : '') +
+    '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.';
+}
 function postSquadPlan(dc, identifier, plan) {
-  try {
-    dc.backlog.commentOnIssue(
-      identifier,
-      'REVIEW SQUAD PLAN — ' + dc.core.squadPlanSummary(plan) +
-      '\n\nThe review agent runs each enabled perspective and TRULY verifies (QA runs the real build + tests' +
-      (plan.playwright ? ' + Playwright/E2E' : '') +
-      '), then merges to dev on a real all-perspective pass, or sends the story back with concrete per-perspective feedback.'
-    );
-  } catch (e) { dc.log('review_comment_error', { identifier, error: e.message }); }
+  const text = squadPlanText(dc, plan);
+  dc.log('review_squad_plan', { identifier, plan: text });
+  if (typeof dc.backlog.setIssueMetadata !== 'function') return;
+  try { dc.backlog.setIssueMetadata(identifier, { [REVIEW_SQUAD_PLAN_KEY]: text }); }
+  catch (e) { dc.log('review_comment_error', { identifier, error: e.message }); }
 }
 
 // PANT-684: unassign todo issues whose assignee is an archived/removed agent.
@@ -1574,12 +1584,21 @@ function handOffToBoard(identifier, { board, event, metadataKey, comment }, { is
   }
 
   logImpl(`${event}_ok`, { identifier, newIdentifier: createdIssue && createdIssue.identifier });
-  try {
-    backlog.commentOnIssue(identifier, comment(createdIssue));
-  } catch (e) { logImpl(`${event}_comment_error`, { identifier, error: e.message }); }
+  // PANT-1461: unassign BEFORE commenting. Multica treats every comment as a
+  // trigger for the assignee; on an unassigned issue the pointer comment wakes
+  // nobody. If the unassign fails, skip the comment rather than wake the agent;
+  // the hand-off is still in the log and in the new issue's metadata.
+  let unassigned = true;
   try {
     spawn.unassignIssue(identifier);
-  } catch (e) { logImpl(`${event}_unassign_error`, { identifier, error: e.message }); }
+  } catch (e) { unassigned = false; logImpl(`${event}_unassign_error`, { identifier, error: e.message }); }
+  if (unassigned) {
+    try {
+      backlog.commentOnIssue(identifier, comment(createdIssue));
+    } catch (e) { logImpl(`${event}_comment_error`, { identifier, error: e.message }); }
+  } else {
+    logImpl(`${event}_comment_skipped`, { identifier, reason: 'still-assigned' });
+  }
   return { ok: true, error: null };
 }
 
