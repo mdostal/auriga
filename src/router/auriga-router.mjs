@@ -228,6 +228,16 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
     if (decision) recordDecision(dc, { identifier, pass, action, agent, runtime, ...decision, caps, error });
   };
   let override = null;
+  // PANT-1461: an issue never holds two live tasks for one agent. Assigning an
+  // agent that already has a fresh queued/running task on this issue would make
+  // Multica enqueue a second one beside it, so the assign is skipped. (A rerun
+  // re-enqueues the assignee's task rather than adding one, so it is left alone.)
+  if (action === 'assign' && agentHasLiveTask(dc, identifier, agent)) {
+    const error = new Error(`agent-task-active: ${agent} already has a queued or running task on ${identifier}`);
+    dc.log('dispatch_skip_active_task', { identifier, pass, agent });
+    emit(error);
+    return { ok: false, activeTask: true, error };
+  }
   try {
     if (action === 'assign') {
       let plan = { kind: 'default' };
@@ -287,6 +297,21 @@ function commitDispatch(dc, { identifier, agent, runtime, pass, action, issue, r
     catch (e) { dc.log('assign_metadata_error', { identifier, error: e.message }); }
   }
   return { ok: true, ...(override ? { model: override.model } : {}) };
+}
+
+// Does `agent` already have a fresh (not stale) queued or running task on the
+// issue? Run rows without an agent_id are not attributed to anyone. A failed
+// read answers no, so a board hiccup never stalls dispatch.
+function agentHasLiveTask(dc, identifier, agent) {
+  const agentId = agent && dc.cfg.AGENTS[agent]?.id;
+  if (!agentId) return false;
+  let runs = [];
+  try { runs = dc.backlog.getIssueRuns(identifier) || []; }
+  catch (e) { dc.log('active_task_check_error', { identifier, error: e.message }); return false; }
+  const own = runs.filter((r) => r && r.agent_id === agentId);
+  const staleMs = dc.cfg.CAPS.zombieStaleMs ?? Infinity;
+  const queuedStaleMs = dc.cfg.CAPS.assignedIdleQueuedStaleMs ?? staleMs;
+  return dc.core.hasActiveRun(own, dc.now, staleMs, queuedStaleMs);
 }
 
 // Heimdall's verdict was `queue` with a future resets_at (PANT-1327): nothing

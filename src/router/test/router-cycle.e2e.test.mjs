@@ -468,9 +468,10 @@ test('route new todos: no run row appearing within the verify wait logs verify_n
 // Once an in_progress issue's run count reaches cfg.CAPS.zombieMaxAttempts,
 // detectZombies emits 'give-up' instead of 'assign'/'rerun'. The router must
 // never actuate (assignIssue/rerunIssue) for that action, must log
-// zombie_give_up, set the issue status to blocked, and best-effort comment.
+// zombie_give_up, set the issue status to blocked, and record why in metadata
+// (blocked_note). PANT-1461: never a comment, which would wake the assignee.
 
-test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIssue, logs zombie_give_up, sets blocked, and gets a best-effort comment', async () => {
+test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIssue, logs zombie_give_up, sets blocked, and records a blocked_note instead of a comment', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000); // 1h old, well past zombieStaleMs
   const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
@@ -495,12 +496,15 @@ test('zombie give-up: an issue at the attempt cap never gets assignIssue/rerunIs
   const blockedStatus = calls.status.find((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked');
   assert.ok(blockedStatus, 'give-up must set issue status to blocked');
 
-  assert.equal(calls.comment.length, 1, 'give-up should best-effort comment on the issue');
-  assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
-  assert.ok(calls.comment[0].body.includes('blocked'), 'give-up comment must mention blocked status');
+  assert.equal(calls.comment.length, 0, 'no comment: Multica would wake the assignee (PANT-1461)');
+  const md = calls.metadata.find((m) => m.identifier === stuckIssue.identifier && m.metadataObj.blocked_note);
+  assert.ok(md, 'the give-up note goes into metadata.blocked_note');
+  assert.ok(md.metadataObj.blocked_note.includes('blocked'), 'the note mentions the blocked status');
+  assert.equal(md.metadataObj.blocked_reason, 'zombie-give-up-max-attempts');
+  assert.equal(log.byEvent('park_for_human').length, 1);
 });
 
-test('zombie give-up: a comment failure is swallowed and never crashes the cycle', async () => {
+test('zombie give-up: a metadata failure is swallowed and never crashes the cycle', async () => {
   const AURIGA = projectId('Pantheon Core');
   const stale = Date.now() - (60 * 60 * 1000);
   const stuckIssue = makeIssue({ project_id: AURIGA, status: 'in_progress', assignee_id: 'A', labels: ['not-a-seed'] });
@@ -508,7 +512,7 @@ test('zombie give-up: a comment failure is swallowed and never crashes the cycle
   runsByIdentifier[stuckIssue.identifier] = Array.from({ length: cfg.CAPS.zombieMaxAttempts }, () => ({
     status: 'failed', error: 'boom', created_at: new Date(stale).toISOString(),
   }));
-  backlog.commentOnIssue = () => { throw new Error('comment API down'); };
+  backlog.setIssueMetadata = () => { throw new Error('metadata API down'); };
   const log = createLogSink();
 
   await assert.doesNotReject(cycle({ backlog, spawn, cfg, log, sleep: NOOP_SLEEP }));
@@ -517,7 +521,7 @@ test('zombie give-up: a comment failure is swallowed and never crashes the cycle
   assert.ok(!calls.rerun.some((c) => c.identifier === stuckIssue.identifier));
   assert.equal(log.byEvent('zombie_give_up').length, 1);
   assert.equal(log.byEvent('zombie_give_up_error').length, 1);
-  // setIssueStatus(blocked) still succeeded even though comment failed
+  // setIssueStatus(blocked) still succeeded even though metadata failed
   assert.ok(calls.status.some((s) => s.identifier === stuckIssue.identifier && s.status === 'blocked'));
 });
 
@@ -536,9 +540,9 @@ test('zombie give-up: a setIssueStatus failure is swallowed and never crashes th
 
   assert.equal(log.byEvent('zombie_give_up').length, 1);
   assert.equal(log.byEvent('zombie_give_up_error').length, 1);
-  // comment is still attempted even if setIssueStatus failed
-  assert.equal(calls.comment.length, 1);
-  assert.equal(calls.comment[0].identifier, stuckIssue.identifier);
+  // the note is still recorded even if setIssueStatus failed, and nothing is commented
+  assert.equal(calls.comment.length, 0);
+  assert.ok(calls.metadata.some((m) => m.identifier === stuckIssue.identifier && m.metadataObj.blocked_note));
 });
 
 // ---- PANT-444: give-up paths must write metadata.blocked_reason ----
@@ -669,7 +673,8 @@ test('PANT-1025: a review give-up after real errors quotes the error and makes n
   await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(log.byEvent('review_give_up').length, 1);
-  const body = calls.comment.find((c) => c.identifier === stuck.identifier)?.body || '';
+  assert.equal(calls.comment.filter((c) => c.identifier === stuck.identifier).length, 0, 'no comment (PANT-1461)');
+  const body = calls.metadata.find((m) => m.identifier === stuck.identifier && m.metadataObj.blocked_note)?.metadataObj.blocked_note || '';
   assert.match(body, /> fatal: could not read from remote repository/);
   assert.doesNotMatch(body, /Playwright|startup hang|zero output tokens/);
 });
@@ -683,7 +688,8 @@ test('PANT-1025: a review give-up offers the startup-hang hypothesis only when r
   await cycle({ backlog, spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP });
 
   assert.equal(log.byEvent('review_give_up').length, 1);
-  const body = calls.comment.find((c) => c.identifier === stuck.identifier)?.body || '';
+  assert.equal(calls.comment.filter((c) => c.identifier === stuck.identifier).length, 0, 'no comment (PANT-1461)');
+  const body = calls.metadata.find((m) => m.identifier === stuck.identifier && m.metadataObj.blocked_note)?.metadataObj.blocked_note || '';
   assert.match(body, /startup hang/);
 });
 
