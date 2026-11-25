@@ -65,9 +65,9 @@ function board(issues, prs = {}, comments = {}) {
 const run = (b, c, extra = {}) => cycle({ backlog: b.backlog, spawn: b.spawn, cfg: c, log: extra.log || createLogSink(), sleep: NOOP_SLEEP, ...extra });
 const statusesFor = (b, id, status) => b.calls.status.filter((s) => s.identifier === id && s.status === status);
 const assignsFor = (b, id) => b.calls.assign.filter((a) => a.identifier === id);
-// Hold comments only (a review dispatch also posts its squad plan). PANT-1457:
-// there must never be any; every comment wakes the assignee on Multica.
-const holdCommentsFor = (b, id) => b.calls.comment.filter((x) => x.identifier === id && !x.body.startsWith('REVIEW SQUAD PLAN'));
+// PANT-1457/1461: the router never comments on an assigned issue; every comment
+// wakes the assignee on Multica (the squad plan is metadata too, since PANT-1461).
+const holdCommentsFor = (b, id) => b.calls.comment.filter((x) => x.identifier === id);
 // PANT-1457: hold notes the router recorded in metadata.review_hold_note, as { body }.
 const commentsFor = (b, id) => b.calls.metadata
   .filter((x) => x.identifier === id && typeof x.md.review_hold_note === 'string' && x.md.review_hold_note !== '')
@@ -304,7 +304,7 @@ test('PANT-1457: a finished build run with its PR url only in a comment is promo
   b.runs[story.identifier] = [doneRun()];
   await run(b, c);
   assert.equal(statusesFor(b, story.identifier, 'in_review').length, 1);
-  assert.equal(b.calls.comment.filter((x) => !x.body.startsWith('REVIEW SQUAD PLAN')).length, 0);
+  assert.equal(b.calls.comment.length, 0);
 });
 
 test('PANT-1457: a PR url in the description counts; comments are not read when the linkage already has a PR', async () => {
@@ -353,4 +353,52 @@ test('PANT-1457: prUrlsInText units', () => {
   assert.deepEqual(core.prUrlsInText('https://github.com/a/b/issues/3 https://gitlab.com/a/b/pull/4'), []);
   assert.equal(core.hasLinkedPrOrBranch({ description: 'PR https://github.com/a/b/pull/9' }, []), true);
   assert.equal(core.hasLinkedPrOrBranch({ description: 'no pr yet' }, []), false);
+});
+
+// ---- PANT-1461 (pantheon-v2#596): no router comment wakes the assignee ----
+
+test('PANT-1461: a review dispatch records the squad plan in metadata and posts no comment', async () => {
+  const P = 'gate-1461-plan-proj';
+  const c = fixtureCfg(P);
+  const story = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const b = board([story], { [story.identifier]: [linkedOpenPr(story.identifier)] });
+  const log = createLogSink();
+  await run(b, c, { log });
+  assert.equal(assignsFor(b, story.identifier).length, 1, 'the review squad is dispatched');
+  assert.equal(b.calls.comment.length, 0, 'no comment: it would queue a second run for the builder');
+  assert.match(story.metadata.review_squad_plan || '', /^REVIEW SQUAD PLAN — squad\[/);
+  assert.equal(log.byEvent('review_squad_plan').length, 1);
+});
+
+test('PANT-1461: an agent with a live task on the issue is not assigned again (no second queued task)', async () => {
+  const P = 'gate-1461-live-proj';
+  const c = fixtureCfg(P);
+  const story = makeIssue({ project_id: P, status: 'in_review', assignee_id: BUILDER_ID });
+  const b = board([story], { [story.identifier]: [linkedOpenPr(story.identifier)] });
+  b.runs[story.identifier] = [
+    doneRun(),
+    { status: 'queued', created_at: iso(Date.now() - 60_000), agent_id: REVIEWER_ID },
+  ];
+  const log = createLogSink();
+  await run(b, c, { log });
+  assert.equal(assignsFor(b, story.identifier).length, 0, 'no assign beside the queued review task');
+  assert.equal(b.calls.rerun.filter((r) => r.identifier === story.identifier).length, 0);
+  assert.equal(log.byEvent('dispatch_skip_active_task').length, 1);
+});
+
+test('PANT-1461: review give-up parks the ticket with a blocked_note and no comment (FFE-605)', async () => {
+  const P = 'gate-1461-giveup-proj';
+  const c = fixtureCfg(P, { reviewMaxAttempts: 5 });
+  const story = makeIssue({ project_id: P, status: 'in_review', assignee_id: REVIEWER_ID });
+  const b = board([story], { [story.identifier]: [linkedOpenPr(story.identifier)] });
+  const stale = Date.now() - 60 * 60_000;
+  b.runs[story.identifier] = Array.from({ length: 5 }, () => ({ agent_id: REVIEWER_ID, status: 'failed', error: 'boom', created_at: iso(stale) }));
+  const log = createLogSink();
+  await run(b, c, { log });
+  assert.equal(log.byEvent('review_give_up').length, 1);
+  assert.equal(story.status, 'blocked');
+  assert.equal(story.metadata.blocked_reason, 'review-give-up-max-attempts');
+  assert.match(story.metadata.blocked_note || '', /accumulated 5\+ runs/);
+  assert.equal(b.calls.comment.length, 0, 'the notice must not wake the reviewer');
+  assert.equal(assignsFor(b, story.identifier).length + b.calls.rerun.length, 0);
 });

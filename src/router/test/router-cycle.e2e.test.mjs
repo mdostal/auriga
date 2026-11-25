@@ -2717,3 +2717,43 @@ test('PANT-1459: a founder-claimed todo is never routed to an agent', async () =
   await cycle({ backlog, spawn, cfg: fixtureCfg, log: createLogSink(), sleep: NOOP_SLEEP });
   assert.equal(calls.assign.some((c) => c.identifier === claimed.identifier), false);
 });
+
+// ---- PANT-1461: a hand-up comment is posted only once nobody is assigned ----
+function handUpFixture() {
+  const fixtureCfg = withFixtureLanes({ 'fixture-handup-project': ['auriga-dev'] });
+  const saturating = saturateAgent(fixtureCfg, 'auriga-dev', 'fixture-handup-project', fixtureCfg.AGENTS['auriga-dev'].maxInflight);
+  const handUpIssue = makeIssue({
+    project_id: 'fixture-handup-project', labels: ['hand-up'], parent_issue_id: 'fixture-epic',
+  });
+  const mocks = createMockAdapters([...saturating, handUpIssue], fixtureCfg.AGENTS);
+  for (const i of saturating) mocks.runsByIdentifier[i.identifier] = [activeRun()];
+  const run = (log) => cycle({
+    backlog: mocks.backlog, spawn: mocks.spawn, cfg: fixtureCfg, log, sleep: NOOP_SLEEP,
+    loadTopology: () => ({ parent: { id: 'firefly-events' }, children: [] }),
+    loadExternalConfig: () => ({ parentBoard: { baseUrl: 'http://firefly-core-api:3012', projectId: 'firefly-proj-1' } }),
+    createRemoteBacklog: () => ({ createIssue: (t) => ({ identifier: 'PARENT-1', title: t.title }) }),
+  });
+  return { handUpIssue, run, ...mocks };
+}
+
+test('PANT-1461: the hand-up pointer comment is posted after the unassign, so it wakes nobody', async () => {
+  const { handUpIssue, run, backlog, spawn, calls } = handUpFixture();
+  const order = [];
+  const origComment = backlog.commentOnIssue;
+  const origUnassign = spawn.unassignIssue;
+  backlog.commentOnIssue = (id, body) => { if (id === handUpIssue.identifier) order.push('comment'); origComment(id, body); };
+  spawn.unassignIssue = (id) => { if (id === handUpIssue.identifier) order.push('unassign'); origUnassign(id); };
+  await run(createLogSink());
+  assert.equal(calls.comment.filter((c) => c.identifier === handUpIssue.identifier).length, 1);
+  assert.deepEqual(order, ['unassign', 'comment'], 'commented only once unassigned');
+});
+
+test('PANT-1461: when the hand-up unassign fails, no comment is posted (it would wake the assignee)', async () => {
+  const { handUpIssue, run, spawn, calls } = handUpFixture();
+  spawn.unassignIssue = () => { throw new Error('unassign API down'); };
+  const log = createLogSink();
+  await run(log);
+  assert.equal(log.byEvent('hand_up_ok').length, 1);
+  assert.equal(calls.comment.filter((c) => c.identifier === handUpIssue.identifier).length, 0);
+  assert.equal(log.byEvent('hand_up_comment_skipped').length, 1);
+});
