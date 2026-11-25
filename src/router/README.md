@@ -157,7 +157,7 @@ Every field is always present. A field is `null` when it doesn't apply, never mi
 |---|---|
 | Dispatch | `project_lane`, `default_lane` (project has no lane of its own), `methodology_lane` (no project lane, and the story declares a methodology/skill not every `DEFAULT_LANE` agent can run — see `RUNTIME_CAPABILITIES`), `hive_story` (hive lane), `tree_attachment` (`TREE_AGENT_ATTACHMENTS`), `seed_planning` (seed routed to the planning agent), `existing_assignee` (a rerun on the current assignee), `review_tier_full` / `review_tier_light` / `review_tier_backend` / `review_tier_standard` (review, by squad tier), `no_local_route` (hand-up), `project_route_child` (hand-down). |
 | Guard skips (`dispatchEligible()`) | `max_assign`, `pass_cap`, `agent_parked`, `seed`, `runtime_blocked`, `assignee_runtime_blocked`, `per_cycle_per_agent_cap`. |
-| Other skips | `no_capacity` (no lane agent free), `no_capable_lane` (no `DEFAULT_LANE`/`HIVE_LANE` agent can run the story's declared methodology/skills), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human), `unknown_child` / `child_unreachable` (hand-down config rejected). |
+| Other skips | `no_capacity` (no lane agent free), `no_capable_lane` (no `DEFAULT_LANE`/`HIVE_LANE` agent can run the story's declared methodology/skills), `give_up_max_attempts` (zombie/review retry cap reached, parked for a human: status `blocked`, `blocked_reason`, and the explanation in metadata `blocked_note`, never a comment, PANT-1461), `agent-task-active` on an assign error (the agent already has a fresh queued/running task on the issue, so Multica would enqueue a second one; logged as `dispatch_skip_active_task`, PANT-1461), `unknown_child` / `child_unreachable` (hand-down config rejected). |
 
 `skip` records are rate-limited to one per issue per
 `CAPS.decisionSkipWindowCycles` cycles (default 10), so an issue a guard
@@ -395,6 +395,17 @@ PR link, push or commit and the ticket is still `todo`, reason
 every comment as a trigger (PANT-1457). Both reasons are router give-up reasons,
 so a human moving the ticket off `blocked` ends the park, and only runs after
 `assigned_idle_parked_at` count from then on.
+
+**The router never comments on an assigned issue (PANT-1457, PANT-1461).**
+Multica treats every comment as a trigger and queues a run for the assignee,
+so each router notice used to add a duplicate task. Notices go to metadata and
+the log instead: `review_hold` / `review_hold_note` (review gate holds),
+`blocked_reason` / `blocked_note` (zombie and review give-ups),
+`assigned_idle_park_note` (declined/no-progress parks) and `review_squad_plan`
+(the plan the review squad reads). The one comment left is the hand-up/hand-down
+pointer on a cancelled issue, posted only after it is unassigned (skipped if the
+unassign fails). On top of that, an assign is skipped when the target agent
+already has a fresh queued or running task on the issue.
 
 Founder-claimed tickets are human todos (PANT-1459): never routed, re-run or
 review-dispatched. A ticket is founder-claimed when its description contains a

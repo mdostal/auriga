@@ -10,14 +10,14 @@ Every story landing in review is approached from up to four perspectives. Each p
   4. UX            — user-facing surface quality + accessibility. Run `/hive:design-review` (or design/visual-qa) against the running UI. Only for user-facing changes. (personas: ui-designer / accessibility-specialist.)
 
 == SCALE BY TICKET TYPE (do NOT run the full team on everything) ==
-Auriga already computed a SQUAD PLAN for this ticket and posted it as a `REVIEW SQUAD PLAN — squad[<tier>]: ...` comment on the ticket, and named it in your dispatch log. READ IT FIRST:
-  `multica --profile dostal issue comment-list <TICKET-ID>` (or `issue get <TICKET-ID> --output json` and read the latest comment).
+Auriga already computed a SQUAD PLAN for this ticket and stored it in the ticket's metadata as `review_squad_plan` (`REVIEW SQUAD PLAN — squad[<tier>]: ...`), and named it in your dispatch log. READ IT FIRST:
+  `multica --profile dostal issue get <TICKET-ID> --output json` and read `metadata.review_squad_plan`. (Older tickets may still carry it as a comment.)
 The plan tells you EXACTLY which perspectives to run and whether QA must drive Playwright:
   - `squad[full]`     — user-facing/UI change: run ALL four (product + technical + qa WITH Playwright + ux).
   - `squad[backend]`  — headless api/service/data: product + technical + qa (NO ux — there is nothing to look at).
   - `squad[light]`    — docs/chore/config/trivial: technical + qa-smoke only (skip product + ux).
   - `squad[standard]` — default when signals were mixed: run the full four.
-If you cannot find the plan comment, re-derive it yourself: user-facing → full; docs/chore/config → light; backend/api/service → backend; unknown → full. When in doubt, run MORE perspectives, not fewer. A perspective the plan drops is recorded as `N-A (not applicable — <reason>)`, not skipped silently.
+If you cannot find the plan, re-derive it yourself: user-facing → full; docs/chore/config → light; backend/api/service → backend; unknown → full. When in doubt, run MORE perspectives, not fewer. A perspective the plan drops is recorded as `N-A (not applicable — <reason>)`, not skipped silently.
 
 == PHASE FLAG - BASE-BRANCH POLICY (reversible; current phase: WORKING_TO_LIVE) ==
 Pantheon and all its plugins are in the WORKING-TO-LIVE phase, so our own `mdostal/*`

@@ -33,16 +33,17 @@ inapplicable, and the reason is logged.
 | `light` | docs/chore/config signals (readme, typo, chore, config, …) | technical + qa-smoke (product + UX dropped) | off |
 | `standard` | no decisive signal | the full four (safe default) | ON |
 
-The router logs the plan (`tier`/`perspectives`/`playwright`) on dispatch and POSTS it
-onto the ticket (`REVIEW SQUAD PLAN — squad[tier]: …`) so what the squad will do is
-visible up front and read by the squad agent.
+The router logs the plan (`tier`/`perspectives`/`playwright`) on dispatch and writes it
+into the ticket's metadata as `review_squad_plan` (`REVIEW SQUAD PLAN — squad[tier]: …`)
+so what the squad will do is visible up front and read by the squad agent. It is not a
+comment: Multica treats every comment as a trigger, and the plan comment queued a second
+run for the issue's assignee (PANT-1461).
 
 ## Where it lives
 
 - `src/router/lib/core.mjs` — `reviewSquadPlan` + `squadPlanSummary` (pure, unit-tested).
 - `src/router/lib/config.mjs` — `REVIEW_SQUAD_RULES` (the inspectable rule).
-- `src/router/lib/multica.mjs` — `issueComment` (publish the plan onto the ticket).
-- `src/router/auriga-router.mjs` — review dispatch: compute plan → log → comment → fire.
+- `src/router/auriga-router.mjs` — review dispatch: compute plan → log → metadata → fire.
 - `src/router/agents/auriga-review.instructions.md` — the SQUAD lead: reads the plan,
   runs each enabled perspective, aggregates, ships or loops back.
 - `src/router/test/squad.test.mjs` — 9 classifier tests (suite: 85/85 green).
