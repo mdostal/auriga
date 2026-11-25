@@ -64,7 +64,7 @@ for (const i of issues) {
   if (!i.assignee_id) continue;
   if (capable.has(i.assignee_id)) continue;      // already on a hive lane
   if (!core.isHiveStory(i)) continue;            // only hive-methodology stories
-  if (core.isSmokeScratch(i.title)) continue;
+  if (core.isSmokeScratch(i)) continue;
   scanned++;
   const target = laneFor(i);
   byLane[target] = (byLane[target] || 0) + 1;

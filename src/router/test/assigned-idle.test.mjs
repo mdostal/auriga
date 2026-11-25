@@ -26,9 +26,11 @@ const CFG = {
 const NOW = 1_700_000_000_000;
 const OLD = NOW - 60 * 60 * 1000; // 1h idle — well past the 10-min stale threshold
 
+// parent_issue_id marks these as planned stories under an epic (not top-level seeds),
+// matching real work items that can legitimately get stuck in assigned-idle state.
 const assignedTodo = (id, assigneeId, updatedAt = OLD, title = 'work') => ({
   id, identifier: id, status: 'todo', assignee_id: assigneeId, updated_at: new Date(updatedAt).toISOString(), title,
-  parent_issue_id: 'parent-seed', // sub-tasks, not seeds — detectAssignedIdle is for build-agent work
+  parent_issue_id: 'EPIC-0',
 });
 
 test('AC1: a single assignedQueued item is detected as a recovery action once stale', () => {
@@ -229,6 +231,26 @@ test('PANT-462: per-cycle-per-agent cap applies per-agent — different agents e
   assert.ok(skipped.every((s) => s.skipReason === 'per-cycle-per-agent-cap'));
 });
 
+const seedTodo = (id, assigneeId) => ({
+  id, identifier: id, status: 'todo', assignee_id: assigneeId,
+  updated_at: new Date(OLD).toISOString(), title: 'do something',
+  parent_issue_id: null, labels: [],
+});
+
+// PANT-550's "skip seeds" tests were superseded by PANT-643 (see the PANT-643
+// test above): detectAssignedIdle reruns the CURRENT assignee and never
+// re-routes, so assigned seeds must stay recoverable here.
+
+test('PANT-550: detectAssignedIdle does NOT skip top-level issue that already has children', () => {
+  // Parent is top-level but has a child in allIssues → isSeed returns false → eligible for recovery.
+  const parent = seedTodo('PAN-10', 'M');
+  const child = { ...seedTodo('PAN-11', 'M'), parent_issue_id: 'PAN-10' };
+  const allIssues = [parent, child];
+  const actions = core.detectAssignedIdle([parent], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW, allIssues);
+  assert.equal(actions.length, 1, 'issue with existing children is NOT a seed — must be eligible for idle recovery');
+  assert.equal(actions[0].identifier, 'PAN-10');
+});
+
 test('PANT-488: detectAssignedIdle skips agent-parked issues (isAgentParked guard)', () => {
   // A todo+assigned issue with metadata.blocked_reason set must never be re-dispatched.
   const parked = {
@@ -254,6 +276,56 @@ test('PANT-643: detectAssignedIdle does NOT skip seed issues — rerunIssue re-e
   assert.ok(actions.some((a) => a.identifier === 'PAN-child'), 'non-seed child must still be detected');
 });
 
+// PANT-736: review-lane agent on a todo ticket must be unassigned, not re-dispatched.
+const CFG_WITH_REVIEW = {
+  ...CFG,
+  AGENTS: {
+    ...CFG.AGENTS,
+    'auriga-review': { id: 'AR', runtime: 'claude', maxInflight: 2 },
+  },
+  REVIEW_LANE: ['auriga-review'],
+};
+
+test('PANT-736: detectAssignedIdle emits unassign (not start) when assignee is a review-lane agent on a todo ticket', () => {
+  const issue = assignedTodo('PAN-1', 'AR');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'unassign');
+  assert.equal(actions[0].reason, 'review-lane-on-todo');
+  assert.equal(actions[0].identifier, 'PAN-1');
+});
+
+test('PANT-736: detectAssignedIdle still emits start for build-lane agents when REVIEW_LANE is configured', () => {
+  const issue = assignedTodo('PAN-1', 'A'); // auriga-dev, not in REVIEW_LANE
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+});
+
+test('PANT-736: review-lane unassign action is excluded from limitAssignedIdleRecoveries capacity gate', () => {
+  // Both a review-lane (AR) and a build-lane (A) issue are idle.
+  // The review-lane issue must produce an unassign, and the build-lane must produce start.
+  // limitAssignedIdleRecoveries should only see the start action (unassign is filtered before the call).
+  const reviewIssue = assignedTodo('PAN-review', 'AR');
+  const buildIssue = assignedTodo('PAN-build', 'A');
+  const agentIds = core.agentIdSet(CFG_WITH_REVIEW.AGENTS);
+  const allActions = core.detectAssignedIdle([reviewIssue, buildIssue], {}, CFG_WITH_REVIEW, agentIds, NOW);
+  const startActions = allActions.filter((a) => a.action !== 'unassign');
+  const unassignActions = allActions.filter((a) => a.action === 'unassign');
+  assert.equal(unassignActions.length, 1, 'review-lane issue emits one unassign');
+  assert.equal(unassignActions[0].identifier, 'PAN-review');
+  const { selected } = core.limitAssignedIdleRecoveries(startActions, CFG_WITH_REVIEW, {
+    agents: CFG_WITH_REVIEW.AGENTS,
+    inflight: {},
+    now: NOW,
+  });
+  assert.equal(selected.length, 1, 'only the build-lane issue reaches limitAssignedIdleRecoveries');
+  assert.equal(selected[0].identifier, 'PAN-build');
+  assert.equal(selected[0].action, 'start');
+});
+
 test('oldest-idle-first: recovery prioritizes the longest-stuck items when capacity is scarce', () => {
   const issues = [
     assignedTodo('PAN-recent', 'A', NOW - 15 * 60 * 1000),
@@ -265,4 +337,215 @@ test('oldest-idle-first: recovery prioritizes the longest-stuck items when capac
   const result = core.limitAssignedIdleRecoveries(actions, cfg, { agents: cfg.AGENTS, inflight: {}, now: NOW });
   assert.equal(result.selected.length, 1);
   assert.equal(result.selected[0].identifier, 'PAN-oldest');
+});
+
+const CFG_WITH_HIVE = {
+  ...CFG,
+  AGENTS: {
+    ...CFG.AGENTS,
+    'auriga-build': { id: 'AB', runtime: 'claude', maxInflight: 2 },
+  },
+  HIVE_LANE: ['auriga-build'],
+};
+
+test('PANT-436: hive story idle on a codex lane is unassigned (for rerouting), never restarted', () => {
+  const issue = { ...assignedTodo('PAN-1', 'A'), labels: ['build'] }; // auriga-dev (codex)
+  const actions = core.detectAssignedIdle([issue], {}, CFG_WITH_HIVE, core.agentIdSet(CFG_WITH_HIVE.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'unassign');
+  assert.equal(actions[0].reason, 'hive-on-noncapable-lane');
+  assert.ok(!actions.some((a) => a.action === 'start'));
+});
+
+test('PANT-436: hive story idle on a hive-capable lane still restarts; non-hive story on codex still restarts', () => {
+  const onHive = { ...assignedTodo('PAN-1', 'AB'), labels: ['build'] };
+  const plainOnCodex = assignedTodo('PAN-2', 'A');
+  const actions = core.detectAssignedIdle([onHive, plainOnCodex], {}, CFG_WITH_HIVE, core.agentIdSet(CFG_WITH_HIVE.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => [a.identifier, a.action]), [['PAN-1', 'start'], ['PAN-2', 'start']]);
+});
+
+// PANT-440: idle age must come from created_at / last run start, never updated_at —
+// any issue write (a comment, a label) advances updated_at and would reset the timer.
+test('PANT-440: a recent updated_at (comment) does not hide a dead-zone issue with an old created_at and zero runs', () => {
+  const issue = {
+    ...assignedTodo('PAN-440', 'A', NOW - 60 * 1000), // commented on 1 min ago
+    created_at: new Date(OLD).toISOString(),
+  };
+  const actions = core.detectAssignedIdle([issue], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].identifier, 'PAN-440');
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].idleAgeMs, NOW - OLD);
+});
+
+test('PANT-440: a run started within the stale window keeps an old issue out of recovery', () => {
+  const issue = { ...assignedTodo('PAN-440', 'A', OLD), created_at: new Date(OLD).toISOString() };
+  const runs = { 'PAN-440': [{ status: 'failed', created_at: new Date(NOW - 2 * 60 * 1000).toISOString() }] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 0);
+});
+
+test('PANT-440: idle age is measured from the latest run start once that is past the stale window', () => {
+  const lastRun = NOW - 30 * 60 * 1000;
+  const issue = { ...assignedTodo('PAN-440', 'A', NOW - 60 * 1000), created_at: new Date(NOW - 3 * 60 * 60 * 1000).toISOString() };
+  const runs = { 'PAN-440': [
+    { status: 'failed', created_at: new Date(NOW - 2 * 60 * 60 * 1000).toISOString() },
+    { status: 'failed', created_at: new Date(lastRun).toISOString() },
+  ] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].idleAgeMs, NOW - lastRun);
+});
+
+// PANT-844 (mdostal/auriga#237): seven needs-decision tickets sat in backlog while
+// still assigned, and assigned_idle re-ran the builder ~51 times with
+// reason assigned-todo-stale. Only plain `todo` work is eligible for a rerun.
+test('PANT-844: detectAssignedIdle never reruns backlog / blocked / needs-decision status tickets', () => {
+  const issues = ['backlog', 'blocked', 'needs-decision', 'needs_decision', 'in_progress'].map((status, n) => ({
+    ...assignedTodo(`FFE-${n}`, 'A'), status,
+  }));
+  const actions = core.detectAssignedIdle(issues, {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: detectAssignedIdle skips a todo ticket labelled needs-decision (string or object labels)', () => {
+  const objLabel = { ...assignedTodo('FFE-43', 'A'), labels: [{ id: 'l1', name: 'needs-decision' }] };
+  const strLabel = { ...assignedTodo('FFE-26', 'A'), labels: ['Needs-Decision'] };
+  const actions = core.detectAssignedIdle([objLabel, strLabel], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: needs-decision label suppresses the rerun even with a stale last run', () => {
+  const issue = { ...assignedTodo('FFE-34', 'A'), labels: [{ name: 'needs-decision' }] };
+  const runs = { 'FFE-34': [{ status: 'completed', created_at: new Date(OLD).toISOString(), completed_at: new Date(OLD).toISOString() }] };
+  const actions = core.detectAssignedIdle([issue], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: custom backlog / needs-decision column mapped onto the todo category is not rerun', () => {
+  const backlogCol = { ...assignedTodo('FFE-44', 'A'), status_category: 'todo', status_name: 'Backlog' };
+  const decisionCol = { ...assignedTodo('FFE-45', 'A'), status_category: 'todo', status_name: 'Needs Decision' };
+  const otherCategory = { ...assignedTodo('FFE-54', 'A'), status_category: 'backlog' };
+  const actions = core.detectAssignedIdle([backlogCol, decisionCol, otherCategory], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions, []);
+});
+
+test('PANT-844: plain todo tickets (including a "To Do" status_name) are still recovered', () => {
+  const plain = assignedTodo('FFE-60', 'A');
+  const named = { ...assignedTodo('FFE-61', 'A'), status_category: 'todo', status_name: 'To Do', labels: [{ name: 'bug' }] };
+  const actions = core.detectAssignedIdle([plain, named], {}, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => a.identifier), ['FFE-60', 'FFE-61']);
+  assert.ok(actions.every((a) => a.action === 'start'));
+});
+
+test('PANT-844: isAwaitingDecision matches label, status and status_name only', () => {
+  assert.equal(core.isAwaitingDecision({ labels: [{ name: 'needs-decision' }] }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'needs_decision' }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'todo', status_name: 'Needs Decision' }), true);
+  assert.equal(core.isAwaitingDecision({ status: 'todo', labels: [{ name: 'decision' }] }), false);
+  assert.equal(core.isAwaitingDecision({}), false);
+});
+
+// PANT-1154 / auriga#261: a run that is only waiting in the queue is behind a
+// saturated runtime, not hung. Rerunning it cancels it and loses its place.
+const queuedRun = (createdAt = OLD) => ({ status: 'queued', created_at: new Date(createdAt).toISOString() });
+
+test('PANT-1154: a ticket whose only run is queued and never started is not rerun, however long it waited', () => {
+  for (const waited of [OLD, NOW - 24 * 60 * 60 * 1000]) {
+    const runs = { 'FFE-83': [queuedRun(waited)] };
+    const actions = core.detectAssignedIdle([assignedTodo('FFE-83', 'M')], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+    assert.deepEqual(actions, [], `queued run created ${(NOW - waited) / 60000} min ago must not be rerun`);
+  }
+  const pending = { 'FFE-84': [{ status: 'pending', created_at: new Date(OLD).toISOString() }] };
+  assert.deepEqual(core.detectAssignedIdle([assignedTodo('FFE-84', 'M')], pending, CFG, core.agentIdSet(CFG.AGENTS), NOW), []);
+});
+
+test('PANT-1154: a run genuinely stuck in running past staleMs is still recovered as a hang', () => {
+  const runs = { 'FFE-85': [{ status: 'running', created_at: new Date(OLD).toISOString(), started_at: new Date(OLD).toISOString() }] };
+  const actions = core.detectAssignedIdle([assignedTodo('FFE-85', 'M')], runs, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-stale');
+});
+
+test('PANT-1154: a dispatched-but-never-started or picked-up queued run still goes stale', () => {
+  const dispatched = { 'FFE-98': [{ status: 'dispatched', created_at: new Date(OLD).toISOString(), dispatched_at: new Date(OLD).toISOString() }] };
+  const queuedPickedUp = { 'FFE-99': [{ status: 'queued', created_at: new Date(OLD).toISOString(), dispatched_at: new Date(OLD).toISOString() }] };
+  const issues = [assignedTodo('FFE-98', 'M'), assignedTodo('FFE-99', 'M')];
+  const actions = core.detectAssignedIdle(issues, { ...dispatched, ...queuedPickedUp }, CFG, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.deepEqual(actions.map((a) => a.identifier), ['FFE-98', 'FFE-99']);
+});
+
+test('PANT-1154: assignedIdleQueuedStaleMs bounds queue wait when configured', () => {
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, assignedIdleQueuedStaleMs: 2 * 60 * 60 * 1000 } };
+  const fresh = { 'FFE-83': [queuedRun(OLD)] }; // 1h in queue < 2h cap
+  assert.deepEqual(core.detectAssignedIdle([assignedTodo('FFE-83', 'M')], fresh, cfg, core.agentIdSet(CFG.AGENTS), NOW), []);
+  const old = { 'FFE-83': [queuedRun(NOW - 3 * 60 * 60 * 1000)] }; // 3h > 2h cap
+  const actions = core.detectAssignedIdle([assignedTodo('FFE-83', 'M', NOW - 3 * 60 * 60 * 1000)], old, cfg, core.agentIdSet(CFG.AGENTS), NOW);
+  assert.equal(actions.length, 1);
+});
+
+test('PANT-1154: hasActiveRun keeps its old staleMs behavior unless queuedStaleMs is passed', () => {
+  const stale = 10 * 60 * 1000;
+  assert.equal(core.hasActiveRun([queuedRun(OLD)], NOW, stale), false);
+  assert.equal(core.hasActiveRun([queuedRun(OLD)], NOW, stale, Infinity), true);
+  const running = { status: 'running', created_at: new Date(OLD).toISOString(), started_at: new Date(OLD).toISOString() };
+  assert.equal(core.hasActiveRun([running], NOW, stale, Infinity), false);
+  assert.equal(core.isQueuedNotStarted(queuedRun(OLD), NOW), true);
+  assert.equal(core.isQueuedNotStarted({ ...queuedRun(OLD), started_at: new Date(OLD).toISOString() }, NOW), false);
+  assert.equal(core.isQueuedNotStarted({ status: 'cancelled', created_at: new Date(OLD).toISOString() }, NOW), false);
+});
+
+// PANT-1155 / auriga#263: on hive 2026-10-17 assigned_idle reran PANT-1119..1124
+// and FFE-83..99 nine times each into a provider session limit (71 failures in
+// 2h, each ~1.4s). Fixture mirrors the live PANT-1122 rows: 9 failed runs ~10
+// min apart, the newest 604422ms before the cycle, the reset at 02:20Z.
+const SESSION_LIMIT = "You've hit your session limit · resets 2:20am (UTC)";
+const LIVE_NOW = Date.parse('2026-10-17T01:52:00Z');
+const sessionLimitRun = (startedAt, error = SESSION_LIMIT) => ({
+  status: 'failed', error, failure_reason: 'agent_error.unknown',
+  created_at: new Date(startedAt).toISOString(), started_at: new Date(startedAt).toISOString(),
+  completed_at: new Date(startedAt + 1400).toISOString(),
+});
+const liveRuns = (error) => Array.from({ length: 9 }, (_, k) => sessionLimitRun(LIVE_NOW - 604422 - (8 - k) * 10 * 60 * 1000, error));
+const liveTodo = (id) => assignedTodo(id, 'M', LIVE_NOW - 3 * 60 * 60 * 1000);
+
+test('PANT-1155: a ticket whose newest run hit an unreset session limit is not rerun', () => {
+  const runs = { 'PANT-1121': liveRuns(), 'PANT-1122': liveRuns(), 'PANT-1124': liveRuns() };
+  const issues = [liveTodo('PANT-1121'), liveTodo('PANT-1122'), liveTodo('PANT-1124')];
+  assert.equal(core.quotaHoldUntilMs(runs['PANT-1122'], LIVE_NOW), Date.parse('2026-10-17T02:20:00Z'));
+  assert.deepEqual(core.detectAssignedIdle(issues, runs, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW), []);
+});
+
+test('PANT-1155: once the stated reset passes, the session-limited ticket is rerun again', () => {
+  const runs = { 'PANT-1122': liveRuns() };
+  const after = Date.parse('2026-10-17T02:21:00Z');
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1122')], runs, CFG, core.agentIdSet(CFG.AGENTS), after);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-last-run-failed');
+});
+
+test('PANT-1155: a limit with no stated reset holds for redispatchCooldownMs after the failure', () => {
+  const cfg = { ...CFG, CAPS: { ...CFG.CAPS, redispatchCooldownMs: 15 * 60 * 1000 } };
+  const failedAt = LIVE_NOW - 11 * 60 * 1000; // past the 10-min stale window, inside the cooldown
+  const runs = { 'FFE-83': [sessionLimitRun(failedAt, '429 Too Many Requests')] };
+  assert.deepEqual(core.detectAssignedIdle([liveTodo('FFE-83')], runs, cfg, core.agentIdSet(CFG.AGENTS), LIVE_NOW), []);
+  const later = core.detectAssignedIdle([liveTodo('FFE-83')], runs, cfg, core.agentIdSet(CFG.AGENTS), failedAt + 16 * 60 * 1000);
+  assert.equal(later.length, 1);
+});
+
+test('PANT-1155: a non-limit failure still gets its dead-zone rerun', () => {
+  const runs = { 'PANT-1120': liveRuns('process exited with code 1') };
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1120')], runs, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].action, 'start');
+  assert.equal(actions[0].reason, 'assigned-todo-last-run-failed');
+});
+
+test('PANT-1155: an older limit failure followed by a non-limit failure does not hold the rerun', () => {
+  const rows = liveRuns().slice(0, 8); // newest limit failure ~20 min ago
+  rows.push(sessionLimitRun(LIVE_NOW - 11 * 60 * 1000, 'process exited with code 1'));
+  const actions = core.detectAssignedIdle([liveTodo('PANT-1119')], { 'PANT-1119': rows }, CFG, core.agentIdSet(CFG.AGENTS), LIVE_NOW);
+  assert.equal(actions.length, 1);
 });

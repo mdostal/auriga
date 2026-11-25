@@ -23,112 +23,54 @@
 // HTTP boundary. NEVER imports src/server/ (a separate, hardcoded-read-only
 // HTTP layer over local .pHive/*.yaml planning docs, not live board state —
 // confirmed unusable for this purpose in research-brief.md §2) and NEVER
-// imports a vendor-specific module (e.g. lib/multica.mjs, or Multica CLI
-// invocations) from outside backlog-adapter.mjs's own implementations —
-// every tool handler below calls only the BacklogAdapter's typed interface
+// imports a vendor-specific module (the Multica CLI wrapper, or any direct
+// Multica/GitHub call) — every tool handler below calls only the BacklogAdapter's typed interface
 // (see ../adapters/backlog-adapter.mjs and adapter-boundary-integrity in
 // .pHive/cross-cutting-concerns.yaml).
 //
-// MEASURED LATENCY against the real Multica adapter (this story's own
-// verification requirement — see the risks section of p5-mcp-server.yaml):
-// listAllProjectIds() ~20ms, listAllIssues(projectIds) ~20ms (this
-// workspace's board is small — 1 project, 4 issues, so board-wide scans via
-// auriga_list_board/auriga_list_blocked_and_inflight are cheap here, though
-// that will scale with board size). getIssuePullRequests(identifier) — the
-// method auriga_get_story used to call directly — took ~75s: it does an
-// UNCACHED live `gh pr list --state all` scan across every configured repo
-// (7 repos, 1260 PRs) on EVERY call, no memoization, exactly the cost
-// multica/backlog.mjs's own doc comment on that method warns about ("kept
-// for a standalone caller with no board-wide cache available").
+// PULL REQUESTS (PANT-818): auriga_get_story's PR data comes ONLY from the
+// board's own linked PRs through Pantheon core-api --
+// backlog.getIssuePullRequests(identifier) ->
+// GET /api/backlog/issues/:id/pull-requests. It never runs a GitHub search.
+// This replaces the earlier cached board-wide `gh pr list` scan
+// (listCandidatePullRequests + prMatchesStory, ~75s on a cold cache) that the
+// direct-Multica adapter needed; the pantheon-v2-l2 adapter has no such scan
+// (removed in PANT-717, see test/no-github-calls.test.mjs).
 //
-// FIXED (follow-up after this story's own verification flagged it): this
-// long-lived stdio server process IS a caller that can have a board-wide
-// cache — exactly the gap that method's doc comment names. auriga_get_story
-// now reuses the SAME fix auriga-router.mjs's cycle() already proved:
-// listCandidatePullRequests() (the raw, unfiltered board-wide scan) is
-// called ONCE, cached with a short TTL, and filtered per-story client-side
-// with core.mjs's prMatchesStory — the same broader, slug-aware matcher the
-// router uses for display purposes (not the narrower per-identifier
-// prMatchesIdentifier heuristic getIssuePullRequests's own gh-fallback used,
-// which is documented to silently miss slug-only-branched PRs — see
-// backlog.mjs's own comment on that history, PAN-7150). First call after
-// server start (or after the cache goes stale) still pays the full scan
-// cost; every call within the TTL is effectively instant. Falls back to
-// getIssuePullRequests(identifier) per-call when the adapter has no
-// listCandidatePullRequests (the stub adapter — cheap in-memory lookup,
-// caching would add nothing there) — same presence-check-and-fallback shape
-// scanAllIssues below already uses for listAllIssues.
-//
-// Adapter selection: real Multica-backed adapter by default (matches
-// auriga-router.mjs's own default). NOTE ON THE ENV-VAR SWITCH: the story
-// spec asserts a "p2-adapter-interface environment-variable switch for
-// selecting the stub adapter" already exists for the router and says to
-// reuse it verbatim. That assumption does not hold — verified by reading
-// auriga-router.mjs, lib/config.mjs, lib/config-substrate.mjs, and every
-// p2-adapter-interface story end to end: the router selects the stub ONLY
-// via `cycle()`'s test-time options bag (dependency injection in tests),
-// never via a runtime env var; no such env var exists anywhere in this
-// codebase today (grepped repo-wide). A stdio MCP server is a real OS
-// process with no test harness to inject options into, so it needs an
-// actual runtime switch. AURIGA_BACKLOG_ADAPTER=stub below is that switch,
-// named to match this repo's one existing env-var convention
-// (AURIGA_PIDFILE/AURIGA_LOG/AURIGA_PER_CYCLE_TOTAL/.../AURIGA_PHIVE_ROOT)
-// rather than inventing a new naming scheme. Flagged explicitly in this
-// story's verification writeup rather than silently diverging from the spec.
+// Adapter selection (PANT-818, ../adapters/select-backlog.mjs): Pantheon's
+// pantheon-v2-l2 backlog adapter by default -- the same adapter auriga-router.mjs builds as its defaultBacklog.
+// Architecture rule: gods talk only through Pantheon, so this module never
+// imports the Multica CLI wrapper or the direct-Multica adapter, and there is
+// no direct-Multica mode at all. AURIGA_BACKLOG_ADAPTER is the runtime switch
+// (a stdio MCP server is a real OS process with no test harness to inject an
+// adapter into): unset or `pantheon-v2-l2` selects core-api, `stub` selects
+// the in-memory stub (zero live external systems), and any other value is
+// rejected loudly rather than silently falling back to something else.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { createMulticaBacklogAdapter } from '../adapters/multica/backlog.mjs';
-import { createStubBacklogAdapter } from '../adapters/stub/backlog.mjs';
-import { prMatchesStory } from '../core.mjs';
+import { selectBacklogAdapter } from '../adapters/select-backlog.mjs';
 import { ISSUE_STATUS } from '../issue-status.mjs';
-import * as cfg from '../config.mjs';
-
-// TTL for the cached board-wide PR candidate scan (see getStoryPullRequests
-// below) — long enough that a burst of auriga_get_story calls in one
-// operator session shares one ~75s scan instead of paying it per call, short
-// enough that a stale PR list doesn't linger for the server's whole
-// lifetime. Not user-configurable — this is an internal perf detail, not a
-// contract callers depend on.
-const CANDIDATE_PR_CACHE_TTL_MS = 5 * 60 * 1000;
 
 export const SERVER_NAME = 'auriga';
 export const SERVER_VERSION = '0.1.0';
 
 // ---- adapter selection ----------------------------------------------------
 
-/**
- * Real Multica-backed adapter by default — matches auriga-router.mjs's own
- * `defaultBacklog` construction (same reviewRepoOwner/reviewSearchRepos
- * wiring, so PR discovery searches the same repo set). Stub via
- * AURIGA_BACKLOG_ADAPTER=stub (see file header note on why this env var,
- * not a pre-existing one, is the actual switch) — zero live external
- * systems present, same standalone guarantee the router's own stub path
- * gives.
- * @param {NodeJS.ProcessEnv} [env]
- * @returns {import('../adapters/backlog-adapter.mjs').BacklogAdapter}
- */
-export function selectBacklogAdapter(env = process.env) {
-  if (env.AURIGA_BACKLOG_ADAPTER === 'stub') {
-    return createStubBacklogAdapter();
-  }
-  return createMulticaBacklogAdapter({
-    reviewRepoOwner: cfg.REVIEW_REPO_OWNER,
-    reviewSearchRepos: cfg.REVIEW_SEARCH_REPOS,
-  });
-}
+// selectBacklogAdapter lives in ../adapters/select-backlog.mjs so the
+// Config-Expose API (src/server.mjs) shares it without loading the MCP SDK;
+// re-exported here because bin/auriga.mjs and the tests import it from this
+// module.
+export { selectBacklogAdapter };
 
 // ---- shared read helpers ---------------------------------------------------
 
-// Board-wide issue scan. Prefers backlog.listAllIssues (a documented
-// "ported adapter extra", NOT part of the BacklogAdapter typedef contract —
-// see multica/backlog.mjs's own header comment) when the adapter exposes
-// it, falling back to a per-project listIssues loop when it doesn't (the
-// stub adapter has no listAllIssues). This is the SAME presence-check-and-
-// fallback shape auriga-router.mjs's cycle() already uses for
-// listCandidatePullRequests vs getIssuePullRequests — mirrored here
-// deliberately rather than inventing a different convention.
+// Board-wide issue scan. Prefers backlog.listAllIssues (a "ported adapter
+// extra", NOT part of the BacklogAdapter typedef contract; pantheon-v2-l2
+// implements it as one GET /api/backlog/issues) when the adapter exposes it,
+// falling back to a per-project listIssues loop when it doesn't (the stub
+// adapter has no listAllIssues).
 function scanAllIssues(backlog) {
   const projectIds = backlog.listAllProjectIds();
   if (typeof backlog.listAllIssues === 'function') {
@@ -166,26 +108,6 @@ function findByIdentifier(issues, identifier) {
   return issues.find((i) => i.identifier === identifier);
 }
 
-// PRs for one story. Prefers a cached, TTL-bounded board-wide scan
-// (backlog.listCandidatePullRequests, when the adapter exposes it) filtered
-// client-side with the broader prMatchesStory matcher — see the file header
-// note on why this replaced a direct per-call getIssuePullRequests(identifier).
-// `cache` is an explicit, injectable {prs, fetchedAt} holder (not module-level
-// global state) so tests can control/observe it and multiple server instances
-// never share state — createAurigaMcpServer below creates one per server
-// instance and threads it through every auriga_get_story call.
-function getStoryPullRequests(backlog, issue, cache) {
-  if (typeof backlog.listCandidatePullRequests !== 'function') {
-    return backlog.getIssuePullRequests(issue.identifier);
-  }
-  const now = Date.now();
-  if (!cache.prs || now - cache.fetchedAt > CANDIDATE_PR_CACHE_TTL_MS) {
-    cache.prs = backlog.listCandidatePullRequests();
-    cache.fetchedAt = now;
-  }
-  return cache.prs.filter((pr) => prMatchesStory(pr, issue));
-}
-
 // ---- tool handlers (plain functions, independently unit-testable) --------
 
 /**
@@ -210,15 +132,12 @@ export function listBoard(backlog, args = {}) {
 /**
  * Get full detail for one story/epic by identifier: the issue itself, its
  * dispatch/run history, and any linked pull requests.
+ * pull_requests are the board's own linked PRs via
+ * backlog.getIssuePullRequests (core-api), never a GitHub search.
  * @param {import('../adapters/backlog-adapter.mjs').BacklogAdapter} backlog
  * @param {{ identifier: string, project_id?: string }} args
- * @param {{ prs: object[]|null, fetchedAt: number }} [prCache] — see
- *   getStoryPullRequests above. Defaults to a fresh, unshared cache so
- *   direct calls (e.g. in tests) behave exactly as before — no cross-call
- *   reuse unless a caller explicitly threads one through (which
- *   createAurigaMcpServer does, once per server instance).
  */
-export function getStory(backlog, args, prCache = { prs: null, fetchedAt: 0 }) {
+export function getStory(backlog, args) {
   const { identifier, project_id } = args;
   const issues = project_id ? backlog.listIssues(project_id) : scanAllIssues(backlog).issues;
   const issue = findByIdentifier(issues, identifier);
@@ -240,7 +159,7 @@ export function getStory(backlog, args, prCache = { prs: null, fetchedAt: 0 }) {
       metadata: issue.metadata || {},
     },
     runs: backlog.getIssueRuns(identifier),
-    pull_requests: getStoryPullRequests(backlog, issue, prCache),
+    pull_requests: backlog.getIssuePullRequests(issue.identifier),
   };
 }
 
@@ -288,11 +207,6 @@ function toolResult(data) {
 // @param {import('../adapters/backlog-adapter.mjs').BacklogAdapter} backlog
 export function createAurigaMcpServer(backlog) {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
-  // One shared, TTL-bounded PR-candidate cache per server instance — see
-  // getStoryPullRequests. Every auriga_get_story call threads through this
-  // same object, so a burst of calls in one operator session pays the
-  // expensive board-wide scan at most once per TTL window, not once per call.
-  const prCandidateCache = { prs: null, fetchedAt: 0 };
 
   server.registerTool(
     'auriga_list_board',
@@ -320,19 +234,15 @@ export function createAurigaMcpServer(backlog) {
       description:
         'Get full detail for one issue by its identifier (e.g. "PAN-1234"): status, ' +
         'hierarchy, dispatch/run history, and any linked pull requests. Pass ' +
-        'project_id if known to avoid a board-wide search. READ-ONLY. NOTE: the ' +
-        'pull-request lookup is a cached, board-wide scan (5-minute TTL) — the ' +
-        'FIRST call after server start (or after the cache goes stale) does a live ' +
-        'GitHub scan across every configured repo and was measured at ~75s against ' +
-        'this workspace\'s real board; every call within the TTL window after that ' +
-        'reuses the cached result and is fast.',
+        'project_id if known to avoid a board-wide search. READ-ONLY. Pull requests ' +
+        'are the ones linked to the issue on the board, read through Pantheon.',
       inputSchema: {
         identifier: z.string().describe('The issue\'s public identifier, e.g. "PAN-1234".'),
         project_id: z.string().optional().describe('Narrow the search to one project.'),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    async (args) => toolResult(getStory(backlog, args, prCandidateCache)),
+    async (args) => toolResult(getStory(backlog, args)),
   );
 
   server.registerTool(

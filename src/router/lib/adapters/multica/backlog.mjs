@@ -299,6 +299,48 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     }
   }
 
+  // PANT-1457: the issue's comments, for the review gate's PR-url scan.
+  // Best-effort: [] on failure. `multica issue comment list` returns an array of
+  // comments ({ content, ... }) or { comments: [...] } depending on the version.
+  function listIssueComments(identifier) {
+    try {
+      const res = run(['issue', 'comment', 'list', identifier, '--output', 'json']);
+      return Array.isArray(res) ? res : ((res && res.comments) || []);
+    } catch (e) {
+      process.stderr.write(`listIssueComments(${identifier}) failed: ${e.message}\n`);
+      return [];
+    }
+  }
+
+  // Set one or more metadata keys on an existing issue (BacklogAdapter contract,
+  // see ../backlog-adapter.mjs). Best-effort: degrades gracefully (returns null
+  // on any key failure) — a metadata write must never abort a dispatch. Mirrors
+  // the key-at-a-time `multica issue metadata set` pattern used by createIssue;
+  // the CLI merges per key, so other keys are preserved.
+  //
+  // String values are sent with `--type string` (PANT-437): the CLI otherwise
+  // JSON-sniffs --value, so a hex router_assignment_fingerprint like "1234e5"
+  // or an all-digit one would be stored as a number and never match on
+  // re-read. Objects are JSON-encoded; numbers/booleans keep their type.
+  function setIssueMetadata(identifier, metadataObj) {
+    if (!identifier || !metadataObj || typeof metadataObj !== 'object') return null;
+    let ok = true;
+    for (const [key, value] of Object.entries(metadataObj)) {
+      const args = ['issue', 'metadata', 'set', identifier, '--key', key];
+      if (typeof value === 'string') args.push('--value', value, '--type', 'string');
+      else if (value !== null && typeof value === 'object') args.push('--value', JSON.stringify(value));
+      else args.push('--value', String(value));
+      args.push('--output', 'json');
+      try {
+        run(args);
+      } catch (e) {
+        ok = false;
+        process.stderr.write(`setIssueMetadata(${identifier}): key "${key}" failed: ${e.message}\n`);
+      }
+    }
+    return ok ? { ok: true } : null;
+  }
+
   // Create a NEW issue (t015 — orchestrator hand-up). Genuinely new
   // capability: every other method above acts on an EXISTING issue.
   // Confirmed real via `multica issue create --help` (2026-09-06, not
@@ -347,6 +389,7 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     return created;
   }
 
+
   return Object.freeze({
     listIssues,
     listAllProjectIds,
@@ -354,6 +397,8 @@ export function createMulticaBacklogAdapter(cfg = {}) {
     getIssuePullRequests,
     setIssueStatus,
     commentOnIssue,
+    listIssueComments,
+    setIssueMetadata,
     createIssue,
 
     // ---- ported/adapter-specific extras, NOT part of the BacklogAdapter

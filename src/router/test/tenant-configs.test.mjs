@@ -141,6 +141,23 @@ test('loadTenantConfigs: throws with the real status code on a non-ok response',
   );
 });
 
+test('loadTenantConfigs: PROJECT_LANE is tenant-overridable and falls back to base cfg when absent — PANT-520', async () => {
+  const tenantLane = { 'proj-ffe': ['codex-dev-1'] };
+  const fetchImpl = fakeFetch(() => new Response(JSON.stringify({
+    tenants: [
+      { tenant_id: 'with-lane', config: { PROJECT_IDS: ['proj-ffe'], PROJECT_LANE: tenantLane } },
+      { tenant_id: 'without-lane', config: { PROJECT_IDS: ['proj-ffe'] } },
+    ],
+  }), { status: 200 }));
+
+  const [withLane, withoutLane] = await loadTenantConfigs({ pantheonApiBaseUrl: 'http://core-api:3012', baseCfg: BASE_CFG, fetchImpl });
+
+  assert.deepEqual(withLane.cfg.PROJECT_LANE, tenantLane,
+    'tenant-supplied PROJECT_LANE must override the base config');
+  assert.deepEqual(withoutLane.cfg.PROJECT_LANE, BASE_CFG.PROJECT_LANE,
+    'absent PROJECT_LANE must fall back to base cfg — not silently drop to empty');
+});
+
 test('rotate: no-op on an empty array', () => {
   assert.deepEqual(rotate([], 3), []);
 });

@@ -32,7 +32,7 @@ function makeExecMock(t, handler = () => null) {
     if (result instanceof Error) throw result;
     return JSON.stringify(result);
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: fn } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: fn } });
   return calls;
 }
 

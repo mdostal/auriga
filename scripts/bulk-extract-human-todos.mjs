@@ -79,7 +79,7 @@ function isAlreadyLabeled(issue) {
 // human-todos are still surfaced for visibility).
 export function buildExtractionReport(issues, cfg_) {
   const entries = issues
-    .filter((i) => !core.isSmokeScratch(i.title))
+    .filter((i) => !core.isSmokeScratch(i))
     .filter((i) => isHumanTodoBroad(i, cfg_))
     .map((i) => {
       const status = (i.status || '').toLowerCase();

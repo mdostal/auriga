@@ -55,7 +55,12 @@
  *
  * @property {(id: string, body: string) => void} commentOnIssue
  *   Post a comment onto an issue (e.g. the review-squad plan — see
- *   lib/core.mjs's squadPlanSummary).
+ *   lib/core.mjs's squadPlanSummary). Every comment wakes the assignee on
+ *   Multica, so router notices go to metadata/logs instead (PANT-1457).
+ *
+ * @property {(id: string) => Array<{body?: string, content?: string}>} [listIssueComments]
+ *   Optional (PANT-1457). The issue's comments, read by the review gate to find
+ *   a PR url posted on the ticket when the PR linkage is empty. Best-effort: [].
  *
  * @property {(ticket: {title: string, description?: string, project?: string, status?: string, labels?: string[], metadata?: object, parent?: string}) => object} createIssue
  *   Create a NEW issue (t015 — orchestrator hand-up). Every other method
@@ -67,6 +72,13 @@
  *   other methods read/write (see pantheon-v2-l2's cfg.baseUrl/cfg.project —
  *   a second adapter instance pointed at a parent board's config is how
  *   cross-board hand-up works, not a new adapter type).
+ *
+ * @property {(id: string, metadataObj: Record<string, unknown>) => void} setIssueMetadata
+ *   Merge key-value pairs into an existing issue's metadata (PAN-8245 —
+ *   idempotent re-routing fingerprint). The implementation MUST merge rather
+ *   than replace — existing metadata keys not present in `metadataObj` must
+ *   be preserved. Best-effort: implementations should degrade gracefully
+ *   (return null on failure) so a metadata write never aborts a dispatch.
  */
 
 export {};

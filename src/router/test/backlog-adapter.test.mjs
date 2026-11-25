@@ -17,6 +17,7 @@
 // THAT test's mock, rather than reusing a previous test's cached instance.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { assignmentMetadata, isRouterManagedAssignment, assignmentFingerprintMatches } from '../lib/fingerprint.mjs';
 
 let importCounter = 0;
 async function freshAdapterModule() {
@@ -55,7 +56,7 @@ function makeExecMock(t, { multica = () => null, gh = () => [] } = {}) {
     if (result instanceof Error) throw result;
     return JSON.stringify(result);
   });
-  t.mock.module('node:child_process', { exports: { execFileSync: fn } });
+  t.mock.module('node:child_process', { namedExports: { execFileSync: fn } });
   return calls;
 }
 
@@ -278,6 +279,80 @@ test('createIssue: a metadata-set failure is caught and does not undo the succes
   const created = backlog.createIssue({ title: 'Handed up', metadata: { handed_up_from: 'PAN-1' } });
   assert.equal(created.identifier, 'PAN-99');
   assert.ok(calls.some((c) => stripProfile(c.args)[1] === 'metadata'), 'metadata set was attempted');
+});
+
+// ---- setIssueMetadata() (PANT-437 -- record the router's assignment fingerprint) ----
+// One `multica issue metadata set` call per key (the CLI merges per key, so a
+// loop is a merge, not a replace). Best-effort: never throws.
+
+function metadataSetCalls(calls) {
+  return calls.map((c) => stripProfile(c.args)).filter((a) => a[1] === 'metadata' && a[2] === 'set');
+}
+
+test('setIssueMetadata sends one `metadata set` per key, forcing --type string for string values', async (t) => {
+  const calls = makeExecMock(t, { multica: () => ({ ok: true }) });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  const res = backlog.setIssueMetadata('PAN-10', { router_assignment_fingerprint: '1234e5', router_assignment_agent: 'codex-dev-1', attempts: 3 });
+
+  assert.deepEqual(res, { ok: true });
+  assert.deepEqual(metadataSetCalls(calls), [
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'router_assignment_fingerprint', '--value', '1234e5', '--type', 'string', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'router_assignment_agent', '--value', 'codex-dev-1', '--type', 'string', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'attempts', '--value', '3', '--output', 'json'],
+  ]);
+});
+
+test('setIssueMetadata: a numeric-looking fingerprint string stays a string (--type string), objects are JSON-encoded', async (t) => {
+  const calls = makeExecMock(t, { multica: () => ({ ok: true }) });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  backlog.setIssueMetadata('PAN-10', { router_assignment_fingerprint: '0123456789', gave_up: true, detail: { n: 1 } });
+
+  assert.deepEqual(metadataSetCalls(calls), [
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'router_assignment_fingerprint', '--value', '0123456789', '--type', 'string', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'gave_up', '--value', 'true', '--output', 'json'],
+    ['issue', 'metadata', 'set', 'PAN-10', '--key', 'detail', '--value', '{"n":1}', '--output', 'json'],
+  ]);
+});
+
+test('setIssueMetadata never throws: one key failing does not stop the others, and returns null', async (t) => {
+  const calls = makeExecMock(t, {
+    multica: (args) => (args[5] === 'a' ? new Error('multica: metadata write failed') : { ok: true }),
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+
+  let res;
+  assert.doesNotThrow(() => { res = backlog.setIssueMetadata('PAN-10', { a: 'x', b: 'y' }); });
+  assert.equal(res, null);
+  assert.deepEqual(metadataSetCalls(calls).map((a) => a[5]), ['a', 'b']);
+});
+
+test('setIssueMetadata: recording assignmentMetadata() makes the issue router-managed on re-read', async (t) => {
+  // Simulate the Multica backend: each `metadata set` merges into the stored issue.
+  const stored = { id: 'u-10', identifier: 'PAN-10', title: 'Route me', assignee_id: 'agent-a-id', metadata: { other: 'kept' } };
+  makeExecMock(t, {
+    multica: (args) => {
+      if (args[1] === 'metadata' && args[2] === 'set') {
+        stored.metadata = { ...stored.metadata, [args[5]]: args[7] };
+        return { ok: true };
+      }
+      throw new Error('unexpected args ' + args.join(' '));
+    },
+  });
+  const { createMulticaBacklogAdapter } = await freshAdapterModule();
+  const backlog = createMulticaBacklogAdapter({ cli: MULTICA_CLI, ghCli: GH_CLI });
+  const cfg = { AGENTS: { 'agent-a': { id: 'agent-a-id' } } };
+
+  assert.equal(isRouterManagedAssignment(stored), false);
+  backlog.setIssueMetadata('PAN-10', assignmentMetadata(stored, 'agent-a', cfg, { now: 0 }));
+
+  assert.equal(stored.metadata.other, 'kept');
+  assert.equal(isRouterManagedAssignment(stored), true);
+  assert.equal(assignmentFingerprintMatches(stored, 'agent-a', cfg, { now: 0 }), true);
 });
 
 // ---- getIssuePullRequests: gh-backed PR discovery (high-risk per story) ----

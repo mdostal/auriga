@@ -78,12 +78,10 @@ import * as cfg from ${JSON.stringify(new URL('../lib/config.mjs', import.meta.u
 console.log(JSON.stringify({
   PROJECT_IDS: cfg.PROJECT_IDS,
   HIVE_LANE: cfg.HIVE_LANE,
-  REVIEW_REPO_OWNER: cfg.REVIEW_REPO_OWNER,
 }));
 `;
 
 const DEFAULT_HIVE_LANE = ['auriga-build', 'mnemosyne-dev', 'votum-dev'];
-const DEFAULT_REVIEW_REPO_OWNER = 'mdostal';
 
 test('AC2: partial config naming only PROJECT_IDS overrides that key, others use defaults', () => {
   const overrideIds = ['override-id-1', 'override-id-2'];
@@ -92,7 +90,6 @@ test('AC2: partial config naming only PROJECT_IDS overrides that key, others use
   const out = JSON.parse(result.stdout.trim());
   assert.deepEqual(out.PROJECT_IDS, overrideIds, 'PROJECT_IDS should come from config file');
   assert.deepEqual(out.HIVE_LANE, DEFAULT_HIVE_LANE, 'HIVE_LANE should fall back to default');
-  assert.equal(out.REVIEW_REPO_OWNER, DEFAULT_REVIEW_REPO_OWNER, 'REVIEW_REPO_OWNER should fall back to default');
 });
 
 test('AC2: PROJECT_IDS order in override is preserved (array order load-bearing)', () => {
@@ -176,6 +173,37 @@ test('PANT-261: a full tenant lane-agent override (pantheon-v2\'s real emitted s
       assert.ok(out.AGENTS[name].id, `AGENTS["${name}"] must carry a real id`);
     }
   }
+});
+
+// ---- GH #248 / PANT-935: RUNTIME_CAP['claude-review'] must not stomp _ext ----
+//
+// lib/config.mjs registers the 'claude-review' runtime bucket AFTER
+// config-substrate.mjs's `_ext.RUNTIME_CAP ?? {...}`. It used to assign it
+// unconditionally (`= 1`), so an operator-set AURIGA_CONFIG value was silently
+// reverted to 1 -- review throughput stayed pinned at one per tenant.
+const RUNTIME_CAP_SCRIPT = `
+import * as cfg from ${JSON.stringify(new URL('../lib/config.mjs', import.meta.url).pathname)};
+console.log(JSON.stringify({ RUNTIME_CAP: cfg.RUNTIME_CAP }));
+`;
+
+test('GH #248: AURIGA_CONFIG RUNTIME_CAP["claude-review"] wins over the policy default', () => {
+  const ext = { RUNTIME_CAP: { claude: 4, codex: 4, opencode: 3, 'claude-review': 2 } };
+  const result = spawnWithConfig(ext, RUNTIME_CAP_SCRIPT);
+  assert.equal(result.status, 0, `child exited ${result.status}: ${result.stderr}`);
+  const out = JSON.parse(result.stdout.trim());
+  assert.deepEqual(out.RUNTIME_CAP, ext.RUNTIME_CAP);
+});
+
+test('GH #248: AURIGA_CONFIG RUNTIME_CAP without "claude-review" still gets the default bucket of 1', () => {
+  const ext = { RUNTIME_CAP: { claude: 4, codex: 4 } };
+  const result = spawnWithConfig(ext, RUNTIME_CAP_SCRIPT);
+  assert.equal(result.status, 0, `child exited ${result.status}: ${result.stderr}`);
+  const out = JSON.parse(result.stdout.trim());
+  assert.deepEqual(out.RUNTIME_CAP, { claude: 4, codex: 4, 'claude-review': 1 });
+});
+
+test('GH #248: AURIGA_CONFIG unset - RUNTIME_CAP["claude-review"] defaults to 1', () => {
+  assert.equal(cfg.RUNTIME_CAP['claude-review'], 1);
 });
 
 // ---- AC3: fail-closed on bad AURIGA_CONFIG ----------------------------------

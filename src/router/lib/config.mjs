@@ -11,27 +11,26 @@
 // AGENTS/PROJECT_NAMES/PROJECT_IDS moved to ./config-substrate.mjs
 // (p2-multica-backlog-adapter — the substrate/policy config split; see
 // .pHive/epics/p2-adapter-interface/stories/p2-multica-backlog-adapter.yaml).
-// RUNTIME_CAP/PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE/
-// REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS moved there too, completing that
-// split (p2-multica-spawn-adapter). Imported + re-exported here (not just
-// re-exported) because this module still MUTATES AGENTS and RUNTIME_CAP
-// below (adding the 'auriga-review' agent + its runtime-cap bucket) and
-// reads PROJECT_NAMES elsewhere; re-exporting keeps every existing
+// RUNTIME_CAP/PROJECT_LANE/DEFAULT_LANE/HIVE_LANE/REVIEW_LANE moved there
+// too, completing that split (p2-multica-spawn-adapter). Imported + re-exported
+// here (not just re-exported) because this module still MUTATES AGENTS and
+// RUNTIME_CAP below (adding the 'auriga-review' agent + its runtime-cap bucket)
+// and reads PROJECT_NAMES elsewhere; re-exporting keeps every existing
 // `cfg.AGENTS` / `cfg.PROJECT_NAMES` / `cfg.PROJECT_IDS` / `cfg.RUNTIME_CAP` /
-// `cfg.PROJECT_LANE` / `cfg.DEFAULT_LANE` / `cfg.HIVE_LANE` / `cfg.REVIEW_LANE` /
-// `cfg.REVIEW_REPO_OWNER` / `cfg.REVIEW_SEARCH_REPOS` call site
-// (auriga-router.mjs, tests, scripts) working unchanged during the split.
+// `cfg.PROJECT_LANE` / `cfg.DEFAULT_LANE` / `cfg.HIVE_LANE` / `cfg.REVIEW_LANE`
+// call site (auriga-router.mjs, tests, scripts) working unchanged during the split.
 import {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
+  RUNTIME_CAPABILITIES, REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 } from './config-substrate.mjs';
 import { loadExternalConfig } from './config-loader.mjs';
 const _ext = loadExternalConfig();
+export const AGENT_LANES = _ext.AGENT_LANES ?? {};
 export {
   AGENTS, PROJECT_NAMES, PROJECT_IDS,
-  RUNTIME_CAP, PROJECT_LANE, DEFAULT_LANE, HIVE_LANE,
-  REVIEW_LANE, REVIEW_REPO_OWNER, REVIEW_SEARCH_REPOS,
+  RUNTIME_CAP, PROJECT_LANE, PROJECT_ROUTE, DEFAULT_LANE, HIVE_LANE,
+  RUNTIME_CAPABILITIES, REVIEW_LANE, FORMER_REVIEW_AGENT_IDS,
 };
 
 // Task type -> preferred model name (PAN-7938: model selection routing).
@@ -57,7 +56,24 @@ export const MODEL_FALLBACK_CHAINS = {
 // (e.g. "Mathew" matches a waiting_on of "Mathew" or "waiting on Mathew").
 // Add a name here when a new human-owned ticket needs to route to the human
 // queue (scripts/export-human-queue.mjs) instead of an agent lane.
+// PANT-1327: per-task model override and queue hold from Heimdall's route
+// verdict (heimdall#142). `enabled: false` turns both off (dispatch as before).
+// The hold is kept in issue metadata under these keys. See
+// lib/model-override.mjs for the rules.
+export const MODEL_OVERRIDE = _ext.MODEL_OVERRIDE ?? {
+  enabled: true,
+  holdUntilKey: 'heimdall_queue_until',
+  holdReasonKey: 'heimdall_queue_reason',
+};
+
 export const HUMAN_NAMES = _ext.HUMAN_NAMES ?? ['mathew', 'dostal'];
+
+// PANT-1459 (pantheon-v2#598): description phrases that mark a ticket as claimed
+// by a founder/human. Such a ticket is a human todo (isHumanTodo): never routed,
+// never re-run by assigned_idle. Same list the dragon autopilot reads as
+// `founder_claim_markers` (either spelling is accepted). "claimed by <name>" for
+// every HUMAN_NAMES entry always matches as well (lib/agent-decline.mjs).
+export const FOUNDER_CLAIM_MARKERS = _ext.FOUNDER_CLAIM_MARKERS ?? _ext.founder_claim_markers ?? [];
 
 // Batch / cadence caps.
 export const CAPS = _ext.CAPS ?? {
@@ -71,10 +87,13 @@ export const CAPS = _ext.CAPS ?? {
   perCycleFalseDone: 3, // STATUS TRUTH: at most N wrongly-done->in_review demotions per cycle (never a mass flip)
   perCycleCascade: 5, // CASCADE: at most N completion->dependent enqueues per cycle (bounded self-drain, never a mass fire)
   reviewFairnessMaxAttempts: 3, // GH #102: a ticket with this many+ accumulated runs is deprioritized (not starved) behind fresher in_review tickets for the lone perCycleReview slot (see core.mjs selectReviewDispatch)
-  reviewMaxAttempts: 5, // PANT-262: give up on review dispatch after this many accumulated runs — parallel to zombieMaxAttempts; sets blocked + posts diagnostic comment so a human can investigate the startup hang
+  reviewMaxAttempts: 5, // PANT-262: give up on review dispatch after this many accumulated runs — parallel to zombieMaxAttempts; sets blocked + posts a comment quoting the runs' real error (PANT-1025: provider quota failures don't count)
   assignedIdleStaleMs: 10 * 60 * 1000, // PAN-7492: assigned todo older than this is re-dispatched
+  assignedIdleQueuedStaleMs: Infinity, // PANT-1154 / auriga#261: a queued, never-started run is never treated as idle (rerun would cancel it and lose its queue place)
   assignedIdlePerCycle: 5, // total recoveries per cycle; per-agent count is capacity-bound (PAN-8244), not a flat 1
+  assignedIdleNoProgressRuns: 3, // PANT-1459: stop re-running an assigned todo whose assignee's last N completed runs delivered no PR/push/commit; unassign + park instead (0 = off). A run that declines the ticket parks it at once.
   redispatchCooldownMs: 15 * 60 * 1000, // IDEMPOTENT DISPATCH: never cascade-re-dispatch a story whose last run finished < 15 min ago (PAN-7771)
+  decisionSkipWindowCycles: 10, // PANT-816: at most one `skip` decision record per issue per N cycles (see lib/decisions.mjs)
 };
 
 // ============================================================================
@@ -102,8 +121,12 @@ export const CAPS = _ext.CAPS ?? {
 // object was already built, which would silently stomp any future
 // tenant-scoped AGENTS override for this one agent. Only the runtime-cap
 // bucket registration is still this "policy" file's job.
-
-RUNTIME_CAP['claude-review'] = 1;
+//
+// `??=`, not `=` (GH #248 / PANT-935): this runs AFTER config-substrate.mjs's
+// `_ext.RUNTIME_CAP ?? {...}`, so an unconditional assignment silently
+// reverted an operator's AURIGA_CONFIG `RUNTIME_CAP["claude-review"]` to 1.
+// Only default the bucket when the external config doesn't set it.
+RUNTIME_CAP['claude-review'] ??= 1;
 
 // REVIEW_LANE/REVIEW_REPO_OWNER/REVIEW_SEARCH_REPOS themselves now live in
 // ./config-substrate.mjs (imported + re-exported above) — see that file for
